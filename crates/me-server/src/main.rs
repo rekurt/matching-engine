@@ -81,13 +81,38 @@ async fn main() {
 
     let router = Arc::new(router);
 
+    // Graceful shutdown channel
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // Handle SIGTERM/SIGINT for graceful shutdown.
+    tokio::spawn(async move {
+        let ctrl_c = tokio::signal::ctrl_c();
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+            tokio::select! {
+                _ = ctrl_c => {}
+                _ = sigterm.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            ctrl_c.await.ok();
+        }
+        eprintln!("Received shutdown signal");
+        let _ = shutdown_tx.send(true);
+    });
+
     // Spawn optional UDS listener
     if let Some(ref uds_path) = cli.uds_path {
         let uds_server = UdsServer::new(Arc::clone(&router));
         let path = uds_path.clone();
+        let uds_shutdown = shutdown_rx.clone();
         tokio::spawn(async move {
             eprintln!("UDS listening on {path}");
-            if let Err(e) = uds_server.listen(&path).await {
+            if let Err(e) = uds_server.listen(&path, uds_shutdown).await {
                 eprintln!("UDS server error: {e}");
             }
         });
@@ -96,7 +121,7 @@ async fn main() {
     // TCP listener (blocks)
     let tcp_server = TcpServer::new(Arc::clone(&router));
     eprintln!("TCP listening on {}", cli.tcp_addr);
-    if let Err(e) = tcp_server.listen(&cli.tcp_addr).await {
+    if let Err(e) = tcp_server.listen(&cli.tcp_addr, shutdown_rx).await {
         eprintln!("TCP server error: {e}");
         std::process::exit(1);
     }

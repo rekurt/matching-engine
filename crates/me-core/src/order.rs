@@ -44,7 +44,7 @@ pub enum OrderStatus {
 
 /// Core order struct. 72 bytes, cache-line friendly.
 /// Fields ordered to minimize padding.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(C)]
 pub struct Order {
     pub id: OrderId,
