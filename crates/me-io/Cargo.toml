@@ -1,0 +1,10 @@
+[package]
+name = "me-io"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+me-core = { workspace = true }
+me-engine = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }

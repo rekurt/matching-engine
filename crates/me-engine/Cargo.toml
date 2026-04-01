@@ -1,0 +1,10 @@
+[package]
+name = "me-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+me-core = { workspace = true }
+me-book = { workspace = true }
+crossbeam-channel = { workspace = true }
+rustc-hash = { workspace = true }
