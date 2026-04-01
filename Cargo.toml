@@ -7,6 +7,7 @@ members = [
     "crates/me-persist",
     "crates/me-io",
     "crates/me-bench",
+    "crates/me-datagen",
 ]
 
 [workspace.dependencies]
@@ -15,6 +16,8 @@ me-book = { path = "crates/me-book" }
 me-engine = { path = "crates/me-engine" }
 me-persist = { path = "crates/me-persist" }
 me-io = { path = "crates/me-io" }
+clap = { version = "4", features = ["derive"] }
+rand = "0.9"
 rustc-hash = "2.1"
 crossbeam-channel = "0.5"
 bincode = "2.0.0-rc.3"

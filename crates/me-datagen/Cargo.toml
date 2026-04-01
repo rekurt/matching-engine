@@ -1,0 +1,15 @@
+[package]
+name = "me-datagen"
+version = "0.1.0"
+edition = "2021"
+description = "Realistic order flow data generator for the matching engine"
+
+[[bin]]
+name = "me-datagen"
+path = "src/main.rs"
+
+[dependencies]
+me-core = { workspace = true }
+me-engine = { workspace = true }
+clap = { workspace = true }
+rand = { workspace = true }

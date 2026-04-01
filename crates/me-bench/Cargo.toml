@@ -18,3 +18,7 @@ harness = false
 [[bench]]
 name = "latency"
 harness = false
+
+[[bench]]
+name = "e2e"
+harness = false
