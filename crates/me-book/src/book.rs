@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use rustc_hash::FxHashMap;
 
 use me_core::order::Order;
-use me_core::types::{FixedPrice, FixedQty, OrderId, SequenceId, Side, SymbolId, TradeId};
 use me_core::symbol::SymbolConfig;
+use me_core::types::{FixedPrice, FixedQty, OrderId, SequenceId, Side, SymbolId, TradeId};
 
 use crate::pool::{Slab, SlabKey};
 use crate::price_level::{OrderNode, PriceLevel};
@@ -192,12 +192,12 @@ impl OrderBook {
 
     /// Get the first (best) ask price level.
     pub fn best_ask_level(&self) -> Option<(&FixedPrice, &PriceLevel)> {
-        self.asks.iter().next().map(|(p, l)| (p, l))
+        self.asks.iter().next()
     }
 
     /// Get mutable access to the best ask level.
     pub fn best_ask_level_mut(&mut self) -> Option<(&FixedPrice, &mut PriceLevel)> {
-        self.asks.iter_mut().next().map(|(p, l)| (p, l))
+        self.asks.iter_mut().next()
     }
 
     /// Get the first (best) bid price level.
@@ -279,12 +279,12 @@ impl OrderBook {
     fn update_best_after_insert(&mut self, side: Side, price: FixedPrice) {
         match side {
             Side::Buy => {
-                if self.best_bid.map_or(true, |b| price > b) {
+                if self.best_bid.is_none_or(|b| price > b) {
                     self.best_bid = Some(price);
                 }
             }
             Side::Sell => {
-                if self.best_ask.map_or(true, |a| price < a) {
+                if self.best_ask.is_none_or(|a| price < a) {
                     self.best_ask = Some(price);
                 }
             }
@@ -324,10 +324,7 @@ impl OrderBook {
 
     /// Collect all resting orders (for snapshots).
     pub fn all_resting_orders(&self) -> Vec<Order> {
-        self.order_slab
-            .iter()
-            .map(|(_, node)| node.order)
-            .collect()
+        self.order_slab.iter().map(|(_, node)| node.order).collect()
     }
 }
 

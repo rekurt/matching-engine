@@ -32,6 +32,12 @@ pub struct StopBook {
     stop_index: FxHashMap<OrderId, StopLocation>,
 }
 
+impl Default for StopBook {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StopBook {
     pub fn new() -> Self {
         Self {
@@ -58,7 +64,7 @@ impl StopBook {
 
         match side {
             Side::Buy => {
-                let orders = self.stop_buys.entry(stop_price).or_insert_with(Vec::new);
+                let orders = self.stop_buys.entry(stop_price).or_default();
                 let idx = orders.len();
                 orders.push(order);
                 self.stop_index.insert(
@@ -71,10 +77,7 @@ impl StopBook {
                 );
             }
             Side::Sell => {
-                let orders = self
-                    .stop_sells
-                    .entry(Reverse(stop_price))
-                    .or_insert_with(Vec::new);
+                let orders = self.stop_sells.entry(Reverse(stop_price)).or_default();
                 let idx = orders.len();
                 orders.push(order);
                 self.stop_index.insert(
@@ -165,7 +168,7 @@ impl StopBook {
 
         // Trigger stop-buys: price >= stop_price (ascending order)
         let mut triggered_buy_prices = Vec::new();
-        for (&stop_price, _) in &self.stop_buys {
+        for &stop_price in self.stop_buys.keys() {
             if last_trade_price >= stop_price {
                 triggered_buy_prices.push(stop_price);
             } else {
@@ -190,7 +193,7 @@ impl StopBook {
 
         // Trigger stop-sells: price <= stop_price (descending order)
         let mut triggered_sell_prices = Vec::new();
-        for (&Reverse(stop_price), _) in &self.stop_sells {
+        for &Reverse(stop_price) in self.stop_sells.keys() {
             if last_trade_price <= stop_price {
                 triggered_sell_prices.push(stop_price);
             } else {
@@ -224,10 +227,10 @@ impl StopBook {
     /// Get all pending stop orders (for snapshots).
     pub fn all_stop_orders(&self) -> Vec<Order> {
         let mut orders = Vec::new();
-        for (_, level_orders) in &self.stop_buys {
+        for level_orders in self.stop_buys.values() {
             orders.extend_from_slice(level_orders);
         }
-        for (_, level_orders) in &self.stop_sells {
+        for level_orders in self.stop_sells.values() {
             orders.extend_from_slice(level_orders);
         }
         orders

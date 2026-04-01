@@ -114,9 +114,9 @@ impl Engine {
                 .unwrap_or_default()
                 .as_nanos() as u64;
 
-            let triggered = self
-                .stop_book
-                .check_triggers(trigger_price, timestamp, &mut self.events);
+            let triggered =
+                self.stop_book
+                    .check_triggers(trigger_price, timestamp, &mut self.events);
 
             if triggered.is_empty() {
                 break;
@@ -142,14 +142,10 @@ impl Engine {
 
     /// Find the last trade price from the current events buffer.
     fn find_last_trade_price(&self) -> Option<FixedPrice> {
-        self.events
-            .events()
-            .iter()
-            .rev()
-            .find_map(|e| match e {
-                MatchEvent::Trade(t) => Some(t.price),
-                _ => None,
-            })
+        self.events.events().iter().rev().find_map(|e| match e {
+            MatchEvent::Trade(t) => Some(t.price),
+            _ => None,
+        })
     }
 
     /// Access the order book (for queries/snapshots).

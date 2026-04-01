@@ -5,7 +5,6 @@
 /// │ len: u32 │ type: u8 │ seq: u64 │ payload: [u8]   │
 /// │ 4 bytes  │ 1 byte   │ 8 bytes  │ variable        │
 /// └──────────┴──────────┴──────────┴─────────────────┘
-
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageType {

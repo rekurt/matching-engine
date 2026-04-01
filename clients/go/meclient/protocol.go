@@ -7,64 +7,66 @@ import (
 	"io"
 )
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 // Frame header sizes.
 const (
 	frameLenSize  = 4 // u32 length prefix
 	frameTypeSize = 1 // u8 message type
 	frameSeqSize  = 8 // u64 sequence number
-	frameHdrSize  = frameTypeSize + frameSeqSize // type + seq inside the frame
+	frameHeaderSize = frameLenSize + frameTypeSize + frameSeqSize // 13 bytes
 )
 
-// Inbound message type codes.
+// Inbound message type IDs (client to engine).
 const (
-	typePlaceOrder  uint8 = 0x01
-	typeCancelOrder uint8 = 0x02
-	typeAmendOrder  uint8 = 0x03
+	MsgPlaceOrder  uint8 = 0x01
+	MsgCancelOrder uint8 = 0x02
+	MsgAmendOrder  uint8 = 0x03
 )
 
-// Payload sizes for fixed-length inbound messages.
+// Outbound message type IDs (engine to client).
+const (
+	MsgOrderAccepted      uint8 = 0x10
+	MsgOrderRejected      uint8 = 0x11
+	MsgTrade              uint8 = 0x12
+	MsgOrderFilled        uint8 = 0x13
+	MsgOrderPartiallyFilled uint8 = 0x14
+	MsgOrderCancelled     uint8 = 0x15
+	MsgOrderAmended       uint8 = 0x16
+	MsgStopTriggered      uint8 = 0x17
+)
+
+// Expected payload sizes for outbound messages.
 const (
 	placeOrderPayloadSize  = 37
 	cancelOrderPayloadSize = 10
-)
 
-// Payload sizes for fixed-length outbound messages.
-const (
-	orderAcceptedPayloadSize        = 16
-	orderRejectedPayloadSize        = 17
-	tradePayloadSize                = 51
-	orderFilledPayloadSize          = 32
+	orderAcceptedPayloadSize      = 16
+	orderRejectedPayloadSize      = 17
+	tradePayloadSize              = 51
+	orderFilledPayloadSize        = 32
 	orderPartiallyFilledPayloadSize = 40
-	orderCancelledPayloadSize       = 24
-	orderAmendedPayloadSize         = 32
-	stopTriggeredPayloadSize        = 24
+	orderCancelledPayloadSize     = 24
+	orderAmendedPayloadSize       = 32
+	stopTriggeredPayloadSize      = 24
 )
 
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
+// MaxFrameSize is the maximum allowed frame size to prevent excessive memory
+// allocation from malformed data.
+const MaxFrameSize = 1 << 20 // 1 MiB
 
 var (
-	// ErrIncompleteFrame is returned when not enough bytes are available.
-	ErrIncompleteFrame = errors.New("meclient: incomplete frame")
-	// ErrInvalidMessageType is returned for unknown message type codes.
-	ErrInvalidMessageType = errors.New("meclient: invalid message type")
-	// ErrInvalidPayloadSize is returned when payload length does not match expected.
+	// ErrFrameTooLarge is returned when a frame exceeds MaxFrameSize.
+	ErrFrameTooLarge = errors.New("meclient: frame too large")
+	// ErrInvalidPayloadSize is returned when a payload has an unexpected size.
 	ErrInvalidPayloadSize = errors.New("meclient: invalid payload size")
+	// ErrUnknownMessageType is returned for unrecognized message types.
+	ErrUnknownMessageType = errors.New("meclient: unknown message type")
 )
 
-// ---------------------------------------------------------------------------
-// Encoding helpers (client -> engine)
-// ---------------------------------------------------------------------------
-
-// EncodeFrame wraps a typed payload into a length-prefixed frame.
-// The length field covers type (1) + seq (8) + payload.
+// EncodeFrame encodes a frame with the given type, sequence number, and
+// payload into a byte slice ready for transmission.
 func EncodeFrame(msgType uint8, seq uint64, payload []byte) []byte {
-	innerLen := uint32(frameHdrSize + len(payload))
+	// Total frame: 4 (len) + 1 (type) + 8 (seq) + len(payload)
+	innerLen := uint32(frameTypeSize + frameSeqSize + len(payload))
 	buf := make([]byte, frameLenSize+int(innerLen))
 	binary.LittleEndian.PutUint32(buf[0:4], innerLen)
 	buf[4] = msgType
@@ -73,191 +75,313 @@ func EncodeFrame(msgType uint8, seq uint64, payload []byte) []byte {
 	return buf
 }
 
-// EncodePlaceOrder serialises a PlaceOrderMsg into a wire frame.
-func EncodePlaceOrder(seq uint64, msg *PlaceOrderMsg) []byte {
-	payload := make([]byte, placeOrderPayloadSize)
-	binary.LittleEndian.PutUint64(payload[0:8], msg.OrderID)
-	binary.LittleEndian.PutUint16(payload[8:10], msg.SymbolID)
-	payload[10] = uint8(msg.Side)
-	payload[11] = uint8(msg.OrderType)
-	payload[12] = uint8(msg.TimeInForce)
-	binary.LittleEndian.PutUint64(payload[13:21], uint64(msg.Price.Raw()))
-	binary.LittleEndian.PutUint64(payload[21:29], uint64(msg.StopPrice.Raw()))
-	binary.LittleEndian.PutUint64(payload[29:37], msg.Qty.RawUnsigned())
-	return EncodeFrame(typePlaceOrder, seq, payload)
-}
-
-// EncodeCancelOrder serialises a CancelOrderMsg into a wire frame.
-func EncodeCancelOrder(seq uint64, msg *CancelOrderMsg) []byte {
-	payload := make([]byte, cancelOrderPayloadSize)
-	binary.LittleEndian.PutUint64(payload[0:8], msg.OrderID)
-	binary.LittleEndian.PutUint16(payload[8:10], msg.SymbolID)
-	return EncodeFrame(typeCancelOrder, seq, payload)
-}
-
-// EncodeAmendOrder serialises an AmendOrderMsg into a wire frame.
-func EncodeAmendOrder(seq uint64, msg *AmendOrderMsg) []byte {
-	// Base: OrderID(8) + SymbolID(2) + HasPrice(1) + [Price(8)] + HasQty(1) + [Qty(8)]
-	size := 8 + 2 + 1
-	if msg.HasPrice {
-		size += 8
-	}
-	size += 1
-	if msg.HasQty {
-		size += 8
-	}
-	payload := make([]byte, size)
-	off := 0
-	binary.LittleEndian.PutUint64(payload[off:off+8], msg.OrderID)
-	off += 8
-	binary.LittleEndian.PutUint16(payload[off:off+2], msg.SymbolID)
-	off += 2
-	if msg.HasPrice {
-		payload[off] = 1
-		off++
-		binary.LittleEndian.PutUint64(payload[off:off+8], uint64(msg.Price.Raw()))
-		off += 8
-	} else {
-		payload[off] = 0
-		off++
-	}
-	if msg.HasQty {
-		payload[off] = 1
-		off++
-		binary.LittleEndian.PutUint64(payload[off:off+8], msg.Qty.RawUnsigned())
-	} else {
-		payload[off] = 0
-	}
-	return EncodeFrame(typeAmendOrder, seq, payload)
-}
-
-// ---------------------------------------------------------------------------
-// Decoding helpers (engine -> client)
-// ---------------------------------------------------------------------------
-
-// ReadFrame reads a single length-prefixed frame from r and returns the
-// message type, sequence number, and payload bytes. It blocks until a full
-// frame is available or an error (including io.EOF) occurs.
+// ReadFrame reads a single frame from the reader. It returns the message type,
+// sequence number, and payload. It returns io.EOF if the connection is closed
+// cleanly.
 func ReadFrame(r io.Reader) (msgType uint8, seq uint64, payload []byte, err error) {
 	// Read length prefix.
 	var lenBuf [frameLenSize]byte
 	if _, err = io.ReadFull(r, lenBuf[:]); err != nil {
-		return
+		return 0, 0, nil, err
 	}
 	innerLen := binary.LittleEndian.Uint32(lenBuf[:])
-	if innerLen < uint32(frameHdrSize) {
-		err = ErrIncompleteFrame
-		return
+	if innerLen < uint32(frameTypeSize+frameSeqSize) {
+		return 0, 0, nil, fmt.Errorf("meclient: frame inner length %d too small", innerLen)
+	}
+	if innerLen > uint32(MaxFrameSize) {
+		return 0, 0, nil, ErrFrameTooLarge
 	}
 
+	// Read the rest of the frame.
 	inner := make([]byte, innerLen)
 	if _, err = io.ReadFull(r, inner); err != nil {
-		return
+		return 0, 0, nil, err
 	}
 
 	msgType = inner[0]
 	seq = binary.LittleEndian.Uint64(inner[1:9])
 	payload = inner[9:]
-	return
+	return msgType, seq, payload, nil
 }
 
-// DecodeEvent decodes a raw frame (type + seq + payload) into a typed Event.
-func DecodeEvent(msgType uint8, seq uint64, payload []byte) (*Event, error) {
-	mt := MessageType(msgType)
-	ev := &Event{Seq: seq, Type: mt}
+// EncodePlaceOrder encodes a PlaceOrder request into payload bytes.
+func EncodePlaceOrder(req *PlaceOrderRequest) []byte {
+	buf := make([]byte, placeOrderPayloadSize)
+	binary.LittleEndian.PutUint64(buf[0:8], req.OrderId)
+	binary.LittleEndian.PutUint16(buf[8:10], req.SymbolId)
+	buf[10] = uint8(req.Side)
+	buf[11] = uint8(req.OrderType)
+	buf[12] = uint8(req.TimeInForce)
+	binary.LittleEndian.PutUint64(buf[13:21], uint64(req.Price.Raw()))
+	binary.LittleEndian.PutUint64(buf[21:29], uint64(req.StopPrice.Raw()))
+	binary.LittleEndian.PutUint64(buf[29:37], req.Qty.RawUint64())
+	return buf
+}
 
-	switch mt {
-	case MsgOrderAccepted:
-		if len(payload) < orderAcceptedPayloadSize {
-			return nil, fmt.Errorf("%w: OrderAccepted expects %d bytes, got %d", ErrInvalidPayloadSize, orderAcceptedPayloadSize, len(payload))
-		}
-		ev.OrderAccepted = &OrderAccepted{
-			OrderID:   binary.LittleEndian.Uint64(payload[0:8]),
-			Timestamp: binary.LittleEndian.Uint64(payload[8:16]),
-		}
+// DecodePlaceOrder decodes a PlaceOrder payload.
+func DecodePlaceOrder(data []byte) (*PlaceOrderRequest, error) {
+	if len(data) != placeOrderPayloadSize {
+		return nil, fmt.Errorf("%w: PlaceOrder expected %d bytes, got %d", ErrInvalidPayloadSize, placeOrderPayloadSize, len(data))
+	}
+	return &PlaceOrderRequest{
+		OrderId:     binary.LittleEndian.Uint64(data[0:8]),
+		SymbolId:    binary.LittleEndian.Uint16(data[8:10]),
+		Side:        Side(data[10]),
+		OrderType:   OrderType(data[11]),
+		TimeInForce: TimeInForce(data[12]),
+		Price:       NewDecimalRaw(int64(binary.LittleEndian.Uint64(data[13:21]))),
+		StopPrice:   NewDecimalRaw(int64(binary.LittleEndian.Uint64(data[21:29]))),
+		Qty:         NewDecimalFromUint64(binary.LittleEndian.Uint64(data[29:37])),
+	}, nil
+}
 
-	case MsgOrderRejected:
-		if len(payload) < orderRejectedPayloadSize {
-			return nil, fmt.Errorf("%w: OrderRejected expects %d bytes, got %d", ErrInvalidPayloadSize, orderRejectedPayloadSize, len(payload))
-		}
-		ev.OrderRejected = &OrderRejected{
-			OrderID:   binary.LittleEndian.Uint64(payload[0:8]),
-			Reason:    RejectReason(payload[8]),
-			Timestamp: binary.LittleEndian.Uint64(payload[9:17]),
-		}
+// EncodeCancelOrder encodes a CancelOrder request into payload bytes.
+func EncodeCancelOrder(req *CancelOrderRequest) []byte {
+	buf := make([]byte, cancelOrderPayloadSize)
+	binary.LittleEndian.PutUint64(buf[0:8], req.OrderId)
+	binary.LittleEndian.PutUint16(buf[8:10], req.SymbolId)
+	return buf
+}
 
-	case MsgTrade:
-		if len(payload) < tradePayloadSize {
-			return nil, fmt.Errorf("%w: Trade expects %d bytes, got %d", ErrInvalidPayloadSize, tradePayloadSize, len(payload))
-		}
-		ev.Trade = &Trade{
-			TradeID:      binary.LittleEndian.Uint64(payload[0:8]),
-			SymbolID:     binary.LittleEndian.Uint16(payload[8:10]),
-			Price:        DecimalFromRaw(int64(binary.LittleEndian.Uint64(payload[10:18]))),
-			Qty:          UnsignedDecimalFromRaw(binary.LittleEndian.Uint64(payload[18:26])),
-			MakerOrderID: binary.LittleEndian.Uint64(payload[26:34]),
-			TakerOrderID: binary.LittleEndian.Uint64(payload[34:42]),
-			MakerSide:    Side(payload[42]),
-			Timestamp:    binary.LittleEndian.Uint64(payload[43:51]),
-		}
+// DecodeCancelOrder decodes a CancelOrder payload.
+func DecodeCancelOrder(data []byte) (*CancelOrderRequest, error) {
+	if len(data) != cancelOrderPayloadSize {
+		return nil, fmt.Errorf("%w: CancelOrder expected %d bytes, got %d", ErrInvalidPayloadSize, cancelOrderPayloadSize, len(data))
+	}
+	return &CancelOrderRequest{
+		OrderId:  binary.LittleEndian.Uint64(data[0:8]),
+		SymbolId: binary.LittleEndian.Uint16(data[8:10]),
+	}, nil
+}
 
-	case MsgOrderFilled:
-		if len(payload) < orderFilledPayloadSize {
-			return nil, fmt.Errorf("%w: OrderFilled expects %d bytes, got %d", ErrInvalidPayloadSize, orderFilledPayloadSize, len(payload))
-		}
-		ev.OrderFilled = &OrderFilled{
-			OrderID:   binary.LittleEndian.Uint64(payload[0:8]),
-			FilledQty: UnsignedDecimalFromRaw(binary.LittleEndian.Uint64(payload[8:16])),
-			Price:     DecimalFromRaw(int64(binary.LittleEndian.Uint64(payload[16:24]))),
-			Timestamp: binary.LittleEndian.Uint64(payload[24:32]),
-		}
-
-	case MsgOrderPartiallyFilled:
-		if len(payload) < orderPartiallyFilledPayloadSize {
-			return nil, fmt.Errorf("%w: OrderPartiallyFilled expects %d bytes, got %d", ErrInvalidPayloadSize, orderPartiallyFilledPayloadSize, len(payload))
-		}
-		ev.OrderPartiallyFilled = &OrderPartiallyFilled{
-			OrderID:      binary.LittleEndian.Uint64(payload[0:8]),
-			FilledQty:    UnsignedDecimalFromRaw(binary.LittleEndian.Uint64(payload[8:16])),
-			RemainingQty: UnsignedDecimalFromRaw(binary.LittleEndian.Uint64(payload[16:24])),
-			Price:        DecimalFromRaw(int64(binary.LittleEndian.Uint64(payload[24:32]))),
-			Timestamp:    binary.LittleEndian.Uint64(payload[32:40]),
-		}
-
-	case MsgOrderCancelled:
-		if len(payload) < orderCancelledPayloadSize {
-			return nil, fmt.Errorf("%w: OrderCancelled expects %d bytes, got %d", ErrInvalidPayloadSize, orderCancelledPayloadSize, len(payload))
-		}
-		ev.OrderCancelled = &OrderCancelled{
-			OrderID:      binary.LittleEndian.Uint64(payload[0:8]),
-			RemainingQty: UnsignedDecimalFromRaw(binary.LittleEndian.Uint64(payload[8:16])),
-			Timestamp:    binary.LittleEndian.Uint64(payload[16:24]),
-		}
-
-	case MsgOrderAmended:
-		if len(payload) < orderAmendedPayloadSize {
-			return nil, fmt.Errorf("%w: OrderAmended expects %d bytes, got %d", ErrInvalidPayloadSize, orderAmendedPayloadSize, len(payload))
-		}
-		ev.OrderAmended = &OrderAmended{
-			OrderID:   binary.LittleEndian.Uint64(payload[0:8]),
-			NewPrice:  DecimalFromRaw(int64(binary.LittleEndian.Uint64(payload[8:16]))),
-			NewQty:    UnsignedDecimalFromRaw(binary.LittleEndian.Uint64(payload[16:24])),
-			Timestamp: binary.LittleEndian.Uint64(payload[24:32]),
-		}
-
-	case MsgStopTriggered:
-		if len(payload) < stopTriggeredPayloadSize {
-			return nil, fmt.Errorf("%w: StopTriggered expects %d bytes, got %d", ErrInvalidPayloadSize, stopTriggeredPayloadSize, len(payload))
-		}
-		ev.StopTriggered = &StopTriggered{
-			OrderID:      binary.LittleEndian.Uint64(payload[0:8]),
-			TriggerPrice: DecimalFromRaw(int64(binary.LittleEndian.Uint64(payload[8:16]))),
-			Timestamp:    binary.LittleEndian.Uint64(payload[16:24]),
-		}
-
-	default:
-		return nil, fmt.Errorf("%w: 0x%02x", ErrInvalidMessageType, msgType)
+// EncodeAmendOrder encodes an AmendOrder request into payload bytes.
+func EncodeAmendOrder(req *AmendOrderRequest) []byte {
+	// Base: 8 (OrderId) + 2 (SymbolId) + 1 (HasPrice) + optional 8 + 1 (HasQty) + optional 8
+	size := 10 + 1 // orderId + symbolId + hasPrice
+	if req.Price != nil {
+		size += 8
+	}
+	size += 1 // hasQty
+	if req.Qty != nil {
+		size += 8
 	}
 
-	return ev, nil
+	buf := make([]byte, size)
+	off := 0
+	binary.LittleEndian.PutUint64(buf[off:off+8], req.OrderId)
+	off += 8
+	binary.LittleEndian.PutUint16(buf[off:off+2], req.SymbolId)
+	off += 2
+
+	if req.Price != nil {
+		buf[off] = 1
+		off++
+		binary.LittleEndian.PutUint64(buf[off:off+8], uint64(req.Price.Raw()))
+		off += 8
+	} else {
+		buf[off] = 0
+		off++
+	}
+
+	if req.Qty != nil {
+		buf[off] = 1
+		off++
+		binary.LittleEndian.PutUint64(buf[off:off+8], req.Qty.RawUint64())
+		off += 8
+	} else {
+		buf[off] = 0
+		off++
+	}
+	return buf
+}
+
+// DecodeAmendOrder decodes an AmendOrder payload.
+func DecodeAmendOrder(data []byte) (*AmendOrderRequest, error) {
+	if len(data) < 12 { // minimum: 8 + 2 + 1 (hasPrice=0) + 1 (hasQty=0)
+		return nil, fmt.Errorf("%w: AmendOrder payload too short: %d bytes", ErrInvalidPayloadSize, len(data))
+	}
+	req := &AmendOrderRequest{
+		OrderId:  binary.LittleEndian.Uint64(data[0:8]),
+		SymbolId: binary.LittleEndian.Uint16(data[8:10]),
+	}
+	off := 10
+
+	hasPrice := data[off]
+	off++
+	if hasPrice == 1 {
+		if off+8 > len(data) {
+			return nil, fmt.Errorf("%w: AmendOrder payload too short for price", ErrInvalidPayloadSize)
+		}
+		p := NewDecimalRaw(int64(binary.LittleEndian.Uint64(data[off : off+8])))
+		req.Price = &p
+		off += 8
+	}
+
+	if off >= len(data) {
+		return nil, fmt.Errorf("%w: AmendOrder payload missing HasQty", ErrInvalidPayloadSize)
+	}
+	hasQty := data[off]
+	off++
+	if hasQty == 1 {
+		if off+8 > len(data) {
+			return nil, fmt.Errorf("%w: AmendOrder payload too short for qty", ErrInvalidPayloadSize)
+		}
+		q := NewDecimalFromUint64(binary.LittleEndian.Uint64(data[off : off+8]))
+		req.Qty = &q
+		off += 8
+	}
+
+	return req, nil
+}
+
+// DecodeEvent decodes an outbound message payload into an Event.
+func DecodeEvent(msgType uint8, payload []byte) (*Event, error) {
+	switch msgType {
+	case MsgOrderAccepted:
+		e, err := decodeOrderAccepted(payload)
+		if err != nil {
+			return nil, err
+		}
+		return &Event{OrderAccepted: e}, nil
+	case MsgOrderRejected:
+		e, err := decodeOrderRejected(payload)
+		if err != nil {
+			return nil, err
+		}
+		return &Event{OrderRejected: e}, nil
+	case MsgTrade:
+		e, err := decodeTrade(payload)
+		if err != nil {
+			return nil, err
+		}
+		return &Event{Trade: e}, nil
+	case MsgOrderFilled:
+		e, err := decodeOrderFilled(payload)
+		if err != nil {
+			return nil, err
+		}
+		return &Event{OrderFilled: e}, nil
+	case MsgOrderPartiallyFilled:
+		e, err := decodeOrderPartiallyFilled(payload)
+		if err != nil {
+			return nil, err
+		}
+		return &Event{OrderPartiallyFilled: e}, nil
+	case MsgOrderCancelled:
+		e, err := decodeOrderCancelled(payload)
+		if err != nil {
+			return nil, err
+		}
+		return &Event{OrderCancelled: e}, nil
+	case MsgOrderAmended:
+		e, err := decodeOrderAmended(payload)
+		if err != nil {
+			return nil, err
+		}
+		return &Event{OrderAmended: e}, nil
+	case MsgStopTriggered:
+		e, err := decodeStopTriggered(payload)
+		if err != nil {
+			return nil, err
+		}
+		return &Event{StopTriggered: e}, nil
+	default:
+		return nil, fmt.Errorf("%w: 0x%02x", ErrUnknownMessageType, msgType)
+	}
+}
+
+func decodeOrderAccepted(data []byte) (*OrderAccepted, error) {
+	if len(data) != orderAcceptedPayloadSize {
+		return nil, fmt.Errorf("%w: OrderAccepted expected %d bytes, got %d", ErrInvalidPayloadSize, orderAcceptedPayloadSize, len(data))
+	}
+	return &OrderAccepted{
+		OrderId:   binary.LittleEndian.Uint64(data[0:8]),
+		Timestamp: binary.LittleEndian.Uint64(data[8:16]),
+	}, nil
+}
+
+func decodeOrderRejected(data []byte) (*OrderRejected, error) {
+	if len(data) != orderRejectedPayloadSize {
+		return nil, fmt.Errorf("%w: OrderRejected expected %d bytes, got %d", ErrInvalidPayloadSize, orderRejectedPayloadSize, len(data))
+	}
+	return &OrderRejected{
+		OrderId:   binary.LittleEndian.Uint64(data[0:8]),
+		Reason:    RejectReason(data[8]),
+		Timestamp: binary.LittleEndian.Uint64(data[9:17]),
+	}, nil
+}
+
+func decodeTrade(data []byte) (*Trade, error) {
+	if len(data) != tradePayloadSize {
+		return nil, fmt.Errorf("%w: Trade expected %d bytes, got %d", ErrInvalidPayloadSize, tradePayloadSize, len(data))
+	}
+	return &Trade{
+		TradeId:      binary.LittleEndian.Uint64(data[0:8]),
+		SymbolId:     binary.LittleEndian.Uint16(data[8:10]),
+		Price:        NewDecimalRaw(int64(binary.LittleEndian.Uint64(data[10:18]))),
+		Qty:          NewDecimalFromUint64(binary.LittleEndian.Uint64(data[18:26])),
+		MakerOrderId: binary.LittleEndian.Uint64(data[26:34]),
+		TakerOrderId: binary.LittleEndian.Uint64(data[34:42]),
+		MakerSide:    Side(data[42]),
+		Timestamp:    binary.LittleEndian.Uint64(data[43:51]),
+	}, nil
+}
+
+func decodeOrderFilled(data []byte) (*OrderFilled, error) {
+	if len(data) != orderFilledPayloadSize {
+		return nil, fmt.Errorf("%w: OrderFilled expected %d bytes, got %d", ErrInvalidPayloadSize, orderFilledPayloadSize, len(data))
+	}
+	return &OrderFilled{
+		OrderId:   binary.LittleEndian.Uint64(data[0:8]),
+		FilledQty: NewDecimalFromUint64(binary.LittleEndian.Uint64(data[8:16])),
+		Price:     NewDecimalRaw(int64(binary.LittleEndian.Uint64(data[16:24]))),
+		Timestamp: binary.LittleEndian.Uint64(data[24:32]),
+	}, nil
+}
+
+func decodeOrderPartiallyFilled(data []byte) (*OrderPartiallyFilled, error) {
+	if len(data) != orderPartiallyFilledPayloadSize {
+		return nil, fmt.Errorf("%w: OrderPartiallyFilled expected %d bytes, got %d", ErrInvalidPayloadSize, orderPartiallyFilledPayloadSize, len(data))
+	}
+	return &OrderPartiallyFilled{
+		OrderId:      binary.LittleEndian.Uint64(data[0:8]),
+		FilledQty:    NewDecimalFromUint64(binary.LittleEndian.Uint64(data[8:16])),
+		RemainingQty: NewDecimalFromUint64(binary.LittleEndian.Uint64(data[16:24])),
+		Price:        NewDecimalRaw(int64(binary.LittleEndian.Uint64(data[24:32]))),
+		Timestamp:    binary.LittleEndian.Uint64(data[32:40]),
+	}, nil
+}
+
+func decodeOrderCancelled(data []byte) (*OrderCancelled, error) {
+	if len(data) != orderCancelledPayloadSize {
+		return nil, fmt.Errorf("%w: OrderCancelled expected %d bytes, got %d", ErrInvalidPayloadSize, orderCancelledPayloadSize, len(data))
+	}
+	return &OrderCancelled{
+		OrderId:      binary.LittleEndian.Uint64(data[0:8]),
+		RemainingQty: NewDecimalFromUint64(binary.LittleEndian.Uint64(data[8:16])),
+		Timestamp:    binary.LittleEndian.Uint64(data[16:24]),
+	}, nil
+}
+
+func decodeOrderAmended(data []byte) (*OrderAmended, error) {
+	if len(data) != orderAmendedPayloadSize {
+		return nil, fmt.Errorf("%w: OrderAmended expected %d bytes, got %d", ErrInvalidPayloadSize, orderAmendedPayloadSize, len(data))
+	}
+	return &OrderAmended{
+		OrderId:   binary.LittleEndian.Uint64(data[0:8]),
+		NewPrice:  NewDecimalRaw(int64(binary.LittleEndian.Uint64(data[8:16]))),
+		NewQty:    NewDecimalFromUint64(binary.LittleEndian.Uint64(data[16:24])),
+		Timestamp: binary.LittleEndian.Uint64(data[24:32]),
+	}, nil
+}
+
+func decodeStopTriggered(data []byte) (*StopTriggered, error) {
+	if len(data) != stopTriggeredPayloadSize {
+		return nil, fmt.Errorf("%w: StopTriggered expected %d bytes, got %d", ErrInvalidPayloadSize, stopTriggeredPayloadSize, len(data))
+	}
+	return &StopTriggered{
+		OrderId:      binary.LittleEndian.Uint64(data[0:8]),
+		TriggerPrice: NewDecimalRaw(int64(binary.LittleEndian.Uint64(data[8:16]))),
+		Timestamp:    binary.LittleEndian.Uint64(data[16:24]),
+	}, nil
 }

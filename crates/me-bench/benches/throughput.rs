@@ -79,5 +79,9 @@ fn bench_market_order_throughput(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_limit_order_throughput, bench_market_order_throughput);
+criterion_group!(
+    benches,
+    bench_limit_order_throughput,
+    bench_market_order_throughput
+);
 criterion_main!(benches);

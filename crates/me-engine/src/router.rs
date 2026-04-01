@@ -18,6 +18,12 @@ pub struct Router {
     engines: FxHashMap<SymbolId, Engine>,
 }
 
+impl Default for Router {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Router {
     pub fn new() -> Self {
         Self {

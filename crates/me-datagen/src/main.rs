@@ -14,7 +14,10 @@ use me_engine::router::Router;
 // ─── CLI ────────────────────────────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
-#[command(name = "me-datagen", about = "Realistic order flow generator for the matching engine")]
+#[command(
+    name = "me-datagen",
+    about = "Realistic order flow generator for the matching engine"
+)]
 struct Cli {
     /// Number of orders to generate.
     #[arg(long, default_value_t = 100_000)]
@@ -320,9 +323,7 @@ fn main() {
     // Validate ratio sum.
     let ratio_sum = cli.market_ratio + cli.cancel_ratio + cli.amend_ratio;
     if ratio_sum > 1.0 {
-        eprintln!(
-            "error: market_ratio + cancel_ratio + amend_ratio = {ratio_sum:.3} exceeds 1.0"
-        );
+        eprintln!("error: market_ratio + cancel_ratio + amend_ratio = {ratio_sum:.3} exceeds 1.0");
         std::process::exit(1);
     }
 

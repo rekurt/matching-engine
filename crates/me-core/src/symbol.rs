@@ -34,10 +34,10 @@ impl SymbolConfig {
             quote: "USDT".to_string(),
             price_scale: 2,
             qty_scale: 8,
-            min_qty: FixedQty::from_raw(1_000),           // 0.00001
+            min_qty: FixedQty::from_raw(1_000), // 0.00001
             max_qty: FixedQty::from_raw(1_000_000_000_000), // 10000.0
-            qty_step: FixedQty::from_raw(1_000),           // 0.00001
-            price_step: FixedPrice::from_raw(1_000_000),   // 0.01
+            qty_step: FixedQty::from_raw(1_000), // 0.00001
+            price_step: FixedPrice::from_raw(1_000_000), // 0.01
         }
     }
 
@@ -73,18 +73,18 @@ mod tests {
         let cfg = SymbolConfig::default_btc_usdt();
         // tick = 0.01 = 1_000_000 raw
         assert!(cfg.validate_price(FixedPrice::from_raw(100_000_000_00))); // 100.00
-        assert!(cfg.validate_price(FixedPrice::from_raw(1_000_000)));     // 0.01
+        assert!(cfg.validate_price(FixedPrice::from_raw(1_000_000))); // 0.01
         assert!(!cfg.validate_price(FixedPrice::ZERO));
-        assert!(!cfg.validate_price(FixedPrice::from_raw(500_000)));      // 0.005 not on tick
+        assert!(!cfg.validate_price(FixedPrice::from_raw(500_000))); // 0.005 not on tick
     }
 
     #[test]
     fn test_validate_qty() {
         let cfg = SymbolConfig::default_btc_usdt();
-        assert!(cfg.validate_qty(FixedQty::from_raw(1_000)));      // min qty
+        assert!(cfg.validate_qty(FixedQty::from_raw(1_000))); // min qty
         assert!(cfg.validate_qty(FixedQty::from_raw(100_000_000))); // 1.0
         assert!(!cfg.validate_qty(FixedQty::ZERO));
-        assert!(!cfg.validate_qty(FixedQty::from_raw(500)));        // below min
+        assert!(!cfg.validate_qty(FixedQty::from_raw(500))); // below min
     }
 
     #[test]
@@ -99,7 +99,7 @@ mod tests {
         let mut cfg = SymbolConfig::default_btc_usdt();
         cfg.qty_step = FixedQty::from_raw(1_000_000); // 0.01
         cfg.min_qty = FixedQty::from_raw(1_000_000);
-        assert!(cfg.validate_qty(FixedQty::from_raw(3_000_000)));   // 0.03 ok
-        assert!(!cfg.validate_qty(FixedQty::from_raw(1_500_000)));  // 0.015 not on lot
+        assert!(cfg.validate_qty(FixedQty::from_raw(3_000_000))); // 0.03 ok
+        assert!(!cfg.validate_qty(FixedQty::from_raw(1_500_000))); // 0.015 not on lot
     }
 }
