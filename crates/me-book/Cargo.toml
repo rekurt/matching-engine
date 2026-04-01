@@ -1,0 +1,11 @@
+[package]
+name = "me-book"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+me-core = { workspace = true }
+rustc-hash = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
