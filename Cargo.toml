@@ -9,12 +9,14 @@ members = [
     "crates/me-bench",
     "crates/me-datagen",
     "crates/me-server",
+    "crates/me-metrics",
 ]
 
 [workspace.dependencies]
 me-core = { path = "crates/me-core" }
 me-book = { path = "crates/me-book" }
 me-engine = { path = "crates/me-engine" }
+me-metrics = { path = "crates/me-metrics" }
 me-persist = { path = "crates/me-persist" }
 me-io = { path = "crates/me-io" }
 clap = { version = "4", features = ["derive"] }
@@ -25,6 +27,7 @@ bincode = "2.0.0-rc.3"
 crc32fast = "1.4"
 tokio = { version = "1", features = ["net", "rt-multi-thread", "io-util", "macros"] }
 bytes = "1"
+prometheus = "0.13"
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1"
 serde = { version = "1", features = ["derive"] }

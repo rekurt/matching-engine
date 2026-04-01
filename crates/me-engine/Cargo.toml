@@ -8,3 +8,6 @@ me-core = { workspace = true }
 me-book = { workspace = true }
 crossbeam-channel = { workspace = true }
 rustc-hash = { workspace = true }
+
+[dev-dependencies]
+me-persist = { workspace = true }
