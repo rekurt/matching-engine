@@ -53,10 +53,7 @@ impl WalWriter {
     /// Open or create a WAL file.
     pub fn open(path: impl AsRef<Path>, sync_interval: u64) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
 
         Ok(Self {
             writer: BufWriter::new(file),
@@ -220,9 +217,7 @@ mod tests {
                 FixedQty::from_f64(1.0),
                 1000,
             );
-            writer
-                .append(&WalCommand::PlaceOrder(order))
-                .unwrap();
+            writer.append(&WalCommand::PlaceOrder(order)).unwrap();
             writer
                 .append(&WalCommand::CancelOrder {
                     order_id: 1,

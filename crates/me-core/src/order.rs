@@ -120,6 +120,7 @@ impl Order {
     }
 
     /// Create a new stop-limit order.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_stop_limit(
         id: OrderId,
         symbol: SymbolId,
@@ -179,7 +180,10 @@ impl Order {
     /// Whether this order is a stop order (not yet triggered).
     #[inline]
     pub fn is_stop(&self) -> bool {
-        matches!(self.order_type, OrderType::StopLimit | OrderType::StopMarket)
+        matches!(
+            self.order_type,
+            OrderType::StopLimit | OrderType::StopMarket
+        )
     }
 
     /// Convert a triggered stop order to its active form.

@@ -38,9 +38,7 @@ impl SnapshotManager {
     pub fn new(snapshot_dir: impl AsRef<Path>) -> io::Result<Self> {
         let dir = snapshot_dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
-        Ok(Self {
-            snapshot_dir: dir,
-        })
+        Ok(Self { snapshot_dir: dir })
     }
 
     /// Save a snapshot for a symbol.
@@ -96,11 +94,11 @@ impl SnapshotManager {
             .filter(|e| {
                 e.file_name()
                     .to_str()
-                    .map_or(false, |n| n.starts_with(&prefix) && n.ends_with(".bin"))
+                    .is_some_and(|n| n.starts_with(&prefix) && n.ends_with(".bin"))
             })
             .collect();
 
-        snapshots.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+        snapshots.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
 
         match snapshots.first() {
             Some(entry) => {
@@ -118,7 +116,10 @@ impl SnapshotManager {
 
         // Verify CRC (last 4 bytes)
         if data.len() < 4 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Snapshot too short"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Snapshot too short",
+            ));
         }
         let payload = &data[..data.len() - 4];
         let stored_crc = u32::from_le_bytes(data[data.len() - 4..].try_into().unwrap());
@@ -153,7 +154,9 @@ impl SnapshotManager {
         }
 
         // Symbol
-        let symbol = SymbolId(u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap()));
+        let symbol = SymbolId(u16::from_le_bytes(
+            payload[offset..offset + 2].try_into().unwrap(),
+        ));
         offset += 2;
 
         // Sequence
@@ -205,11 +208,11 @@ impl SnapshotManager {
             .filter(|e| {
                 e.file_name()
                     .to_str()
-                    .map_or(false, |n| n.starts_with(&prefix) && n.ends_with(".bin"))
+                    .is_some_and(|n| n.starts_with(&prefix) && n.ends_with(".bin"))
             })
             .collect();
 
-        snapshots.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+        snapshots.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
 
         for old in snapshots.iter().skip(keep) {
             fs::remove_file(old.path())?;
@@ -227,9 +230,7 @@ mod tests {
     use std::fs;
 
     fn temp_snapshot_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join("me_snapshot_tests")
-            .join(name);
+        let dir = std::env::temp_dir().join("me_snapshot_tests").join(name);
         let _ = fs::remove_dir_all(&dir);
         dir
     }

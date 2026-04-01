@@ -134,8 +134,8 @@ impl PriceLevelIter {
 mod tests {
     use super::*;
     use me_core::order::Order;
-    use me_core::types::*;
     use me_core::order::TimeInForce;
+    use me_core::types::*;
 
     fn make_order(id: OrderId, qty: f64) -> Order {
         Order::new_limit(

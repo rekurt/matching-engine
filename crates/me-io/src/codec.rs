@@ -77,7 +77,11 @@ fn decode_place_order(payload: &[u8], _seq: u64) -> Result<Command, DecodeError>
         1 => OrderType::Market,
         2 => OrderType::StopLimit,
         3 => OrderType::StopMarket,
-        v => return Err(DecodeError::InvalidPayload(format!("Invalid order type: {v}"))),
+        v => {
+            return Err(DecodeError::InvalidPayload(format!(
+                "Invalid order type: {v}"
+            )))
+        }
     };
     let tif = match payload[12] {
         0 => TimeInForce::GTC,
@@ -156,7 +160,9 @@ fn decode_amend_order(payload: &[u8], _seq: u64) -> Result<Command, DecodeError>
     let new_qty = if offset < payload.len() && payload[offset] == 1 {
         offset += 1;
         if offset + 8 > payload.len() {
-            return Err(DecodeError::InvalidPayload("AmendOrder qty truncated".into()));
+            return Err(DecodeError::InvalidPayload(
+                "AmendOrder qty truncated".into(),
+            ));
         }
         let q = u64::from_le_bytes(payload[offset..offset + 8].try_into().unwrap());
         Some(FixedQty::from_raw(q))
@@ -242,7 +248,12 @@ fn encode_event(event: &MatchEvent, seq: u64, buf: &mut BytesMut) {
             timestamp,
         } => {
             let payload_len = 40u32;
-            write_header(buf, payload_len, MessageType::OrderPartiallyFilled as u8, seq);
+            write_header(
+                buf,
+                payload_len,
+                MessageType::OrderPartiallyFilled as u8,
+                seq,
+            );
             buf.put_u64_le(*order_id);
             buf.put_u64_le(filled_qty.raw());
             buf.put_u64_le(remaining_qty.raw());

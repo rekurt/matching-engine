@@ -8,6 +8,7 @@ members = [
     "crates/me-io",
     "crates/me-bench",
     "crates/me-datagen",
+    "crates/me-server",
 ]
 
 [workspace.dependencies]

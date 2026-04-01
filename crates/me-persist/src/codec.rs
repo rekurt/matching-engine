@@ -6,7 +6,6 @@ use crate::wal::WalCommand;
 /// Simple binary encoding for WAL commands.
 /// Format: [tag: u8][fields...]
 /// All integers are little-endian.
-
 const TAG_PLACE_ORDER: u8 = 1;
 const TAG_CANCEL_ORDER: u8 = 2;
 const TAG_AMEND_ORDER: u8 = 3;
@@ -156,7 +155,10 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
     use me_core::types::Side;
 
     if data.len() < ORDER_ENCODED_SIZE {
-        return Err(format!("Order data too short: {} < {ORDER_ENCODED_SIZE}", data.len()));
+        return Err(format!(
+            "Order data too short: {} < {ORDER_ENCODED_SIZE}",
+            data.len()
+        ));
     }
 
     let id = u64::from_le_bytes(data[0..8].try_into().unwrap());

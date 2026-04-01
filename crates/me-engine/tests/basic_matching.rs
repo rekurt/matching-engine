@@ -1,6 +1,5 @@
 /// Integration tests: Limit orders, Market orders, Price-Time priority
 /// Covers test scenarios A (1-8), B (9-22), D (36-40) from the plan.
-
 use me_core::events::{EventBuffer, MatchEvent, RejectReason};
 use me_core::order::{Order, OrderStatus, OrderType, TimeInForce};
 use me_core::symbol::SymbolConfig;
@@ -70,7 +69,10 @@ fn market_buy_fok(id: OrderId, qty: f64) -> Command {
 }
 
 fn count_trades(events: &[MatchEvent]) -> usize {
-    events.iter().filter(|e| matches!(e, MatchEvent::Trade(_))).count()
+    events
+        .iter()
+        .filter(|e| matches!(e, MatchEvent::Trade(_)))
+        .count()
 }
 
 fn has_event_type(events: &[MatchEvent], pred: impl Fn(&MatchEvent) -> bool) -> bool {
@@ -87,8 +89,14 @@ fn test_a1_limit_buy_crosses_one_ask() {
     let events = e.process(limit_buy(2, 100.0, 1.0)).to_vec();
 
     assert!(count_trades(&events) >= 1);
-    assert!(has_event_type(&events, |ev| matches!(ev, MatchEvent::OrderFilled { order_id: 1, .. })));
-    assert!(has_event_type(&events, |ev| matches!(ev, MatchEvent::OrderFilled { order_id: 2, .. })));
+    assert!(has_event_type(&events, |ev| matches!(
+        ev,
+        MatchEvent::OrderFilled { order_id: 1, .. }
+    )));
+    assert!(has_event_type(&events, |ev| matches!(
+        ev,
+        MatchEvent::OrderFilled { order_id: 2, .. }
+    )));
     assert_eq!(e.book().order_count(), 0);
 }
 
@@ -188,7 +196,10 @@ fn test_b9_market_buy_empty_book() {
     let events = e.process(market_buy(1, 1.0)).to_vec();
 
     assert_eq!(count_trades(&events), 0);
-    assert!(has_event_type(&events, |ev| matches!(ev, MatchEvent::OrderCancelled { .. })));
+    assert!(has_event_type(&events, |ev| matches!(
+        ev,
+        MatchEvent::OrderCancelled { .. }
+    )));
 }
 
 /// B10: Market buy, asks exist but total qty < market qty — partial fill + cancel
@@ -199,7 +210,10 @@ fn test_b10_market_buy_insufficient_asks() {
     let events = e.process(market_buy(2, 1.0)).to_vec();
 
     assert!(count_trades(&events) >= 1);
-    assert!(has_event_type(&events, |ev| matches!(ev, MatchEvent::OrderCancelled { order_id: 2, .. })));
+    assert!(has_event_type(&events, |ev| matches!(
+        ev,
+        MatchEvent::OrderCancelled { order_id: 2, .. }
+    )));
 }
 
 /// B11: Market buy exactly fills all asks — full fill, asks empty
@@ -211,7 +225,10 @@ fn test_b11_market_buy_exact_fill() {
 
     assert!(count_trades(&events) >= 1);
     assert!(e.book().asks_empty());
-    assert!(has_event_type(&events, |ev| matches!(ev, MatchEvent::OrderFilled { order_id: 2, .. })));
+    assert!(has_event_type(&events, |ev| matches!(
+        ev,
+        MatchEvent::OrderFilled { order_id: 2, .. }
+    )));
 }
 
 /// B12: Market buy for 1 unit (min qty) — fills one ask
@@ -230,11 +247,7 @@ fn test_b12_market_buy_min_qty() {
 fn test_b13_market_buy_sweep_many_levels() {
     let mut e = setup();
     for i in 0..100u64 {
-        e.process(limit_sell(
-            i + 1,
-            100.0 + i as f64 * 0.01,
-            0.01,
-        ));
+        e.process(limit_sell(i + 1, 100.0 + i as f64 * 0.01, 0.01));
     }
     let events = e.process(market_buy(200, 1.0)).to_vec(); // sweep all 100 levels
 
@@ -249,7 +262,10 @@ fn test_b14_market_sell_empty_book() {
     let events = e.process(market_sell(1, 1.0)).to_vec();
 
     assert_eq!(count_trades(&events), 0);
-    assert!(has_event_type(&events, |ev| matches!(ev, MatchEvent::OrderCancelled { .. })));
+    assert!(has_event_type(&events, |ev| matches!(
+        ev,
+        MatchEvent::OrderCancelled { .. }
+    )));
 }
 
 /// B15: Market sell, bids exist but insufficient
@@ -260,7 +276,10 @@ fn test_b15_market_sell_insufficient_bids() {
     let events = e.process(market_sell(2, 1.0)).to_vec();
 
     assert!(count_trades(&events) >= 1);
-    assert!(has_event_type(&events, |ev| matches!(ev, MatchEvent::OrderCancelled { order_id: 2, .. })));
+    assert!(has_event_type(&events, |ev| matches!(
+        ev,
+        MatchEvent::OrderCancelled { order_id: 2, .. }
+    )));
 }
 
 /// B16: Market buy, single ask with qty=1 (min), market wants more
@@ -272,7 +291,10 @@ fn test_b16_market_buy_single_min_ask() {
 
     assert!(count_trades(&events) >= 1);
     // Remainder cancelled
-    assert!(has_event_type(&events, |ev| matches!(ev, MatchEvent::OrderCancelled { order_id: 2, .. })));
+    assert!(has_event_type(&events, |ev| matches!(
+        ev,
+        MatchEvent::OrderCancelled { order_id: 2, .. }
+    )));
 }
 
 /// B17: Market buy through levels with different prices — fills at maker prices (ascending)
@@ -350,7 +372,10 @@ fn test_b20_market_fok_insufficient() {
     assert_eq!(count_trades(&events), 0);
     assert!(has_event_type(&events, |ev| matches!(
         ev,
-        MatchEvent::OrderRejected { reason: RejectReason::InsufficientLiquidity, .. }
+        MatchEvent::OrderRejected {
+            reason: RejectReason::InsufficientLiquidity,
+            ..
+        }
     )));
 }
 
@@ -373,8 +398,8 @@ fn test_b22_market_never_rests() {
 
     e.process(limit_sell(2, 100.0, 0.5));
     e.process(market_buy(3, 1.0)); // partial fill
-    // Only the remaining ask (if any) should be on book, no market orders
-    // Check that no market orders rest
+                                   // Only the remaining ask (if any) should be on book, no market orders
+                                   // Check that no market orders rest
     assert!(e.book().order_count() <= 1); // at most the ask remains
 }
 
@@ -390,7 +415,10 @@ fn test_d36_price_time_priority() {
     let events = e.process(market_buy(3, 1.0)).to_vec();
 
     // Order 1 should be filled (FIFO)
-    assert!(has_event_type(&events, |ev| matches!(ev, MatchEvent::OrderFilled { order_id: 1, .. })));
+    assert!(has_event_type(&events, |ev| matches!(
+        ev,
+        MatchEvent::OrderFilled { order_id: 1, .. }
+    )));
     // Order 2 should still be on book
     assert!(e.book().contains_order(2));
 }
@@ -406,8 +434,17 @@ fn test_d37_partial_third_order() {
     let events = e.process(market_buy(4, 2.5)).to_vec();
 
     // Orders 1 and 2 fully filled, order 3 partially filled
-    assert!(has_event_type(&events, |ev| matches!(ev, MatchEvent::OrderFilled { order_id: 1, .. })));
-    assert!(has_event_type(&events, |ev| matches!(ev, MatchEvent::OrderFilled { order_id: 2, .. })));
-    assert!(has_event_type(&events, |ev| matches!(ev, MatchEvent::OrderPartiallyFilled { order_id: 3, .. })));
+    assert!(has_event_type(&events, |ev| matches!(
+        ev,
+        MatchEvent::OrderFilled { order_id: 1, .. }
+    )));
+    assert!(has_event_type(&events, |ev| matches!(
+        ev,
+        MatchEvent::OrderFilled { order_id: 2, .. }
+    )));
+    assert!(has_event_type(&events, |ev| matches!(
+        ev,
+        MatchEvent::OrderPartiallyFilled { order_id: 3, .. }
+    )));
     assert!(e.book().contains_order(3));
 }

@@ -1,6 +1,5 @@
 /// Integration tests: IOC, FOK, Cancel, Amend, Validation
 /// Covers scenarios C (23-35), E (41-44), F (45-49), H (58-65), I (66-72), J (73-77)
-
 use me_core::events::{MatchEvent, RejectReason};
 use me_core::order::{Order, TimeInForce};
 use me_core::symbol::SymbolConfig;
@@ -14,15 +13,25 @@ fn setup() -> Engine {
 
 fn limit_buy_tif(id: OrderId, price: f64, qty: f64, tif: TimeInForce) -> Command {
     Command::PlaceOrder(Order::new_limit(
-        id, SymbolId(0), Side::Buy, tif,
-        FixedPrice::from_f64(price), FixedQty::from_f64(qty), id * 1000,
+        id,
+        SymbolId(0),
+        Side::Buy,
+        tif,
+        FixedPrice::from_f64(price),
+        FixedQty::from_f64(qty),
+        id * 1000,
     ))
 }
 
 fn limit_sell_tif(id: OrderId, price: f64, qty: f64, tif: TimeInForce) -> Command {
     Command::PlaceOrder(Order::new_limit(
-        id, SymbolId(0), Side::Sell, tif,
-        FixedPrice::from_f64(price), FixedQty::from_f64(qty), id * 1000,
+        id,
+        SymbolId(0),
+        Side::Sell,
+        tif,
+        FixedPrice::from_f64(price),
+        FixedQty::from_f64(qty),
+        id * 1000,
     ))
 }
 
@@ -35,11 +44,16 @@ fn limit_sell(id: OrderId, price: f64, qty: f64) -> Command {
 }
 
 fn count_trades(events: &[MatchEvent]) -> usize {
-    events.iter().filter(|e| matches!(e, MatchEvent::Trade(_))).count()
+    events
+        .iter()
+        .filter(|e| matches!(e, MatchEvent::Trade(_)))
+        .count()
 }
 
 fn has_reject(events: &[MatchEvent], reason: RejectReason) -> bool {
-    events.iter().any(|ev| matches!(ev, MatchEvent::OrderRejected { reason: r, .. } if *r == reason))
+    events
+        .iter()
+        .any(|ev| matches!(ev, MatchEvent::OrderRejected { reason: r, .. } if *r == reason))
 }
 
 // ─── C. Min/Max Qty and Lot Size ────────────────────────────────────────────
@@ -50,9 +64,12 @@ fn test_c23_qty_below_min() {
     let mut e = setup();
     // min_qty = 1_000 raw = 0.00001
     let order = Order::new_limit(
-        1, SymbolId(0), Side::Buy, TimeInForce::GTC,
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
         FixedPrice::from_raw(10_000_000_000), // 100.0
-        FixedQty::from_raw(500), // below min
+        FixedQty::from_raw(500),              // below min
         1000,
     );
     let events = e.process(Command::PlaceOrder(order)).to_vec();
@@ -64,13 +81,18 @@ fn test_c23_qty_below_min() {
 fn test_c24_qty_at_min() {
     let mut e = setup();
     let order = Order::new_limit(
-        1, SymbolId(0), Side::Buy, TimeInForce::GTC,
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
         FixedPrice::from_raw(10_000_000_000),
         FixedQty::from_raw(1_000), // exactly min
         1000,
     );
     let events = e.process(Command::PlaceOrder(order)).to_vec();
-    assert!(events.iter().any(|ev| matches!(ev, MatchEvent::OrderAccepted { .. })));
+    assert!(events
+        .iter()
+        .any(|ev| matches!(ev, MatchEvent::OrderAccepted { .. })));
 }
 
 /// C25: Order with qty > max_qty → reject
@@ -78,7 +100,10 @@ fn test_c24_qty_at_min() {
 fn test_c25_qty_above_max() {
     let mut e = setup();
     let order = Order::new_limit(
-        1, SymbolId(0), Side::Buy, TimeInForce::GTC,
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
         FixedPrice::from_raw(10_000_000_000),
         FixedQty::from_raw(2_000_000_000_000), // above max (1_000_000_000_000)
         1000,
@@ -92,13 +117,18 @@ fn test_c25_qty_above_max() {
 fn test_c26_qty_at_max() {
     let mut e = setup();
     let order = Order::new_limit(
-        1, SymbolId(0), Side::Buy, TimeInForce::GTC,
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
         FixedPrice::from_raw(10_000_000_000),
         FixedQty::from_raw(1_000_000_000_000), // exactly max
         1000,
     );
     let events = e.process(Command::PlaceOrder(order)).to_vec();
-    assert!(events.iter().any(|ev| matches!(ev, MatchEvent::OrderAccepted { .. })));
+    assert!(events
+        .iter()
+        .any(|ev| matches!(ev, MatchEvent::OrderAccepted { .. })));
 }
 
 /// C27: Order with qty not multiple of qty_step → reject
@@ -111,7 +141,10 @@ fn test_c27_qty_not_multiple_of_step() {
         cfg
     });
     let order = Order::new_limit(
-        1, SymbolId(0), Side::Buy, TimeInForce::GTC,
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
         FixedPrice::from_raw(10_000_000_000),
         FixedQty::from_raw(1_500_000), // 0.015 — not multiple of 0.01
         1000,
@@ -130,13 +163,18 @@ fn test_c28_qty_multiple_of_step() {
         cfg
     });
     let order = Order::new_limit(
-        1, SymbolId(0), Side::Buy, TimeInForce::GTC,
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
         FixedPrice::from_raw(10_000_000_000),
         FixedQty::from_raw(3_000_000), // 0.03
         1000,
     );
     let events = e.process(Command::PlaceOrder(order)).to_vec();
-    assert!(events.iter().any(|ev| matches!(ev, MatchEvent::OrderAccepted { .. })));
+    assert!(events
+        .iter()
+        .any(|ev| matches!(ev, MatchEvent::OrderAccepted { .. })));
 }
 
 /// C29: Price not multiple of price_step → reject
@@ -145,7 +183,10 @@ fn test_c29_price_not_on_tick() {
     let mut e = setup();
     // price_step = 1_000_000 (0.01)
     let order = Order::new_limit(
-        1, SymbolId(0), Side::Buy, TimeInForce::GTC,
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
         FixedPrice::from_raw(10_000_500_000), // 100.005 — not on 0.01 tick
         FixedQty::from_raw(100_000_000),
         1000,
@@ -159,13 +200,18 @@ fn test_c29_price_not_on_tick() {
 fn test_c30_price_on_tick() {
     let mut e = setup();
     let order = Order::new_limit(
-        1, SymbolId(0), Side::Buy, TimeInForce::GTC,
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
         FixedPrice::from_raw(10_001_000_000), // 100.01
         FixedQty::from_raw(100_000_000),
         1000,
     );
     let events = e.process(Command::PlaceOrder(order)).to_vec();
-    assert!(events.iter().any(|ev| matches!(ev, MatchEvent::OrderAccepted { .. })));
+    assert!(events
+        .iter()
+        .any(|ev| matches!(ev, MatchEvent::OrderAccepted { .. })));
 }
 
 /// C31: Limit order with price == 0 → reject
@@ -173,7 +219,10 @@ fn test_c30_price_on_tick() {
 fn test_c31_zero_price_limit() {
     let mut e = setup();
     let order = Order::new_limit(
-        1, SymbolId(0), Side::Buy, TimeInForce::GTC,
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
         FixedPrice::ZERO,
         FixedQty::from_raw(100_000_000),
         1000,
@@ -187,13 +236,18 @@ fn test_c31_zero_price_limit() {
 fn test_c32_market_order_zero_price_ok() {
     let mut e = setup();
     let order = Order::new_market(
-        1, SymbolId(0), Side::Buy, TimeInForce::GTC,
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
         FixedQty::from_raw(100_000_000),
         1000,
     );
     let events = e.process(Command::PlaceOrder(order)).to_vec();
     // Should be accepted (then cancelled because empty book)
-    assert!(events.iter().any(|ev| matches!(ev, MatchEvent::OrderAccepted { .. })));
+    assert!(events
+        .iter()
+        .any(|ev| matches!(ev, MatchEvent::OrderAccepted { .. })));
 }
 
 /// C33: Order with qty == 0 → reject
@@ -201,7 +255,10 @@ fn test_c32_market_order_zero_price_ok() {
 fn test_c33_zero_qty() {
     let mut e = setup();
     let order = Order::new_limit(
-        1, SymbolId(0), Side::Buy, TimeInForce::GTC,
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
         FixedPrice::from_raw(10_000_000_000),
         FixedQty::ZERO,
         1000,
@@ -216,7 +273,10 @@ fn test_c34_partial_fill_below_min() {
     let mut e = setup();
     // Ask for 0.00002 (2_000 raw), min_qty = 0.00001 (1_000)
     e.process(Command::PlaceOrder(Order::new_limit(
-        1, SymbolId(0), Side::Sell, TimeInForce::GTC,
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
         FixedPrice::from_raw(10_000_000_000),
         FixedQty::from_raw(2_000),
         1000,
@@ -226,7 +286,10 @@ fn test_c34_partial_fill_below_min() {
     // Let's use a scenario where remaining < min
     // Ask for 0.00003, buy 0.00002. Remaining = 0.00001 which is == min.
     e.process(Command::PlaceOrder(Order::new_limit(
-        2, SymbolId(0), Side::Sell, TimeInForce::GTC,
+        2,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
         FixedPrice::from_raw(10_100_000_000),
         FixedQty::from_raw(3_000), // 0.00003
         2000,
@@ -234,7 +297,10 @@ fn test_c34_partial_fill_below_min() {
 
     // Buy 0.00002 at price 101 — fills 0.00002 from order 2, remaining = 0.00001
     let events = e.process(Command::PlaceOrder(Order::new_market(
-        3, SymbolId(0), Side::Buy, TimeInForce::GTC,
+        3,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
         FixedQty::from_raw(5_000), // 0.00005 — fills order 1 (2000) + partial order 2 (3000)
         3000,
     )));
@@ -250,7 +316,10 @@ fn test_c35_fill_exact_step() {
     let mut e = setup();
     e.process(limit_sell(1, 100.0, 1.0));
     let events = e.process(Command::PlaceOrder(Order::new_market(
-        2, SymbolId(0), Side::Buy, TimeInForce::GTC,
+        2,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
         FixedQty::from_raw(1_000), // 0.00001 — one step
         2000,
     )));
@@ -267,7 +336,9 @@ fn test_c35_fill_exact_step() {
 fn test_e41_ioc_full_fill() {
     let mut e = setup();
     e.process(limit_sell(1, 100.0, 1.0));
-    let events = e.process(limit_buy_tif(2, 100.0, 1.0, TimeInForce::IOC)).to_vec();
+    let events = e
+        .process(limit_buy_tif(2, 100.0, 1.0, TimeInForce::IOC))
+        .to_vec();
 
     assert!(count_trades(&events) >= 1);
     assert_eq!(e.book().order_count(), 0);
@@ -278,10 +349,14 @@ fn test_e41_ioc_full_fill() {
 fn test_e42_ioc_partial_fill() {
     let mut e = setup();
     e.process(limit_sell(1, 100.0, 0.5));
-    let events = e.process(limit_buy_tif(2, 100.0, 1.0, TimeInForce::IOC)).to_vec();
+    let events = e
+        .process(limit_buy_tif(2, 100.0, 1.0, TimeInForce::IOC))
+        .to_vec();
 
     assert!(count_trades(&events) >= 1);
-    assert!(events.iter().any(|ev| matches!(ev, MatchEvent::OrderCancelled { order_id: 2, .. })));
+    assert!(events
+        .iter()
+        .any(|ev| matches!(ev, MatchEvent::OrderCancelled { order_id: 2, .. })));
     // IOC should NOT rest on book
     assert!(!e.book().contains_order(2));
 }
@@ -291,10 +366,14 @@ fn test_e42_ioc_partial_fill() {
 fn test_e43_ioc_no_crossing() {
     let mut e = setup();
     e.process(limit_sell(1, 101.0, 1.0));
-    let events = e.process(limit_buy_tif(2, 100.0, 1.0, TimeInForce::IOC)).to_vec();
+    let events = e
+        .process(limit_buy_tif(2, 100.0, 1.0, TimeInForce::IOC))
+        .to_vec();
 
     assert_eq!(count_trades(&events), 0);
-    assert!(events.iter().any(|ev| matches!(ev, MatchEvent::OrderCancelled { order_id: 2, .. })));
+    assert!(events
+        .iter()
+        .any(|ev| matches!(ev, MatchEvent::OrderCancelled { order_id: 2, .. })));
     assert!(!e.book().contains_order(2));
 }
 
@@ -303,7 +382,9 @@ fn test_e43_ioc_no_crossing() {
 fn test_e44_ioc_sell() {
     let mut e = setup();
     e.process(limit_buy(1, 100.0, 0.5));
-    let events = e.process(limit_sell_tif(2, 100.0, 1.0, TimeInForce::IOC)).to_vec();
+    let events = e
+        .process(limit_sell_tif(2, 100.0, 1.0, TimeInForce::IOC))
+        .to_vec();
 
     assert!(count_trades(&events) >= 1);
     assert!(!e.book().contains_order(2));
@@ -316,7 +397,9 @@ fn test_e44_ioc_sell() {
 fn test_f45_fok_exact_fill() {
     let mut e = setup();
     e.process(limit_sell(1, 100.0, 1.0));
-    let events = e.process(limit_buy_tif(2, 100.0, 1.0, TimeInForce::FOK)).to_vec();
+    let events = e
+        .process(limit_buy_tif(2, 100.0, 1.0, TimeInForce::FOK))
+        .to_vec();
 
     assert!(count_trades(&events) >= 1);
     assert_eq!(e.book().order_count(), 0);
@@ -328,13 +411,18 @@ fn test_f46_fok_one_short() {
     let mut e = setup();
     // Sell 0.99999 — 1 unit short of 1.0
     e.process(Command::PlaceOrder(Order::new_limit(
-        1, SymbolId(0), Side::Sell, TimeInForce::GTC,
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
         FixedPrice::from_raw(10_000_000_000),
         FixedQty::from_raw(99_999_000),
         1000,
     )));
 
-    let events = e.process(limit_buy_tif(2, 100.0, 1.0, TimeInForce::FOK)).to_vec();
+    let events = e
+        .process(limit_buy_tif(2, 100.0, 1.0, TimeInForce::FOK))
+        .to_vec();
 
     assert_eq!(count_trades(&events), 0);
     assert!(has_reject(&events, RejectReason::InsufficientLiquidity));
@@ -349,7 +437,9 @@ fn test_f47_fok_multi_level() {
     e.process(limit_sell(1, 100.0, 0.5));
     e.process(limit_sell(2, 101.0, 0.5));
 
-    let events = e.process(limit_buy_tif(3, 101.0, 1.0, TimeInForce::FOK)).to_vec();
+    let events = e
+        .process(limit_buy_tif(3, 101.0, 1.0, TimeInForce::FOK))
+        .to_vec();
 
     assert!(count_trades(&events) >= 2);
     assert_eq!(e.book().order_count(), 0);
@@ -359,7 +449,9 @@ fn test_f47_fok_multi_level() {
 #[test]
 fn test_f48_fok_empty_book() {
     let mut e = setup();
-    let events = e.process(limit_buy_tif(1, 100.0, 1.0, TimeInForce::FOK)).to_vec();
+    let events = e
+        .process(limit_buy_tif(1, 100.0, 1.0, TimeInForce::FOK))
+        .to_vec();
 
     assert_eq!(count_trades(&events), 0);
     assert!(has_reject(&events, RejectReason::InsufficientLiquidity));
@@ -371,7 +463,9 @@ fn test_f49_fok_sell() {
     let mut e = setup();
     e.process(limit_buy(1, 100.0, 1.0));
 
-    let events = e.process(limit_sell_tif(2, 100.0, 1.0, TimeInForce::FOK)).to_vec();
+    let events = e
+        .process(limit_sell_tif(2, 100.0, 1.0, TimeInForce::FOK))
+        .to_vec();
     assert!(count_trades(&events) >= 1);
 }
 
@@ -382,9 +476,17 @@ fn test_f49_fok_sell() {
 fn test_h58_cancel_existing() {
     let mut e = setup();
     e.process(limit_buy(1, 100.0, 1.0));
-    let events = e.process(Command::CancelOrder { order_id: 1, symbol: SymbolId(0), timestamp: 5000 }).to_vec();
+    let events = e
+        .process(Command::CancelOrder {
+            order_id: 1,
+            symbol: SymbolId(0),
+            timestamp: 5000,
+        })
+        .to_vec();
 
-    assert!(events.iter().any(|ev| matches!(ev, MatchEvent::OrderCancelled { order_id: 1, .. })));
+    assert!(events
+        .iter()
+        .any(|ev| matches!(ev, MatchEvent::OrderCancelled { order_id: 1, .. })));
     assert_eq!(e.book().order_count(), 0);
 }
 
@@ -392,7 +494,13 @@ fn test_h58_cancel_existing() {
 #[test]
 fn test_h59_cancel_nonexistent() {
     let mut e = setup();
-    let events = e.process(Command::CancelOrder { order_id: 99, symbol: SymbolId(0), timestamp: 5000 }).to_vec();
+    let events = e
+        .process(Command::CancelOrder {
+            order_id: 99,
+            symbol: SymbolId(0),
+            timestamp: 5000,
+        })
+        .to_vec();
 
     assert!(has_reject(&events, RejectReason::OrderNotFound));
 }
@@ -402,8 +510,18 @@ fn test_h59_cancel_nonexistent() {
 fn test_h60_cancel_already_cancelled() {
     let mut e = setup();
     e.process(limit_buy(1, 100.0, 1.0));
-    e.process(Command::CancelOrder { order_id: 1, symbol: SymbolId(0), timestamp: 5000 });
-    let events = e.process(Command::CancelOrder { order_id: 1, symbol: SymbolId(0), timestamp: 6000 }).to_vec();
+    e.process(Command::CancelOrder {
+        order_id: 1,
+        symbol: SymbolId(0),
+        timestamp: 5000,
+    });
+    let events = e
+        .process(Command::CancelOrder {
+            order_id: 1,
+            symbol: SymbolId(0),
+            timestamp: 6000,
+        })
+        .to_vec();
 
     assert!(has_reject(&events, RejectReason::OrderNotFound));
 }
@@ -415,7 +533,11 @@ fn test_h62_cancel_only_at_level() {
     e.process(limit_buy(1, 100.0, 1.0));
     assert_eq!(e.book().bid_level_count(), 1);
 
-    e.process(Command::CancelOrder { order_id: 1, symbol: SymbolId(0), timestamp: 5000 });
+    e.process(Command::CancelOrder {
+        order_id: 1,
+        symbol: SymbolId(0),
+        timestamp: 5000,
+    });
     assert_eq!(e.book().bid_level_count(), 0);
 }
 
@@ -428,12 +550,20 @@ fn test_h63_cancel_middle_keeps_order() {
     e.process(limit_sell(3, 100.0, 1.0));
 
     // Cancel middle order
-    e.process(Command::CancelOrder { order_id: 2, symbol: SymbolId(0), timestamp: 5000 });
+    e.process(Command::CancelOrder {
+        order_id: 2,
+        symbol: SymbolId(0),
+        timestamp: 5000,
+    });
 
     // Market buy should fill order 1 first, then order 3
     let events = e.process(Command::PlaceOrder(Order::new_market(
-        4, SymbolId(0), Side::Buy, TimeInForce::GTC,
-        FixedQty::from_f64(1.0), 6000,
+        4,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedQty::from_f64(1.0),
+        6000,
     )));
 
     let filled_id = events.iter().find_map(|ev| match ev {
@@ -451,7 +581,11 @@ fn test_h64_cancel_best_bid() {
     e.process(limit_buy(2, 99.0, 1.0));
 
     assert_eq!(e.book().best_bid(), Some(FixedPrice::from_f64(100.0)));
-    e.process(Command::CancelOrder { order_id: 1, symbol: SymbolId(0), timestamp: 5000 });
+    e.process(Command::CancelOrder {
+        order_id: 1,
+        symbol: SymbolId(0),
+        timestamp: 5000,
+    });
     assert_eq!(e.book().best_bid(), Some(FixedPrice::from_f64(99.0)));
 }
 
@@ -462,8 +596,16 @@ fn test_h65_cancel_all_bids() {
     e.process(limit_buy(1, 100.0, 1.0));
     e.process(limit_buy(2, 99.0, 1.0));
 
-    e.process(Command::CancelOrder { order_id: 1, symbol: SymbolId(0), timestamp: 5000 });
-    e.process(Command::CancelOrder { order_id: 2, symbol: SymbolId(0), timestamp: 6000 });
+    e.process(Command::CancelOrder {
+        order_id: 1,
+        symbol: SymbolId(0),
+        timestamp: 5000,
+    });
+    e.process(Command::CancelOrder {
+        order_id: 2,
+        symbol: SymbolId(0),
+        timestamp: 6000,
+    });
 
     assert_eq!(e.book().best_bid(), None);
     assert!(e.book().bids_empty());
@@ -486,14 +628,22 @@ fn test_i66_amend_qty_down() {
         new_qty: Some(FixedQty::from_f64(0.5)),
         timestamp: 5000,
     });
-    assert!(events.iter().any(|ev| matches!(ev, MatchEvent::OrderAmended { order_id: 1, .. })));
+    assert!(events
+        .iter()
+        .any(|ev| matches!(ev, MatchEvent::OrderAmended { order_id: 1, .. })));
 
     // Order 1 should still fill first (time priority preserved)
     let events = e.process(Command::PlaceOrder(Order::new_market(
-        3, SymbolId(0), Side::Buy, TimeInForce::GTC,
-        FixedQty::from_f64(0.5), 6000,
+        3,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedQty::from_f64(0.5),
+        6000,
     )));
-    assert!(events.iter().any(|ev| matches!(ev, MatchEvent::OrderFilled { order_id: 1, .. })));
+    assert!(events
+        .iter()
+        .any(|ev| matches!(ev, MatchEvent::OrderFilled { order_id: 1, .. })));
 }
 
 /// I67: Amend qty up → cancel+replace, loses time priority
@@ -514,10 +664,16 @@ fn test_i67_amend_qty_up() {
 
     // Order 2 should now fill first (order 1 lost time priority)
     let events = e.process(Command::PlaceOrder(Order::new_market(
-        3, SymbolId(0), Side::Buy, TimeInForce::GTC,
-        FixedQty::from_f64(1.0), 6000,
+        3,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedQty::from_f64(1.0),
+        6000,
     )));
-    assert!(events.iter().any(|ev| matches!(ev, MatchEvent::OrderFilled { order_id: 2, .. })));
+    assert!(events
+        .iter()
+        .any(|ev| matches!(ev, MatchEvent::OrderFilled { order_id: 2, .. })));
 }
 
 /// I68: Amend price → cancel+replace, loses time priority
@@ -591,8 +747,12 @@ fn test_j76_full_sweep_empty() {
     let mut e = setup();
     e.process(limit_sell(1, 100.0, 1.0));
     e.process(Command::PlaceOrder(Order::new_market(
-        2, SymbolId(0), Side::Buy, TimeInForce::GTC,
-        FixedQty::from_f64(1.0), 2000,
+        2,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedQty::from_f64(1.0),
+        2000,
     )));
     assert_eq!(e.book().best_ask(), None);
     assert!(e.book().asks_empty());
@@ -607,6 +767,10 @@ fn test_j77_order_count() {
     e.process(limit_sell(3, 101.0, 1.0));
     assert_eq!(e.book().order_count(), 3);
 
-    e.process(Command::CancelOrder { order_id: 2, symbol: SymbolId(0), timestamp: 5000 });
+    e.process(Command::CancelOrder {
+        order_id: 2,
+        symbol: SymbolId(0),
+        timestamp: 5000,
+    });
     assert_eq!(e.book().order_count(), 2);
 }

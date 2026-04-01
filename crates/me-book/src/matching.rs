@@ -228,12 +228,7 @@ fn match_market(book: &mut OrderBook, order: &mut Order, events: &mut EventBuffe
 }
 
 fn match_market_buy(book: &mut OrderBook, taker: &mut Order, events: &mut EventBuffer) {
-    loop {
-        let best_ask_price = match book.best_ask() {
-            Some(p) => p,
-            None => break,
-        };
-
+    while let Some(best_ask_price) = book.best_ask() {
         match_taker_against_ask_level(book, taker, best_ask_price, events);
 
         if taker.remaining_qty.is_zero() {
@@ -245,12 +240,7 @@ fn match_market_buy(book: &mut OrderBook, taker: &mut Order, events: &mut EventB
 }
 
 fn match_market_sell(book: &mut OrderBook, taker: &mut Order, events: &mut EventBuffer) {
-    loop {
-        let best_bid_price = match book.best_bid() {
-            Some(p) => p,
-            None => break,
-        };
-
+    while let Some(best_bid_price) = book.best_bid() {
         match_taker_against_bid_level(book, taker, best_bid_price, events);
 
         if taker.remaining_qty.is_zero() {
@@ -366,7 +356,10 @@ fn match_taker_against_ask_level(
     }
 
     // Emit taker fill events
-    let total_filled: FixedQty = fills.iter().map(|(_, q, _)| *q).fold(FixedQty::ZERO, |a, b| a + b);
+    let total_filled: FixedQty = fills
+        .iter()
+        .map(|(_, q, _)| *q)
+        .fold(FixedQty::ZERO, |a, b| a + b);
     if !total_filled.is_zero() {
         if taker.remaining_qty.is_zero() {
             taker.status = OrderStatus::Filled;
@@ -478,7 +471,10 @@ fn match_taker_against_bid_level(
         }
     }
 
-    let total_filled: FixedQty = fills.iter().map(|(_, q, _)| *q).fold(FixedQty::ZERO, |a, b| a + b);
+    let total_filled: FixedQty = fills
+        .iter()
+        .map(|(_, q, _)| *q)
+        .fold(FixedQty::ZERO, |a, b| a + b);
     if !total_filled.is_zero() {
         if taker.remaining_qty.is_zero() {
             taker.status = OrderStatus::Filled;
@@ -504,7 +500,12 @@ fn match_taker_against_bid_level(
 // ─── Cancel ──────────────────────────────────────────────────────────────────
 
 /// Cancel a resting order by ID.
-pub fn cancel_order(book: &mut OrderBook, order_id: OrderId, timestamp: u64, events: &mut EventBuffer) {
+pub fn cancel_order(
+    book: &mut OrderBook,
+    order_id: OrderId,
+    timestamp: u64,
+    events: &mut EventBuffer,
+) {
     match book.remove_order(order_id) {
         Some(order) => {
             events.push(MatchEvent::OrderCancelled {

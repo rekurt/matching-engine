@@ -161,7 +161,11 @@ impl FixedQty {
 
     #[inline]
     pub const fn min(self, other: Self) -> Self {
-        if self.0 < other.0 { self } else { other }
+        if self.0 < other.0 {
+            self
+        } else {
+            other
+        }
     }
 
     /// Create from a floating point value (for tests/convenience only).
@@ -175,7 +179,7 @@ impl FixedQty {
         if step.0 == 0 {
             return true;
         }
-        self.0 % step.0 == 0
+        self.0.is_multiple_of(step.0)
     }
 }
 
@@ -288,8 +292,14 @@ mod tests {
 
     #[test]
     fn test_fixed_qty_saturating() {
-        assert_eq!(FixedQty::MAX.saturating_add(FixedQty::from_raw(1)), FixedQty::MAX);
-        assert_eq!(FixedQty::ZERO.saturating_sub(FixedQty::from_raw(1)), FixedQty::ZERO);
+        assert_eq!(
+            FixedQty::MAX.saturating_add(FixedQty::from_raw(1)),
+            FixedQty::MAX
+        );
+        assert_eq!(
+            FixedQty::ZERO.saturating_sub(FixedQty::from_raw(1)),
+            FixedQty::ZERO
+        );
     }
 
     #[test]
