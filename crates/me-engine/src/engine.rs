@@ -153,9 +153,19 @@ impl Engine {
         &self.book
     }
 
+    /// Mutable access to the order book (for recovery/restore).
+    pub fn book_mut(&mut self) -> &mut OrderBook {
+        &mut self.book
+    }
+
     /// Access the stop book (for snapshots).
     pub fn stop_book(&self) -> &StopBook {
         &self.stop_book
+    }
+
+    /// Mutable access to the stop book (for recovery/restore).
+    pub fn stop_book_mut(&mut self) -> &mut StopBook {
+        &mut self.stop_book
     }
 
     /// Get the symbol config.
