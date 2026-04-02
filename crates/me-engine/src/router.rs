@@ -1,11 +1,14 @@
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use rustc_hash::FxHashMap;
+use tracing::{debug, info_span, trace};
 
 use me_core::events::{MatchEvent, RejectReason};
 use me_core::symbol::SymbolConfig;
 use me_core::types::SymbolId;
+use me_metrics::EngineMetrics;
 
 use crate::command::Command;
 use crate::engine::Engine;
@@ -199,7 +202,10 @@ fn shard_worker_loop(rx: Receiver<CommandEnvelope>) {
 pub struct ShardedRouterV2 {
     shards: Vec<ShardV2>,
     symbol_to_shard: FxHashMap<SymbolId, usize>,
+    symbol_names: FxHashMap<SymbolId, String>,
     num_shards: usize,
+    #[allow(dead_code)]
+    metrics: Option<Arc<EngineMetrics>>,
 }
 
 struct ShardV2 {
@@ -218,14 +224,24 @@ enum ShardMsg {
 
 impl ShardedRouterV2 {
     pub fn new(num_shards: usize) -> Self {
+        Self::build(num_shards, None)
+    }
+
+    /// Create a new sharded router with metrics instrumentation.
+    pub fn new_with_metrics(num_shards: usize, metrics: Arc<EngineMetrics>) -> Self {
+        Self::build(num_shards, Some(metrics))
+    }
+
+    fn build(num_shards: usize, metrics: Option<Arc<EngineMetrics>>) -> Self {
         let channel_capacity = 4096;
         let mut shards = Vec::with_capacity(num_shards);
 
-        for _ in 0..num_shards {
+        for shard_id in 0..num_shards {
             let (tx, rx) = bounded::<ShardMsg>(channel_capacity);
+            let metrics_clone = metrics.clone();
 
             let handle = thread::spawn(move || {
-                shard_v2_worker_loop(rx);
+                shard_v2_worker_loop(rx, shard_id, metrics_clone);
             });
 
             shards.push(ShardV2 {
@@ -237,7 +253,9 @@ impl ShardedRouterV2 {
         Self {
             shards,
             symbol_to_shard: FxHashMap::default(),
+            symbol_names: FxHashMap::default(),
             num_shards,
+            metrics,
         }
     }
 
@@ -245,6 +263,8 @@ impl ShardedRouterV2 {
     pub fn add_symbol(&mut self, config: SymbolConfig) {
         let id = config.id;
         let shard_idx = (id.0 as usize) % self.num_shards;
+        self.symbol_names
+            .insert(id, format!("{}/{}", config.base, config.quote));
         self.symbol_to_shard.insert(id, shard_idx);
         let _ = self.shards[shard_idx]
             .cmd_tx
@@ -285,13 +305,48 @@ impl ShardedRouterV2 {
     }
 }
 
-fn shard_v2_worker_loop(rx: Receiver<ShardMsg>) {
+fn shard_v2_worker_loop(
+    rx: Receiver<ShardMsg>,
+    shard_id: usize,
+    metrics: Option<Arc<EngineMetrics>>,
+) {
+    let _span = info_span!("shard_worker", shard_id).entered();
     let mut engines: FxHashMap<SymbolId, Engine> = FxHashMap::default();
+    let mut symbol_names: FxHashMap<SymbolId, String> = FxHashMap::default();
 
     while let Ok(msg) = rx.recv() {
         match msg {
             ShardMsg::Command { cmd, reply } => {
                 let symbol = cmd.symbol();
+                let sym_name = symbol_names
+                    .get(&symbol)
+                    .map(|s| s.as_str())
+                    .unwrap_or("unknown");
+
+                let cmd_type_str = match &cmd {
+                    Command::PlaceOrder(_) => "place_order",
+                    Command::CancelOrder { .. } => "cancel_order",
+                    Command::AmendOrder { .. } => "amend_order",
+                };
+
+                if let Some(ref m) = metrics {
+                    match &cmd {
+                        Command::PlaceOrder(order) => {
+                            m.record_place_order(order.side, order.order_type, order.tif, sym_name);
+                        }
+                        Command::CancelOrder { .. } => {
+                            m.record_command_type("cancel_order");
+                        }
+                        Command::AmendOrder { .. } => {
+                            m.record_command_type("amend_order");
+                        }
+                    }
+                    m.record_shard_command(shard_id);
+                }
+
+                trace!(symbol = sym_name, cmd_type = cmd_type_str, "processing command");
+
+                let start = std::time::Instant::now();
                 let events = if let Some(engine) = engines.get_mut(&symbol) {
                     engine.process(cmd).to_vec()
                 } else {
@@ -301,10 +356,37 @@ fn shard_v2_worker_loop(rx: Receiver<ShardMsg>) {
                         timestamp: cmd.timestamp(),
                     }]
                 };
+                let duration = start.elapsed();
+
+                if let Some(ref m) = metrics {
+                    m.record_events(&events, sym_name, duration);
+                    m.record_matching_duration(cmd_type_str, duration);
+                    if let Some(engine) = engines.get(&symbol) {
+                        m.update_book_state(engine.book(), sym_name);
+                        m.set_stop_orders_pending(
+                            engine.stop_book().len() as i64,
+                            sym_name,
+                        );
+                    }
+                }
+
+                let trades_count = events
+                    .iter()
+                    .filter(|e| matches!(e, MatchEvent::Trade(_)))
+                    .count();
+                debug!(
+                    symbol = sym_name,
+                    trades = trades_count,
+                    duration_us = duration.as_micros() as u64,
+                    "command processed"
+                );
+
                 let _ = reply.send(events);
             }
             ShardMsg::AddSymbol(config) => {
                 let id = config.id;
+                let name = format!("{}/{}", config.base, config.quote);
+                symbol_names.insert(id, name);
                 engines.insert(id, Engine::new(config));
             }
             ShardMsg::Shutdown => break,

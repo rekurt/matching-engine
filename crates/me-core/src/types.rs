@@ -202,14 +202,16 @@ impl Sub for FixedQty {
     type Output = Self;
     #[inline]
     fn sub(self, rhs: Self) -> Self {
-        Self(self.0 - rhs.0)
+        // Use saturating_sub to prevent underflow panic since quantities
+        // are unsigned and should never go negative.
+        Self(self.0.saturating_sub(rhs.0))
     }
 }
 
 impl SubAssign for FixedQty {
     #[inline]
     fn sub_assign(&mut self, rhs: Self) {
-        self.0 -= rhs.0;
+        self.0 = self.0.saturating_sub(rhs.0);
     }
 }
 

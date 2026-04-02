@@ -1,0 +1,37 @@
+{
+  "uid": "me-system",
+  "title": "Matching Engine - System Overview",
+  "tags": ["matching-engine"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "templating": {
+    "list": [
+      {
+        "name": "symbol",
+        "type": "custom",
+        "current": {"text": "All", "value": ".*"},
+        "options": [
+          {"text": "All", "value": ".*", "selected": true},
+          {"text": "BTC/USDT", "value": "BTC/USDT"},
+          {"text": "ETH/USDT", "value": "ETH/USDT"},
+          {"text": "SOL/USDT", "value": "SOL/USDT"}
+        ]
+      }
+    ]
+  },
+  "panels": [
+    {"id":1,"type":"stat","title":"Commands/sec","datasource":{"type":"prometheus","uid":"prometheus"},"targets":[{"expr":"sum(rate(me_commands_total[1m]))"}],"gridPos":{"h":5,"w":6,"x":0,"y":0},"options":{"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"value","graphMode":"area"},"fieldConfig":{"defaults":{"unit":"ops","thresholds":{"steps":[{"color":"green","value":null},{"color":"yellow","value":100000}]}}}},
+    {"id":2,"type":"stat","title":"Trades/sec","datasource":{"type":"prometheus","uid":"prometheus"},"targets":[{"expr":"sum(rate(me_trades_total[1m]))"}],"gridPos":{"h":5,"w":6,"x":6,"y":0},"options":{"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"value","graphMode":"area"},"fieldConfig":{"defaults":{"unit":"ops"}}},
+    {"id":3,"type":"stat","title":"Active Symbols","datasource":{"type":"prometheus","uid":"prometheus"},"targets":[{"expr":"me_active_symbols"}],"gridPos":{"h":5,"w":6,"x":12,"y":0},"options":{"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"value"},"fieldConfig":{"defaults":{"unit":"short"}}},
+    {"id":4,"type":"stat","title":"Active Connections","datasource":{"type":"prometheus","uid":"prometheus"},"targets":[{"expr":"sum(me_connections_active)"}],"gridPos":{"h":5,"w":6,"x":18,"y":0},"options":{"reduceOptions":{"calcs":["lastNotNull"]},"colorMode":"value","graphMode":"area"},"fieldConfig":{"defaults":{"unit":"short"}}},
+    {"id":5,"type":"timeseries","title":"WAL Writes/sec","datasource":{"type":"prometheus","uid":"prometheus"},"targets":[{"expr":"rate(me_wal_writes_total[1m])","legendFormat":"writes/sec"}],"gridPos":{"h":8,"w":12,"x":0,"y":5},"fieldConfig":{"defaults":{"unit":"ops"}}},
+    {"id":6,"type":"timeseries","title":"WAL Bytes/sec","datasource":{"type":"prometheus","uid":"prometheus"},"targets":[{"expr":"rate(me_wal_bytes_written_total[1m])","legendFormat":"bytes/sec"}],"gridPos":{"h":8,"w":12,"x":12,"y":5},"fieldConfig":{"defaults":{"unit":"Bps"}}},
+    {"id":7,"type":"timeseries","title":"Snapshot Saves","datasource":{"type":"prometheus","uid":"prometheus"},"targets":[{"expr":"rate(me_snapshot_saves_total[1m])","legendFormat":"saves/sec"}],"gridPos":{"h":8,"w":12,"x":0,"y":13},"fieldConfig":{"defaults":{"unit":"ops"}}},
+    {"id":8,"type":"stat","title":"Snapshot Size","datasource":{"type":"prometheus","uid":"prometheus"},"targets":[{"expr":"me_snapshot_size_bytes"}],"gridPos":{"h":8,"w":12,"x":12,"y":13},"options":{"reduceOptions":{"calcs":["lastNotNull"]}},"fieldConfig":{"defaults":{"unit":"decbytes"}}},
+    {"id":9,"type":"timeseries","title":"Shard Queue Depth","datasource":{"type":"prometheus","uid":"prometheus"},"targets":[{"expr":"me_shard_queue_depth","legendFormat":"shard {{shard}}"}],"gridPos":{"h":8,"w":12,"x":0,"y":21},"fieldConfig":{"defaults":{"unit":"short"}}},
+    {"id":10,"type":"piechart","title":"Shard Command Distribution","datasource":{"type":"prometheus","uid":"prometheus"},"targets":[{"expr":"rate(me_shard_commands_total[1m])","legendFormat":"shard {{shard}}"}],"gridPos":{"h":8,"w":12,"x":12,"y":21}},
+    {"id":11,"type":"timeseries","title":"Events/sec by Type","datasource":{"type":"prometheus","uid":"prometheus"},"targets":[{"expr":"rate(me_events_total[1m])","legendFormat":"{{event_type}}"}],"gridPos":{"h":8,"w":24,"x":0,"y":29},"fieldConfig":{"defaults":{"unit":"ops","custom":{"stacking":{"mode":"normal"}}}}}
+  ]
+}

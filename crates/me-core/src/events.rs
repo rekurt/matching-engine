@@ -31,7 +31,7 @@ pub enum RejectReason {
 
 /// Events produced by the matching engine during order processing.
 /// Collected in a pre-allocated buffer to avoid per-event allocation.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MatchEvent {
     OrderAccepted {
         order_id: OrderId,

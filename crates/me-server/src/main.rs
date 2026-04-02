@@ -1,11 +1,16 @@
 use std::sync::Arc;
 
+use axum::{extract::State, routing::get, Router as AxumRouter};
 use clap::Parser;
 use me_core::symbol::SymbolConfig;
 use me_core::types::{FixedPrice, FixedQty, SymbolId};
 use me_engine::router::ShardedRouterV2;
 use me_io::tcp_server::TcpServer;
 use me_io::uds_server::UdsServer;
+use me_metrics::EngineMetrics;
+use prometheus::Registry;
+use tracing::{info, warn};
+use tracing_subscriber::EnvFilter;
 
 /// Matching engine server.
 #[derive(Parser, Debug)]
@@ -22,6 +27,10 @@ struct Cli {
     /// Number of engine shards (defaults to available parallelism).
     #[arg(long)]
     shards: Option<usize>,
+
+    /// Metrics HTTP listen address.
+    #[arg(long, default_value = "0.0.0.0:9091")]
+    metrics_addr: String,
 }
 
 fn default_symbols() -> Vec<SymbolConfig> {
@@ -62,42 +71,105 @@ fn default_symbols() -> Vec<SymbolConfig> {
     ]
 }
 
+async fn metrics_handler(State(metrics): State<Arc<EngineMetrics>>) -> String {
+    metrics.encode()
+}
+
+async fn health_handler() -> &'static str {
+    "OK"
+}
+
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::from_default_env()
+                .add_directive("me_server=info".parse().unwrap()),
+        )
+        .with_target(true)
+        .init();
+
     let cli = Cli::parse();
 
     let num_shards = cli
         .shards
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
 
-    eprintln!("Starting matching engine with {num_shards} shards");
+    info!(shards = num_shards, "Starting matching engine");
+
+    let registry = Registry::new();
+    let metrics = Arc::new(EngineMetrics::new(&registry));
 
     let mut router = ShardedRouterV2::new(num_shards);
 
     for sym in default_symbols() {
-        eprintln!("  Registering {}/{} (id={})", sym.base, sym.quote, sym.id.0);
+        info!(base = sym.base, quote = sym.quote, id = sym.id.0, "Registering symbol");
         router.add_symbol(sym);
     }
 
+    metrics.set_active_symbols(default_symbols().len() as i64);
+
     let router = Arc::new(router);
+
+    // Graceful shutdown channel
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // Handle SIGTERM/SIGINT for graceful shutdown.
+    tokio::spawn(async move {
+        let ctrl_c = tokio::signal::ctrl_c();
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+            tokio::select! {
+                _ = ctrl_c => {}
+                _ = sigterm.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            ctrl_c.await.ok();
+        }
+        warn!("Received shutdown signal");
+        let _ = shutdown_tx.send(true);
+    });
+
+    // Spawn HTTP metrics server
+    let metrics_clone = Arc::clone(&metrics);
+    let metrics_addr = cli.metrics_addr.clone();
+    tokio::spawn(async move {
+        let app = AxumRouter::new()
+            .route("/metrics", get(metrics_handler))
+            .route("/health", get(health_handler))
+            .with_state(metrics_clone);
+        let listener = tokio::net::TcpListener::bind(&metrics_addr)
+            .await
+            .unwrap();
+        info!(addr = %metrics_addr, "Metrics HTTP server listening");
+        axum::serve(listener, app).await.unwrap();
+    });
 
     // Spawn optional UDS listener
     if let Some(ref uds_path) = cli.uds_path {
-        let uds_server = UdsServer::new(Arc::clone(&router));
+        let uds_server =
+            UdsServer::new_with_metrics(Arc::clone(&router), Some(Arc::clone(&metrics)));
         let path = uds_path.clone();
+        let uds_shutdown = shutdown_rx.clone();
         tokio::spawn(async move {
-            eprintln!("UDS listening on {path}");
-            if let Err(e) = uds_server.listen(&path).await {
-                eprintln!("UDS server error: {e}");
+            info!(path = %path, "UDS listening");
+            if let Err(e) = uds_server.listen(&path, uds_shutdown).await {
+                warn!(error = %e, "UDS server error");
             }
         });
     }
 
     // TCP listener (blocks)
-    let tcp_server = TcpServer::new(Arc::clone(&router));
-    eprintln!("TCP listening on {}", cli.tcp_addr);
-    if let Err(e) = tcp_server.listen(&cli.tcp_addr).await {
-        eprintln!("TCP server error: {e}");
+    let tcp_server =
+        TcpServer::new_with_metrics(Arc::clone(&router), Some(Arc::clone(&metrics)));
+    info!(addr = %cli.tcp_addr, "TCP listening");
+    if let Err(e) = tcp_server.listen(&cli.tcp_addr, shutdown_rx).await {
+        warn!(error = %e, "TCP server error");
         std::process::exit(1);
     }
 }

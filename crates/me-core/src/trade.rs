@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::types::{FixedPrice, FixedQty, OrderId, SequenceId, Side, SymbolId, TradeId};
 
 /// A completed trade between two orders.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(C)]
 pub struct Trade {
     pub trade_id: TradeId,
