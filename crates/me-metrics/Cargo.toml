@@ -6,5 +6,4 @@ edition = "2021"
 [dependencies]
 me-core = { workspace = true }
 me-book = { workspace = true }
-me-engine = { workspace = true }
 prometheus = { workspace = true }
