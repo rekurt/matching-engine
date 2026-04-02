@@ -139,8 +139,8 @@ impl RiskEngine {
         {
             let ref_price = config.reference_price.raw();
             let band = (ref_price as u128) * (config.price_band_bps as u128) / 10_000;
-            let lower = ref_price - band as i64;
-            let upper = ref_price + band as i64;
+            let lower = ref_price.saturating_sub(band as i64);
+            let upper = ref_price.saturating_add(band as i64);
 
             if order.price.raw() < lower || order.price.raw() > upper {
                 return Err(RiskRejectReason::PriceBandViolation);

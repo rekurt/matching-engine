@@ -74,15 +74,15 @@ fn command(id: OrderId) -> impl Strategy<Value = Command> {
                 Command::PlaceOrder(Order::new_market(id, SYMBOL, s, TimeInForce::IOC, q, 1000))
             }
         ),
-        // Cancel (targets a potentially existing order)
+        // Cancel (targets a previous order, never self)
         1 => Just(Command::CancelOrder {
-            order_id: id.saturating_sub(1).max(1),
+            order_id: if id > 1 { id - 1 } else { u64::MAX }, // non-existent if no previous
             symbol: SYMBOL,
             timestamp: 1000,
         }),
-        // Amend price (targets a potentially existing order)
+        // Amend price (targets a previous order, never self)
         1 => valid_price().prop_map(move |p| Command::AmendOrder {
-            order_id: id.saturating_sub(1).max(1),
+            order_id: if id > 1 { id - 1 } else { u64::MAX },
             symbol: SYMBOL,
             new_price: Some(p),
             new_qty: None,
@@ -283,12 +283,24 @@ proptest! {
 
         // Place FOK order
         let fok = Order::new_limit(100, SYMBOL, side, TimeInForce::FOK, price, qty, 2000);
-        let _events = eng.process(Command::PlaceOrder(fok)).to_vec();
+        let events = eng.process(Command::PlaceOrder(fok)).to_vec();
 
         // FOK should never rest on book
         assert!(
             !eng.book().contains_order(100),
             "FOK order 100 should never rest on book"
+        );
+
+        // FOK must either be fully filled or rejected — verify outcome.
+        // Note: the engine emits OrderAccepted first, then may emit OrderRejected
+        // with InsufficientLiquidity if FOK can't fill. So both can coexist.
+        let was_rejected = events.iter().any(|e| matches!(e, MatchEvent::OrderRejected { order_id: 100, .. }));
+        let was_filled = events.iter().any(|e| matches!(e, MatchEvent::OrderFilled { order_id: 100, .. }));
+
+        // FOK must have been either fully filled or rejected — never partially filled and resting
+        assert!(
+            was_filled || was_rejected,
+            "FOK order 100 neither filled nor rejected — events: {:?}", events
         );
 
         assert_all_invariants(&eng);

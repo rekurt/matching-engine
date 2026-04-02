@@ -50,7 +50,7 @@ impl Engine {
 
         match cmd {
             Command::PlaceOrder(order) => {
-                // Circuit breaker: reject new orders when halted
+                // Circuit breaker: reject ALL new orders when halted (including stops).
                 if self.trading_state == TradingState::Halted {
                     self.events.push(MatchEvent::OrderRejected {
                         order_id: order.id,
@@ -93,7 +93,7 @@ impl Engine {
                 timestamp,
                 ..
             } => {
-                // Amends rejected when halted
+                // Amends rejected when halted — conservative policy; cancels-only during halt.
                 if self.trading_state == TradingState::Halted {
                     self.events.push(MatchEvent::OrderRejected {
                         order_id,

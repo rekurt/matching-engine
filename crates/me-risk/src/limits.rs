@@ -36,9 +36,10 @@ impl RateLimiter {
         self.last_refill = now;
     }
 
-    /// Update the rate limit.
+    /// Update the rate limit. Clamps current tokens to new capacity.
     pub fn set_rate(&mut self, max_per_second: u32) {
         self.capacity = max_per_second as f64;
+        self.tokens = self.tokens.min(self.capacity);
     }
 }
 

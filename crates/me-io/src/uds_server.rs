@@ -223,6 +223,10 @@ async fn handle_uds_connection_inner(
                                 &format!("Expected seq >= {expected_min}, got {got}"),
                                 &mut write_buf,
                             );
+                            if let Some(ref m) = metrics {
+                                m.record_bytes_out("uds", write_buf.len());
+                                m.record_frame_out("uds", 1);
+                            }
                             stream.write_all(&write_buf).await?;
                             return Err(std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
@@ -241,6 +245,10 @@ async fn handle_uds_connection_inner(
                                 "Send a Handshake message first",
                                 &mut write_buf,
                             );
+                            if let Some(ref m) = metrics {
+                                m.record_bytes_out("uds", write_buf.len());
+                                m.record_frame_out("uds", 1);
+                            }
                             stream.write_all(&write_buf).await?;
                             return Err(std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
@@ -259,6 +267,10 @@ async fn handle_uds_connection_inner(
                                 &format!("Unsupported version: {v}"),
                                 &mut write_buf,
                             );
+                            if let Some(ref m) = metrics {
+                                m.record_bytes_out("uds", write_buf.len());
+                                m.record_frame_out("uds", 1);
+                            }
                             stream.write_all(&write_buf).await?;
                             return Err(std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
@@ -277,6 +289,10 @@ async fn handle_uds_connection_inner(
                                 &format!("{e}"),
                                 &mut write_buf,
                             );
+                            if let Some(ref m) = metrics {
+                                m.record_bytes_out("uds", write_buf.len());
+                                m.record_frame_out("uds", 1);
+                            }
                             let _ = stream.write_all(&write_buf).await;
                             return Err(std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,

@@ -112,7 +112,7 @@ groups:
   - name: matching_engine_trading
     rules:
       - alert: TradingHalted
-        expr: changes(me_orders_rejected_total{reason="trading_halted"}[1m]) > 0
+        expr: increase(me_orders_rejected_total{reason="trading_halted"}[1m]) > 0
         for: 0s
         labels:
           severity: critical
