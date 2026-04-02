@@ -700,6 +700,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
+name = "me-audit"
+version = "0.1.0"
+dependencies = [
+ "me-core",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "me-bench"
 version = "0.1.0"
 dependencies = [
@@ -744,6 +754,7 @@ dependencies = [
  "me-core",
  "me-metrics",
  "me-persist",
+ "proptest",
  "rustc-hash",
  "tracing",
 ]
@@ -783,6 +794,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "me-risk"
+version = "0.1.0"
+dependencies = [
+ "me-core",
+ "rustc-hash",
+ "serde",
+ "tracing",
+]
+
+[[package]]
 name = "me-server"
 version = "0.1.0"
 dependencies = [
@@ -794,6 +815,8 @@ dependencies = [
  "me-metrics",
  "me-persist",
  "prometheus",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

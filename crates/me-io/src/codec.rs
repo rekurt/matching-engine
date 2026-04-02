@@ -513,5 +513,7 @@ fn reject_reason_to_u8(reason: &me_core::events::RejectReason) -> u8 {
         RejectReason::OrderNotFound => 6,
         RejectReason::DuplicateOrderId => 7,
         RejectReason::SymbolNotFound => 8,
+        RejectReason::TradingHalted => 9,
+        RejectReason::RiskCheckFailed => 10,
     }
 }

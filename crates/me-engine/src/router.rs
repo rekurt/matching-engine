@@ -219,6 +219,8 @@ enum ShardMsg {
         reply: Sender<Vec<MatchEvent>>,
     },
     AddSymbol(SymbolConfig),
+    HaltSymbol(SymbolId),
+    ResumeSymbol(SymbolId),
     Shutdown,
 }
 
@@ -291,6 +293,26 @@ impl ShardedRouterV2 {
             reply: reply_tx,
         });
         reply_rx.recv().unwrap()
+    }
+
+    /// Halt trading for a symbol (circuit breaker).
+    pub fn halt_symbol(&self, symbol: SymbolId) -> bool {
+        if let Some(&shard_idx) = self.symbol_to_shard.get(&symbol) {
+            let _ = self.shards[shard_idx].cmd_tx.send(ShardMsg::HaltSymbol(symbol));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Resume trading for a symbol.
+    pub fn resume_symbol(&self, symbol: SymbolId) -> bool {
+        if let Some(&shard_idx) = self.symbol_to_shard.get(&symbol) {
+            let _ = self.shards[shard_idx].cmd_tx.send(ShardMsg::ResumeSymbol(symbol));
+            true
+        } else {
+            false
+        }
     }
 
     pub fn shutdown(mut self) {
@@ -388,6 +410,18 @@ fn shard_v2_worker_loop(
                 let name = format!("{}/{}", config.base, config.quote);
                 symbol_names.insert(id, name);
                 engines.insert(id, Engine::new(config));
+            }
+            ShardMsg::HaltSymbol(symbol) => {
+                if let Some(engine) = engines.get_mut(&symbol) {
+                    engine.halt_trading();
+                    debug!(symbol = ?symbol, "trading halted for symbol");
+                }
+            }
+            ShardMsg::ResumeSymbol(symbol) => {
+                if let Some(engine) = engines.get_mut(&symbol) {
+                    engine.resume_trading();
+                    debug!(symbol = ?symbol, "trading resumed for symbol");
+                }
             }
             ShardMsg::Shutdown => break,
         }

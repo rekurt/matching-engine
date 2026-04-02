@@ -1,0 +1,139 @@
+groups:
+  - name: matching_engine_critical
+    rules:
+      - alert: HighOrderLatency
+        expr: histogram_quantile(0.99, rate(me_order_processing_duration_seconds_bucket[5m])) > 0.001
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Order processing p99 latency > 1ms"
+          description: "p99 latency is {{ $value | humanizeDuration }} (threshold: 1ms)"
+
+      - alert: VeryHighOrderLatency
+        expr: histogram_quantile(0.99, rate(me_order_processing_duration_seconds_bucket[5m])) > 0.01
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Order processing p99 latency > 10ms"
+          description: "p99 latency is {{ $value | humanizeDuration }}"
+
+      - alert: HighErrorRate
+        expr: sum(rate(me_protocol_errors_total[5m])) / sum(rate(me_connection_frames_in_total[5m])) > 0.01
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Protocol error rate > 1%"
+          description: "Error rate is {{ $value | humanizePercentage }}"
+
+      - alert: HighRejectionRate
+        expr: sum(rate(me_orders_rejected_total[5m])) / sum(rate(me_orders_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Order rejection rate > 10%"
+          description: "Rejection rate is {{ $value | humanizePercentage }}"
+
+      - alert: NoActiveConnections
+        expr: sum(me_connections_active) == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No active client connections"
+          description: "The matching engine has no connected clients for 5 minutes"
+
+      - alert: ConnectionDropSpike
+        expr: rate(me_connections_total[1m]) > 10 and delta(me_connections_active[1m]) < -5
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Sudden connection drop detected"
+          description: "Active connections dropped by {{ $value }} in 1 minute"
+
+      - alert: ShardQueueBacklog
+        expr: me_shard_queue_depth > 1000
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Shard queue depth > 1000"
+          description: "Shard {{ $labels.shard }} has queue depth {{ $value }}"
+
+      - alert: ShardQueueCritical
+        expr: me_shard_queue_depth > 3000
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Shard queue depth critical (> 3000)"
+          description: "Shard {{ $labels.shard }} has queue depth {{ $value }}, risk of backpressure"
+
+      - alert: ZeroSpread
+        expr: me_book_spread == 0 and me_book_bid_levels > 0 and me_book_ask_levels > 0
+        for: 10s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Crossed/locked book detected (spread = 0)"
+          description: "Symbol {{ $labels.symbol }} has zero spread — possible book corruption"
+
+      - alert: StopCascadeDepth
+        expr: histogram_quantile(0.99, rate(me_stop_cascade_depth_bucket[5m])) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Deep stop cascades detected"
+          description: "p99 cascade depth is {{ $value }}"
+
+      - alert: WALFlushSlow
+        expr: histogram_quantile(0.99, rate(me_wal_flush_duration_seconds_bucket[5m])) > 0.01
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WAL flush latency > 10ms"
+          description: "p99 WAL flush latency is {{ $value | humanizeDuration }}"
+
+      - alert: HighOrderRate
+        expr: sum(rate(me_orders_total[1m])) > 100000
+        for: 1m
+        labels:
+          severity: info
+        annotations:
+          summary: "Order rate exceeds 100K/sec"
+          description: "Current order rate: {{ $value | humanize }}/sec"
+
+  - name: matching_engine_trading
+    rules:
+      - alert: TradingHalted
+        expr: changes(me_orders_rejected_total{reason="trading_halted"}[1m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Trading halted for {{ $labels.symbol }}"
+          description: "Orders are being rejected with reason=trading_halted"
+
+      - alert: RiskRejectSpike
+        expr: rate(me_orders_rejected_total{reason=~"risk_.*"}[5m]) > 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Risk engine rejecting orders"
+          description: "Risk rejections: {{ $value }}/sec for reason {{ $labels.reason }}"
+
+      - alert: PriceBandTriggered
+        expr: rate(me_orders_rejected_total{reason="price_band_violation"}[5m]) > 0.1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Price band violations detected"
+          description: "{{ $value }}/sec orders rejected for price band violation on {{ $labels.symbol }}"

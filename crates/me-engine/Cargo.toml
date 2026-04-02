@@ -13,3 +13,4 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 me-persist = { workspace = true }
+proptest = { workspace = true }

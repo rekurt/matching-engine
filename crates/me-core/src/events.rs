@@ -25,6 +25,10 @@ pub enum RejectReason {
     DuplicateOrderId,
     /// Symbol not found.
     SymbolNotFound,
+    /// Trading is halted (circuit breaker).
+    TradingHalted,
+    /// Order rejected by risk check.
+    RiskCheckFailed,
 }
 
 // ─── MatchEvent ──────────────────────────────────────────────────────────────
