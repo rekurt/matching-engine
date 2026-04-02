@@ -184,7 +184,7 @@ func TestDecodeShortPayload(t *testing.T) {
 }
 
 func TestAllRejectReasons(t *testing.T) {
-	for r := RejectReason(0); r <= 8; r++ {
+	for r := RejectReason(0); r <= 10; r++ {
 		var p [17]byte
 		binary.LittleEndian.PutUint64(p[0:8], 1)
 		p[8] = byte(r)

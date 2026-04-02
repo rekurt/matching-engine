@@ -1049,6 +1049,8 @@ fn reject_reason_label(reason: RejectReason) -> &'static str {
         RejectReason::OrderNotFound => "order_not_found",
         RejectReason::DuplicateOrderId => "duplicate_order_id",
         RejectReason::SymbolNotFound => "symbol_not_found",
+        RejectReason::TradingHalted => "trading_halted",
+        RejectReason::RiskCheckFailed => "risk_check_failed",
     }
 }
 

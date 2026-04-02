@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::{extract::State, routing::get, Router as AxumRouter};
+use axum::{extract::State, routing::{get, post}, Router as AxumRouter};
 use clap::Parser;
 use me_core::symbol::SymbolConfig;
 use me_core::types::{FixedPrice, FixedQty, SymbolId};
@@ -71,12 +71,77 @@ fn default_symbols() -> Vec<SymbolConfig> {
     ]
 }
 
-async fn metrics_handler(State(metrics): State<Arc<EngineMetrics>>) -> String {
-    metrics.encode()
+#[derive(Clone)]
+struct AppState {
+    metrics: Arc<EngineMetrics>,
+    router: Arc<ShardedRouterV2>,
+}
+
+async fn metrics_handler(State(state): State<AppState>) -> String {
+    state.metrics.encode()
 }
 
 async fn health_handler() -> &'static str {
     "OK"
+}
+
+async fn halt_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(symbol_id): axum::extract::Path<u16>,
+) -> impl axum::response::IntoResponse {
+    let symbol = SymbolId(symbol_id);
+    let success = state.router.halt_symbol(symbol);
+    if success {
+        info!(symbol_id, "Admin: trading HALTED");
+    } else {
+        warn!(symbol_id, "Admin: halt failed — symbol not found");
+    }
+    let status = if success {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::NOT_FOUND
+    };
+    (
+        status,
+        axum::Json(serde_json::json!({
+            "symbol_id": symbol_id,
+            "action": "halt",
+            "success": success
+        })),
+    )
+}
+
+async fn resume_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(symbol_id): axum::extract::Path<u16>,
+) -> impl axum::response::IntoResponse {
+    let symbol = SymbolId(symbol_id);
+    let success = state.router.resume_symbol(symbol);
+    if success {
+        info!(symbol_id, "Admin: trading RESUMED");
+    } else {
+        warn!(symbol_id, "Admin: resume failed — symbol not found");
+    }
+    let status = if success {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::NOT_FOUND
+    };
+    (
+        status,
+        axum::Json(serde_json::json!({
+            "symbol_id": symbol_id,
+            "action": "resume",
+            "success": success
+        })),
+    )
+}
+
+async fn status_handler() -> impl axum::response::IntoResponse {
+    axum::Json(serde_json::json!({
+        "status": "running",
+        "message": "Matching engine is operational"
+    }))
 }
 
 #[tokio::main]
@@ -135,14 +200,20 @@ async fn main() {
         let _ = shutdown_tx.send(true);
     });
 
-    // Spawn HTTP metrics server
-    let metrics_clone = Arc::clone(&metrics);
+    // Spawn HTTP metrics + admin server
+    let app_state = AppState {
+        metrics: Arc::clone(&metrics),
+        router: Arc::clone(&router),
+    };
     let metrics_addr = cli.metrics_addr.clone();
     tokio::spawn(async move {
         let app = AxumRouter::new()
             .route("/metrics", get(metrics_handler))
             .route("/health", get(health_handler))
-            .with_state(metrics_clone);
+            .route("/admin/status", get(status_handler))
+            .route("/admin/halt/{symbol_id}", post(halt_handler))
+            .route("/admin/resume/{symbol_id}", post(resume_handler))
+            .with_state(app_state);
         let listener = tokio::net::TcpListener::bind(&metrics_addr)
             .await
             .unwrap();

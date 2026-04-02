@@ -135,13 +135,14 @@ impl ShardedRouter {
     /// Process a command synchronously, blocking until the response is ready.
     pub fn process(&self, cmd: Command) -> Vec<MatchEvent> {
         let symbol = cmd.symbol();
+        let ts = cmd.timestamp();
         let shard_idx = match self.symbol_to_shard.get(&symbol) {
             Some(&idx) => idx,
             None => {
                 return vec![MatchEvent::OrderRejected {
                     order_id: 0,
                     reason: RejectReason::SymbolNotFound,
-                    timestamp: cmd.timestamp(),
+                    timestamp: ts,
                 }];
             }
         };
@@ -152,8 +153,20 @@ impl ShardedRouter {
             reply: reply_tx,
         };
 
-        self.shards[shard_idx].tx.send(envelope).unwrap();
-        reply_rx.recv().unwrap()
+        if self.shards[shard_idx].tx.send(envelope).is_err() {
+            return vec![MatchEvent::OrderRejected {
+                order_id: 0,
+                reason: RejectReason::SymbolNotFound,
+                timestamp: ts,
+            }];
+        }
+        reply_rx.recv().unwrap_or_else(|_| {
+            vec![MatchEvent::OrderRejected {
+                order_id: 0,
+                reason: RejectReason::SymbolNotFound,
+                timestamp: ts,
+            }]
+        })
     }
 
     /// Shut down all worker threads gracefully.
@@ -219,6 +232,8 @@ enum ShardMsg {
         reply: Sender<Vec<MatchEvent>>,
     },
     AddSymbol(SymbolConfig),
+    HaltSymbol(SymbolId),
+    ResumeSymbol(SymbolId),
     Shutdown,
 }
 
@@ -272,25 +287,65 @@ impl ShardedRouterV2 {
     }
 
     /// Process a command synchronously.
+    ///
+    /// Note: `halt_symbol`/`resume_symbol` are eventually consistent — a command
+    /// already queued may be processed before the halt message.
     pub fn process(&self, cmd: Command) -> Vec<MatchEvent> {
         let symbol = cmd.symbol();
+        let ts = cmd.timestamp();
         let shard_idx = match self.symbol_to_shard.get(&symbol) {
             Some(&idx) => idx,
             None => {
                 return vec![MatchEvent::OrderRejected {
                     order_id: 0,
                     reason: RejectReason::SymbolNotFound,
-                    timestamp: cmd.timestamp(),
+                    timestamp: ts,
                 }];
             }
         };
 
         let (reply_tx, reply_rx) = bounded(1);
-        let _ = self.shards[shard_idx].cmd_tx.send(ShardMsg::Command {
-            cmd,
-            reply: reply_tx,
-        });
-        reply_rx.recv().unwrap()
+        if self.shards[shard_idx]
+            .cmd_tx
+            .send(ShardMsg::Command {
+                cmd,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return vec![MatchEvent::OrderRejected {
+                order_id: 0,
+                reason: RejectReason::SymbolNotFound,
+                timestamp: ts,
+            }];
+        }
+        reply_rx.recv().unwrap_or_else(|_| {
+            vec![MatchEvent::OrderRejected {
+                order_id: 0,
+                reason: RejectReason::SymbolNotFound,
+                timestamp: ts,
+            }]
+        })
+    }
+
+    /// Halt trading for a symbol (circuit breaker).
+    pub fn halt_symbol(&self, symbol: SymbolId) -> bool {
+        if let Some(&shard_idx) = self.symbol_to_shard.get(&symbol) {
+            let _ = self.shards[shard_idx].cmd_tx.send(ShardMsg::HaltSymbol(symbol));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Resume trading for a symbol.
+    pub fn resume_symbol(&self, symbol: SymbolId) -> bool {
+        if let Some(&shard_idx) = self.symbol_to_shard.get(&symbol) {
+            let _ = self.shards[shard_idx].cmd_tx.send(ShardMsg::ResumeSymbol(symbol));
+            true
+        } else {
+            false
+        }
     }
 
     pub fn shutdown(mut self) {
@@ -388,6 +443,18 @@ fn shard_v2_worker_loop(
                 let name = format!("{}/{}", config.base, config.quote);
                 symbol_names.insert(id, name);
                 engines.insert(id, Engine::new(config));
+            }
+            ShardMsg::HaltSymbol(symbol) => {
+                if let Some(engine) = engines.get_mut(&symbol) {
+                    engine.halt_trading();
+                    debug!(symbol = ?symbol, "trading halted for symbol");
+                }
+            }
+            ShardMsg::ResumeSymbol(symbol) => {
+                if let Some(engine) = engines.get_mut(&symbol) {
+                    engine.resume_trading();
+                    debug!(symbol = ?symbol, "trading resumed for symbol");
+                }
             }
             ShardMsg::Shutdown => break,
         }
