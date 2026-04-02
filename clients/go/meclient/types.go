@@ -96,6 +96,8 @@ const (
 	RejectOrderNotFound         RejectReason = 6
 	RejectDuplicateOrderId      RejectReason = 7
 	RejectSymbolNotFound        RejectReason = 8
+	RejectTradingHalted         RejectReason = 9
+	RejectRiskCheckFailed       RejectReason = 10
 )
 
 // String returns the human-readable name of the reject reason.
@@ -119,6 +121,10 @@ func (r RejectReason) String() string {
 		return "DuplicateOrderId"
 	case RejectSymbolNotFound:
 		return "SymbolNotFound"
+	case RejectTradingHalted:
+		return "TradingHalted"
+	case RejectRiskCheckFailed:
+		return "RiskCheckFailed"
 	default:
 		return fmt.Sprintf("RejectReason(%d)", r)
 	}

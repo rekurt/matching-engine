@@ -1,4 +1,4 @@
-use me_core::events::{EventBuffer, MatchEvent};
+use me_core::events::{EventBuffer, MatchEvent, RejectReason};
 use me_core::symbol::SymbolConfig;
 use me_core::types::FixedPrice;
 
@@ -11,6 +11,15 @@ use crate::command::Command;
 /// Maximum number of cascading stop trigger iterations to prevent infinite loops.
 const MAX_STOP_CASCADE: usize = 100;
 
+/// Trading state for circuit breaker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TradingState {
+    /// Normal trading.
+    Active,
+    /// Trading halted — only cancels allowed.
+    Halted,
+}
+
 /// Single-pair matching engine.
 ///
 /// FUNDAMENTAL INVARIANT: all operations within one Engine are strictly sequential.
@@ -19,6 +28,7 @@ pub struct Engine {
     book: OrderBook,
     stop_book: StopBook,
     events: EventBuffer,
+    trading_state: TradingState,
 }
 
 impl Engine {
@@ -27,6 +37,7 @@ impl Engine {
             book: OrderBook::new(config),
             stop_book: StopBook::new(),
             events: EventBuffer::with_capacity(256),
+            trading_state: TradingState::Active,
         }
     }
 
@@ -39,6 +50,16 @@ impl Engine {
 
         match cmd {
             Command::PlaceOrder(order) => {
+                // Circuit breaker: reject ALL new orders when halted (including stops).
+                if self.trading_state == TradingState::Halted {
+                    self.events.push(MatchEvent::OrderRejected {
+                        order_id: order.id,
+                        reason: RejectReason::TradingHalted,
+                        timestamp: order.timestamp,
+                    });
+                    return self.events.events();
+                }
+
                 if order.is_stop() {
                     // Route stop orders to stop book
                     self.stop_book.insert(order, &mut self.events);
@@ -52,7 +73,7 @@ impl Engine {
                 timestamp,
                 ..
             } => {
-                // Try cancel from regular book first, then stop book
+                // Cancels ALWAYS allowed, even when halted
                 if self.book.contains_order(order_id) {
                     matching::cancel_order(&mut self.book, order_id, timestamp, &mut self.events);
                 } else if self.stop_book.contains(order_id) {
@@ -60,7 +81,7 @@ impl Engine {
                 } else {
                     self.events.push(MatchEvent::OrderRejected {
                         order_id,
-                        reason: me_core::events::RejectReason::OrderNotFound,
+                        reason: RejectReason::OrderNotFound,
                         timestamp,
                     });
                 }
@@ -72,6 +93,16 @@ impl Engine {
                 timestamp,
                 ..
             } => {
+                // Amends rejected when halted — conservative policy; cancels-only during halt.
+                if self.trading_state == TradingState::Halted {
+                    self.events.push(MatchEvent::OrderRejected {
+                        order_id,
+                        reason: RejectReason::TradingHalted,
+                        timestamp,
+                    });
+                    return self.events.events();
+                }
+
                 matching::amend_order(
                     &mut self.book,
                     order_id,
@@ -146,6 +177,26 @@ impl Engine {
             MatchEvent::Trade(t) => Some(t.price),
             _ => None,
         })
+    }
+
+    /// Halt trading — only cancel orders will be processed.
+    pub fn halt_trading(&mut self) {
+        self.trading_state = TradingState::Halted;
+    }
+
+    /// Resume normal trading.
+    pub fn resume_trading(&mut self) {
+        self.trading_state = TradingState::Active;
+    }
+
+    /// Check if trading is active.
+    pub fn is_trading_active(&self) -> bool {
+        self.trading_state == TradingState::Active
+    }
+
+    /// Get current trading state.
+    pub fn trading_state(&self) -> TradingState {
+        self.trading_state
     }
 
     /// Access the order book (for queries/snapshots).

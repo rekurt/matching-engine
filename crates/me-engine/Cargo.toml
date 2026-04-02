@@ -6,8 +6,11 @@ edition = "2021"
 [dependencies]
 me-core = { workspace = true }
 me-book = { workspace = true }
+me-metrics = { workspace = true }
 crossbeam-channel = { workspace = true }
 rustc-hash = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 me-persist = { workspace = true }
+proptest = { workspace = true }

@@ -1,11 +1,14 @@
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use rustc_hash::FxHashMap;
+use tracing::{debug, info_span, trace};
 
 use me_core::events::{MatchEvent, RejectReason};
 use me_core::symbol::SymbolConfig;
 use me_core::types::SymbolId;
+use me_metrics::EngineMetrics;
 
 use crate::command::Command;
 use crate::engine::Engine;
@@ -132,13 +135,14 @@ impl ShardedRouter {
     /// Process a command synchronously, blocking until the response is ready.
     pub fn process(&self, cmd: Command) -> Vec<MatchEvent> {
         let symbol = cmd.symbol();
+        let ts = cmd.timestamp();
         let shard_idx = match self.symbol_to_shard.get(&symbol) {
             Some(&idx) => idx,
             None => {
                 return vec![MatchEvent::OrderRejected {
                     order_id: 0,
                     reason: RejectReason::SymbolNotFound,
-                    timestamp: cmd.timestamp(),
+                    timestamp: ts,
                 }];
             }
         };
@@ -149,8 +153,20 @@ impl ShardedRouter {
             reply: reply_tx,
         };
 
-        self.shards[shard_idx].tx.send(envelope).unwrap();
-        reply_rx.recv().unwrap()
+        if self.shards[shard_idx].tx.send(envelope).is_err() {
+            return vec![MatchEvent::OrderRejected {
+                order_id: 0,
+                reason: RejectReason::SymbolNotFound,
+                timestamp: ts,
+            }];
+        }
+        reply_rx.recv().unwrap_or_else(|_| {
+            vec![MatchEvent::OrderRejected {
+                order_id: 0,
+                reason: RejectReason::SymbolNotFound,
+                timestamp: ts,
+            }]
+        })
     }
 
     /// Shut down all worker threads gracefully.
@@ -199,7 +215,10 @@ fn shard_worker_loop(rx: Receiver<CommandEnvelope>) {
 pub struct ShardedRouterV2 {
     shards: Vec<ShardV2>,
     symbol_to_shard: FxHashMap<SymbolId, usize>,
+    symbol_names: FxHashMap<SymbolId, String>,
     num_shards: usize,
+    #[allow(dead_code)]
+    metrics: Option<Arc<EngineMetrics>>,
 }
 
 struct ShardV2 {
@@ -213,19 +232,31 @@ enum ShardMsg {
         reply: Sender<Vec<MatchEvent>>,
     },
     AddSymbol(SymbolConfig),
+    HaltSymbol(SymbolId),
+    ResumeSymbol(SymbolId),
     Shutdown,
 }
 
 impl ShardedRouterV2 {
     pub fn new(num_shards: usize) -> Self {
+        Self::build(num_shards, None)
+    }
+
+    /// Create a new sharded router with metrics instrumentation.
+    pub fn new_with_metrics(num_shards: usize, metrics: Arc<EngineMetrics>) -> Self {
+        Self::build(num_shards, Some(metrics))
+    }
+
+    fn build(num_shards: usize, metrics: Option<Arc<EngineMetrics>>) -> Self {
         let channel_capacity = 4096;
         let mut shards = Vec::with_capacity(num_shards);
 
-        for _ in 0..num_shards {
+        for shard_id in 0..num_shards {
             let (tx, rx) = bounded::<ShardMsg>(channel_capacity);
+            let metrics_clone = metrics.clone();
 
             let handle = thread::spawn(move || {
-                shard_v2_worker_loop(rx);
+                shard_v2_worker_loop(rx, shard_id, metrics_clone);
             });
 
             shards.push(ShardV2 {
@@ -237,7 +268,9 @@ impl ShardedRouterV2 {
         Self {
             shards,
             symbol_to_shard: FxHashMap::default(),
+            symbol_names: FxHashMap::default(),
             num_shards,
+            metrics,
         }
     }
 
@@ -245,6 +278,8 @@ impl ShardedRouterV2 {
     pub fn add_symbol(&mut self, config: SymbolConfig) {
         let id = config.id;
         let shard_idx = (id.0 as usize) % self.num_shards;
+        self.symbol_names
+            .insert(id, format!("{}/{}", config.base, config.quote));
         self.symbol_to_shard.insert(id, shard_idx);
         let _ = self.shards[shard_idx]
             .cmd_tx
@@ -252,25 +287,65 @@ impl ShardedRouterV2 {
     }
 
     /// Process a command synchronously.
+    ///
+    /// Note: `halt_symbol`/`resume_symbol` are eventually consistent — a command
+    /// already queued may be processed before the halt message.
     pub fn process(&self, cmd: Command) -> Vec<MatchEvent> {
         let symbol = cmd.symbol();
+        let ts = cmd.timestamp();
         let shard_idx = match self.symbol_to_shard.get(&symbol) {
             Some(&idx) => idx,
             None => {
                 return vec![MatchEvent::OrderRejected {
                     order_id: 0,
                     reason: RejectReason::SymbolNotFound,
-                    timestamp: cmd.timestamp(),
+                    timestamp: ts,
                 }];
             }
         };
 
         let (reply_tx, reply_rx) = bounded(1);
-        let _ = self.shards[shard_idx].cmd_tx.send(ShardMsg::Command {
-            cmd,
-            reply: reply_tx,
-        });
-        reply_rx.recv().unwrap()
+        if self.shards[shard_idx]
+            .cmd_tx
+            .send(ShardMsg::Command {
+                cmd,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return vec![MatchEvent::OrderRejected {
+                order_id: 0,
+                reason: RejectReason::SymbolNotFound,
+                timestamp: ts,
+            }];
+        }
+        reply_rx.recv().unwrap_or_else(|_| {
+            vec![MatchEvent::OrderRejected {
+                order_id: 0,
+                reason: RejectReason::SymbolNotFound,
+                timestamp: ts,
+            }]
+        })
+    }
+
+    /// Halt trading for a symbol (circuit breaker).
+    pub fn halt_symbol(&self, symbol: SymbolId) -> bool {
+        if let Some(&shard_idx) = self.symbol_to_shard.get(&symbol) {
+            let _ = self.shards[shard_idx].cmd_tx.send(ShardMsg::HaltSymbol(symbol));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Resume trading for a symbol.
+    pub fn resume_symbol(&self, symbol: SymbolId) -> bool {
+        if let Some(&shard_idx) = self.symbol_to_shard.get(&symbol) {
+            let _ = self.shards[shard_idx].cmd_tx.send(ShardMsg::ResumeSymbol(symbol));
+            true
+        } else {
+            false
+        }
     }
 
     pub fn shutdown(mut self) {
@@ -285,13 +360,48 @@ impl ShardedRouterV2 {
     }
 }
 
-fn shard_v2_worker_loop(rx: Receiver<ShardMsg>) {
+fn shard_v2_worker_loop(
+    rx: Receiver<ShardMsg>,
+    shard_id: usize,
+    metrics: Option<Arc<EngineMetrics>>,
+) {
+    let _span = info_span!("shard_worker", shard_id).entered();
     let mut engines: FxHashMap<SymbolId, Engine> = FxHashMap::default();
+    let mut symbol_names: FxHashMap<SymbolId, String> = FxHashMap::default();
 
     while let Ok(msg) = rx.recv() {
         match msg {
             ShardMsg::Command { cmd, reply } => {
                 let symbol = cmd.symbol();
+                let sym_name = symbol_names
+                    .get(&symbol)
+                    .map(|s| s.as_str())
+                    .unwrap_or("unknown");
+
+                let cmd_type_str = match &cmd {
+                    Command::PlaceOrder(_) => "place_order",
+                    Command::CancelOrder { .. } => "cancel_order",
+                    Command::AmendOrder { .. } => "amend_order",
+                };
+
+                if let Some(ref m) = metrics {
+                    match &cmd {
+                        Command::PlaceOrder(order) => {
+                            m.record_place_order(order.side, order.order_type, order.tif, sym_name);
+                        }
+                        Command::CancelOrder { .. } => {
+                            m.record_command_type("cancel_order");
+                        }
+                        Command::AmendOrder { .. } => {
+                            m.record_command_type("amend_order");
+                        }
+                    }
+                    m.record_shard_command(shard_id);
+                }
+
+                trace!(symbol = sym_name, cmd_type = cmd_type_str, "processing command");
+
+                let start = std::time::Instant::now();
                 let events = if let Some(engine) = engines.get_mut(&symbol) {
                     engine.process(cmd).to_vec()
                 } else {
@@ -301,11 +411,50 @@ fn shard_v2_worker_loop(rx: Receiver<ShardMsg>) {
                         timestamp: cmd.timestamp(),
                     }]
                 };
+                let duration = start.elapsed();
+
+                if let Some(ref m) = metrics {
+                    m.record_events(&events, sym_name, duration);
+                    m.record_matching_duration(cmd_type_str, duration);
+                    if let Some(engine) = engines.get(&symbol) {
+                        m.update_book_state(engine.book(), sym_name);
+                        m.set_stop_orders_pending(
+                            engine.stop_book().len() as i64,
+                            sym_name,
+                        );
+                    }
+                }
+
+                let trades_count = events
+                    .iter()
+                    .filter(|e| matches!(e, MatchEvent::Trade(_)))
+                    .count();
+                debug!(
+                    symbol = sym_name,
+                    trades = trades_count,
+                    duration_us = duration.as_micros() as u64,
+                    "command processed"
+                );
+
                 let _ = reply.send(events);
             }
             ShardMsg::AddSymbol(config) => {
                 let id = config.id;
+                let name = format!("{}/{}", config.base, config.quote);
+                symbol_names.insert(id, name);
                 engines.insert(id, Engine::new(config));
+            }
+            ShardMsg::HaltSymbol(symbol) => {
+                if let Some(engine) = engines.get_mut(&symbol) {
+                    engine.halt_trading();
+                    debug!(symbol = ?symbol, "trading halted for symbol");
+                }
+            }
+            ShardMsg::ResumeSymbol(symbol) => {
+                if let Some(engine) = engines.get_mut(&symbol) {
+                    engine.resume_trading();
+                    debug!(symbol = ?symbol, "trading resumed for symbol");
+                }
             }
             ShardMsg::Shutdown => break,
         }

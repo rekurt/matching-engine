@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+rule_files:
+  - alerts.yml
+
+scrape_configs:
+  - job_name: 'matching-engine'
+    static_configs:
+      - targets: ['host.docker.internal:9091']  # Docker Desktop (Mac/Win)
+      # On Linux, use: targets: ['172.17.0.1:9091'] or add --add-host=host.docker.internal:host-gateway
+    metrics_path: /metrics

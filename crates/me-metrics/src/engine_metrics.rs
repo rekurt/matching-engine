@@ -1,15 +1,15 @@
 use std::time::Duration;
 
 use prometheus::{
-    Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
-    IntGaugeVec, Opts, Registry, TextEncoder,
+    Encoder, GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec,
+    IntGauge, IntGaugeVec, Opts, Registry, TextEncoder,
 };
 
 use me_book::book::OrderBook;
 use me_core::events::{MatchEvent, RejectReason};
 use me_core::order::OrderType;
 use me_core::types::{Side, SCALE};
-use me_engine::command::Command;
+use me_core::order::TimeInForce;
 
 // ─── EngineMetrics ──────────────────────────────────────────────────────────
 
@@ -84,6 +84,46 @@ pub struct EngineMetrics {
     pub wal_bytes_written_total: IntCounter,
     /// Snapshot saves.
     pub snapshot_saves_total: IntCounter,
+
+    // ── Connection Metrics ─────────────────────────────────────────────
+    /// Total connections opened (transport: tcp/uds).
+    pub connections_total: IntCounterVec,
+    /// Currently active connections (transport).
+    pub connections_active: IntGaugeVec,
+    /// Total bytes received (transport).
+    pub connection_bytes_in_total: IntCounterVec,
+    /// Total bytes sent (transport).
+    pub connection_bytes_out_total: IntCounterVec,
+    /// Total frames received (transport).
+    pub connection_frames_in_total: IntCounterVec,
+    /// Total frames sent (transport).
+    pub connection_frames_out_total: IntCounterVec,
+
+    // ── Protocol Errors ────────────────────────────────────────────────
+    /// Protocol errors by type (error_type).
+    pub protocol_errors_total: IntCounterVec,
+
+    // ── Matching Detail ────────────────────────────────────────────────
+    /// Matching duration by command type (command_type: place_order/cancel/amend).
+    pub matching_duration_seconds: HistogramVec,
+    /// Depth of cascading stop triggers.
+    pub stop_cascade_depth: Histogram,
+    /// Duration of cascading stop triggers.
+    pub stop_cascade_duration_seconds: Histogram,
+
+    // ── Shard Metrics ──────────────────────────────────────────────────
+    /// Queue depth per shard (shard).
+    pub shard_queue_depth: IntGaugeVec,
+    /// Total commands per shard (shard).
+    pub shard_commands_total: IntCounterVec,
+
+    // ── WAL Detail ─────────────────────────────────────────────────────
+    /// WAL flush duration.
+    pub wal_flush_duration_seconds: Histogram,
+    /// Snapshot duration.
+    pub snapshot_duration_seconds: Histogram,
+    /// Snapshot size in bytes.
+    pub snapshot_size_bytes: IntGauge,
 
     /// Registry reference for the HTTP handler.
     registry: Registry,
@@ -362,6 +402,184 @@ impl EngineMetrics {
             .register(Box::new(snapshot_saves_total.clone()))
             .expect("metric can be registered");
 
+        // ── Connection Metrics ──────────────────────────────────────────
+        let connections_total = IntCounterVec::new(
+            Opts::new("me_connections_total", "Total connections opened"),
+            &["transport"],
+        )
+        .expect("metric can be created");
+        registry
+            .register(Box::new(connections_total.clone()))
+            .expect("metric can be registered");
+
+        let connections_active = IntGaugeVec::new(
+            Opts::new("me_connections_active", "Currently active connections"),
+            &["transport"],
+        )
+        .expect("metric can be created");
+        registry
+            .register(Box::new(connections_active.clone()))
+            .expect("metric can be registered");
+
+        let connection_bytes_in_total = IntCounterVec::new(
+            Opts::new("me_connection_bytes_in_total", "Total bytes received"),
+            &["transport"],
+        )
+        .expect("metric can be created");
+        registry
+            .register(Box::new(connection_bytes_in_total.clone()))
+            .expect("metric can be registered");
+
+        let connection_bytes_out_total = IntCounterVec::new(
+            Opts::new("me_connection_bytes_out_total", "Total bytes sent"),
+            &["transport"],
+        )
+        .expect("metric can be created");
+        registry
+            .register(Box::new(connection_bytes_out_total.clone()))
+            .expect("metric can be registered");
+
+        let connection_frames_in_total = IntCounterVec::new(
+            Opts::new("me_connection_frames_in_total", "Total frames received"),
+            &["transport"],
+        )
+        .expect("metric can be created");
+        registry
+            .register(Box::new(connection_frames_in_total.clone()))
+            .expect("metric can be registered");
+
+        let connection_frames_out_total = IntCounterVec::new(
+            Opts::new("me_connection_frames_out_total", "Total frames sent"),
+            &["transport"],
+        )
+        .expect("metric can be created");
+        registry
+            .register(Box::new(connection_frames_out_total.clone()))
+            .expect("metric can be registered");
+
+        // ── Protocol Errors ─────────────────────────────────────────────
+        let protocol_errors_total = IntCounterVec::new(
+            Opts::new("me_protocol_errors_total", "Protocol errors by type"),
+            &["error_type"],
+        )
+        .expect("metric can be created");
+        registry
+            .register(Box::new(protocol_errors_total.clone()))
+            .expect("metric can be registered");
+
+        // ── Matching Detail ─────────────────────────────────────────────
+        let matching_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "me_matching_duration_seconds",
+                "Matching duration by command type",
+            )
+            .buckets(vec![
+                0.000_001, // 1us
+                0.000_005, // 5us
+                0.000_010, // 10us
+                0.000_025, // 25us
+                0.000_050, // 50us
+                0.000_100, // 100us
+                0.000_250, // 250us
+                0.000_500, // 500us
+                0.001_000, // 1ms
+                0.005_000, // 5ms
+                0.010_000, // 10ms
+            ]),
+            &["command_type"],
+        )
+        .expect("metric can be created");
+        registry
+            .register(Box::new(matching_duration_seconds.clone()))
+            .expect("metric can be registered");
+
+        let stop_cascade_depth = Histogram::with_opts(
+            HistogramOpts::new(
+                "me_stop_cascade_depth",
+                "Depth of cascading stop triggers",
+            )
+            .buckets(vec![1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 50.0, 100.0]),
+        )
+        .expect("metric can be created");
+        registry
+            .register(Box::new(stop_cascade_depth.clone()))
+            .expect("metric can be registered");
+
+        let stop_cascade_duration_seconds = Histogram::with_opts(
+            HistogramOpts::new(
+                "me_stop_cascade_duration_seconds",
+                "Duration of cascading stop triggers",
+            )
+            .buckets(vec![
+                0.000_001, // 1us
+                0.000_005, // 5us
+                0.000_010, // 10us
+                0.000_025, // 25us
+                0.000_050, // 50us
+                0.000_100, // 100us
+                0.000_250, // 250us
+                0.000_500, // 500us
+                0.001_000, // 1ms
+                0.005_000, // 5ms
+                0.010_000, // 10ms
+            ]),
+        )
+        .expect("metric can be created");
+        registry
+            .register(Box::new(stop_cascade_duration_seconds.clone()))
+            .expect("metric can be registered");
+
+        // ── Shard Metrics ───────────────────────────────────────────────
+        let shard_queue_depth = IntGaugeVec::new(
+            Opts::new("me_shard_queue_depth", "Queue depth per shard"),
+            &["shard"],
+        )
+        .expect("metric can be created");
+        registry
+            .register(Box::new(shard_queue_depth.clone()))
+            .expect("metric can be registered");
+
+        let shard_commands_total = IntCounterVec::new(
+            Opts::new("me_shard_commands_total", "Total commands per shard"),
+            &["shard"],
+        )
+        .expect("metric can be created");
+        registry
+            .register(Box::new(shard_commands_total.clone()))
+            .expect("metric can be registered");
+
+        // ── WAL Detail ──────────────────────────────────────────────────
+        let wal_flush_duration_seconds = Histogram::with_opts(
+            HistogramOpts::new(
+                "me_wal_flush_duration_seconds",
+                "WAL flush duration",
+            )
+            .buckets(vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]),
+        )
+        .expect("metric can be created");
+        registry
+            .register(Box::new(wal_flush_duration_seconds.clone()))
+            .expect("metric can be registered");
+
+        let snapshot_duration_seconds = Histogram::with_opts(
+            HistogramOpts::new(
+                "me_snapshot_duration_seconds",
+                "Snapshot duration",
+            )
+            .buckets(vec![0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0]),
+        )
+        .expect("metric can be created");
+        registry
+            .register(Box::new(snapshot_duration_seconds.clone()))
+            .expect("metric can be registered");
+
+        let snapshot_size_bytes =
+            IntGauge::new("me_snapshot_size_bytes", "Snapshot size in bytes")
+                .expect("metric can be created");
+        registry
+            .register(Box::new(snapshot_size_bytes.clone()))
+            .expect("metric can be registered");
+
         Self {
             orders_total,
             orders_rejected_total,
@@ -391,32 +609,54 @@ impl EngineMetrics {
             wal_writes_total,
             wal_bytes_written_total,
             snapshot_saves_total,
+            connections_total,
+            connections_active,
+            connection_bytes_in_total,
+            connection_bytes_out_total,
+            connection_frames_in_total,
+            connection_frames_out_total,
+            protocol_errors_total,
+            matching_duration_seconds,
+            stop_cascade_depth,
+            stop_cascade_duration_seconds,
+            shard_queue_depth,
+            shard_commands_total,
+            wal_flush_duration_seconds,
+            snapshot_duration_seconds,
+            snapshot_size_bytes,
             registry: registry.clone(),
         }
     }
 
     // ─── Convenience methods ────────────────────────────────────────────────
 
-    /// Record an incoming command (increments `me_commands_total` and
-    /// `me_orders_total` for PlaceOrder commands).
-    pub fn record_command(&self, cmd: &Command, symbol: &str) {
-        let command_type = match cmd {
-            Command::PlaceOrder(_) => "place_order",
-            Command::CancelOrder { .. } => "cancel_order",
-            Command::AmendOrder { .. } => "amend_order",
-        };
+    /// Record an incoming command by type string.
+    /// `command_type` should be "place_order", "cancel_order", or "amend_order".
+    pub fn record_command_type(&self, command_type: &str) {
         self.commands_total
             .with_label_values(&[command_type])
             .inc();
+    }
 
-        if let Command::PlaceOrder(order) = cmd {
-            let side = side_label(order.side);
-            let order_type = order_type_label(order.order_type);
-            let tif = tif_label(order.tif);
-            self.orders_total
-                .with_label_values(&[side, order_type, tif, symbol])
-                .inc();
-        }
+    /// Record an incoming place order with full details.
+    pub fn record_place_order(
+        &self,
+        side: Side,
+        order_type: OrderType,
+        tif: TimeInForce,
+        symbol: &str,
+    ) {
+        self.commands_total
+            .with_label_values(&["place_order"])
+            .inc();
+        self.orders_total
+            .with_label_values(&[
+                side_label(side),
+                order_type_label(order_type),
+                tif_label(tif),
+                symbol,
+            ])
+            .inc();
     }
 
     /// Record events produced by the engine after processing a command.
@@ -651,6 +891,101 @@ impl EngineMetrics {
         self.active_symbols.set(count);
     }
 
+    /// Record a new connection being opened.
+    pub fn record_connection_open(&self, transport: &str) {
+        self.connections_total.with_label_values(&[transport]).inc();
+        self.connections_active
+            .with_label_values(&[transport])
+            .inc();
+    }
+
+    /// Record a connection being closed.
+    pub fn record_connection_close(&self, transport: &str) {
+        self.connections_active
+            .with_label_values(&[transport])
+            .dec();
+    }
+
+    /// Record bytes received on a transport.
+    pub fn record_bytes_in(&self, transport: &str, bytes: usize) {
+        self.connection_bytes_in_total
+            .with_label_values(&[transport])
+            .inc_by(bytes as u64);
+    }
+
+    /// Record bytes sent on a transport.
+    pub fn record_bytes_out(&self, transport: &str, bytes: usize) {
+        self.connection_bytes_out_total
+            .with_label_values(&[transport])
+            .inc_by(bytes as u64);
+    }
+
+    /// Record a frame received on a transport.
+    pub fn record_frame_in(&self, transport: &str) {
+        self.connection_frames_in_total
+            .with_label_values(&[transport])
+            .inc();
+    }
+
+    /// Record frames sent on a transport.
+    pub fn record_frame_out(&self, transport: &str, count: usize) {
+        self.connection_frames_out_total
+            .with_label_values(&[transport])
+            .inc_by(count as u64);
+    }
+
+    /// Record a protocol error.
+    pub fn record_protocol_error(&self, error_type: &str) {
+        self.protocol_errors_total
+            .with_label_values(&[error_type])
+            .inc();
+    }
+
+    /// Record matching duration for a command type.
+    pub fn record_matching_duration(&self, command_type: &str, duration: Duration) {
+        self.matching_duration_seconds
+            .with_label_values(&[command_type])
+            .observe(duration.as_secs_f64());
+    }
+
+    /// Record a stop cascade event with depth and duration.
+    pub fn record_stop_cascade(&self, depth: usize, duration: Duration) {
+        self.stop_cascade_depth.observe(depth as f64);
+        self.stop_cascade_duration_seconds
+            .observe(duration.as_secs_f64());
+    }
+
+    /// Record a command processed by a shard.
+    pub fn record_shard_command(&self, shard_id: usize) {
+        self.shard_commands_total
+            .with_label_values(&[&shard_id.to_string()])
+            .inc();
+    }
+
+    /// Set the queue depth for a shard.
+    pub fn set_shard_queue_depth(&self, shard_id: usize, depth: i64) {
+        self.shard_queue_depth
+            .with_label_values(&[&shard_id.to_string()])
+            .set(depth);
+    }
+
+    /// Record a WAL flush duration.
+    pub fn record_wal_flush_duration(&self, duration: Duration) {
+        self.wal_flush_duration_seconds
+            .observe(duration.as_secs_f64());
+    }
+
+    /// Record a snapshot duration.
+    pub fn record_snapshot_duration(&self, duration: Duration) {
+        self.snapshot_duration_seconds
+            .observe(duration.as_secs_f64());
+    }
+
+    /// Set the snapshot size in bytes.
+    pub fn set_snapshot_size(&self, bytes: i64) {
+        self.snapshot_size_bytes.set(bytes);
+    }
+
     /// Return a reference to the registry this metrics instance is registered
     /// with.
     pub fn registry(&self) -> &Registry {
@@ -714,6 +1049,8 @@ fn reject_reason_label(reason: RejectReason) -> &'static str {
         RejectReason::OrderNotFound => "order_not_found",
         RejectReason::DuplicateOrderId => "duplicate_order_id",
         RejectReason::SymbolNotFound => "symbol_not_found",
+        RejectReason::TradingHalted => "trading_halted",
+        RejectReason::RiskCheckFailed => "risk_check_failed",
     }
 }
 
