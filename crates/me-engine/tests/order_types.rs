@@ -307,7 +307,7 @@ fn test_c34_partial_fill_below_min() {
 
     // After fill, order 2 should still be on book even if remaining is small
     // (min_qty is only checked at order entry, not after fills)
-    assert!(count_trades(&events) >= 2);
+    assert!(count_trades(events) >= 2);
 }
 
 /// C35: Fill for exactly qty_step units — correct remaining
@@ -324,7 +324,7 @@ fn test_c35_fill_exact_step() {
         2000,
     )));
 
-    assert!(count_trades(&events) >= 1);
+    assert!(count_trades(events) >= 1);
     // Remaining of ask should be 1.0 - 0.00001
     assert!(e.book().contains_order(1)); // ask still on book
 }
@@ -707,7 +707,7 @@ fn test_i70_amend_nonexistent() {
         new_qty: None,
         timestamp: 5000,
     });
-    assert!(has_reject(&events, RejectReason::OrderNotFound));
+    assert!(has_reject(events, RejectReason::OrderNotFound));
 }
 
 // ─── J. Book State Integrity ────────────────────────────────────────────────

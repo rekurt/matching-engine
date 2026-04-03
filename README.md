@@ -1,5 +1,9 @@
 # Matching Engine
 
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://rubx-x.github.io/matching-engine/)
+
 **HFT Cryptocurrency Spot Matching Engine** written in Rust.
 
 A high-performance, deterministic order matching engine designed for cryptocurrency spot trading. Built as a Rust workspace with clear separation of concerns, zero-allocation hot paths, and a binary wire protocol for sub-microsecond network overhead.
@@ -9,6 +13,38 @@ A high-performance, deterministic order matching engine designed for cryptocurre
 **HFT Криптовалютный Спот Матчинг-Движок** на Rust.
 
 Высокопроизводительный детерминированный движок сведения ордеров, спроектированный для спотовой торговли криптовалютами. Построен как Rust workspace с четким разделением ответственности, нулевыми аллокациями на горячем пути и бинарным сетевым протоколом для минимальных сетевых задержек.
+
+---
+
+## 5-Minute Quickstart
+
+```bash
+# 1. Build
+cargo build --release
+
+# 2. Run (BTC/USDT, ETH/USDT, SOL/USDT by default)
+./target/release/me-server
+
+# 3. Place your first order (Go)
+go run examples/go/place_order/main.go
+```
+
+```go
+// 4. Connect and place an order
+client, _ := meclient.Dial("localhost:9090")
+defer client.Close()
+client.PlaceOrder(&meclient.PlaceOrderMsg{
+    OrderID: 1, SymbolID: 0, Side: meclient.SideBuy,
+    OrderType: meclient.OrderTypeLimit, TimeInForce: meclient.TimeInForceGTC,
+    Price: meclient.NewDecimal(50000.0), Qty: meclient.NewDecimal(0.5),
+})
+
+// 5. Read the response
+event, _ := client.ReadEvent()
+fmt.Printf("event: %+v\n", event)
+```
+
+Full walkthrough: [docs.rubx-x.github.io/matching-engine/](https://rubx-x.github.io/matching-engine/quickstart.html)
 
 ---
 
@@ -54,12 +90,16 @@ A high-performance, deterministic order matching engine designed for cryptocurre
 
 | Crate | Description | Описание |
 |-------|-------------|----------|
-| **me-core** | Foundational types: `FixedPrice`, `FixedQty`, `Order`, `Trade`, `SymbolConfig`, `MatchEvent`, error types | Базовые типы: цены, количества, ордера, сделки, события, ошибки |
-| **me-book** | Order book implementation: `OrderBook` (BTreeMap + Slab + intrusive linked list), `PriceLevel`, `StopBook`, matching algorithm | Стакан ордеров: BTreeMap + Slab + интрузивный связанный список, уровни цен, стоп-книга, алгоритм мэтчинга |
-| **me-engine** | Engine per trading pair, `Command` dispatch, `Router` (single-thread), `ShardedRouterV2` (multi-thread) | Движок на пару, диспетчеризация команд, маршрутизатор (однопоточный и шардированный) |
+| [**me-core**](crates/me-core/README.md) | Foundational types: `FixedPrice`, `FixedQty`, `Order`, `Trade`, `SymbolConfig`, `MatchEvent`, error types | Базовые типы: цены, количества, ордера, сделки, события, ошибки |
+| [**me-book**](crates/me-book/README.md) | Order book implementation: `OrderBook` (BTreeMap + Slab + intrusive linked list), `PriceLevel`, `StopBook`, matching algorithm | Стакан ордеров: BTreeMap + Slab + интрузивный связанный список, уровни цен, стоп-книга, алгоритм мэтчинга |
+| [**me-engine**](crates/me-engine/README.md) | Engine per trading pair, `Command` dispatch, `Router` (single-thread), `ShardedRouterV2` (multi-thread) | Движок на пару, диспетчеризация команд, маршрутизатор (однопоточный и шардированный) |
 | **me-persist** | Write-Ahead Log (WAL) with CRC32 checksums, snapshot save/load with atomic writes | WAL с CRC32 контрольными суммами, сохранение/загрузка снепшотов с атомарной записью |
-| **me-io** | Binary wire protocol definition, frame codec (encode/decode), TCP and Unix Domain Socket async servers (tokio) | Определение бинарного протокола, кодек фреймов, TCP и UDS серверы (tokio) |
+| [**me-io**](crates/me-io/README.md) | Binary wire protocol definition, frame codec (encode/decode), TCP and Unix Domain Socket async servers (tokio) | Определение бинарного протокола, кодек фреймов, TCP и UDS серверы (tokio) |
 | **me-bench** | Criterion benchmarks: throughput, latency, end-to-end scenarios (18 benchmarks) | Бенчмарки Criterion: пропускная способность, задержка, сквозные сценарии (18 бенчмарков) |
+| [**me-server**](crates/me-server/README.md) | Server binary: TCP + UDS listeners, TOML config, admin REST API (Axum) | Серверный бинарник: TCP + UDS, TOML конфигурация, REST API администрирования |
+| **me-metrics** | Prometheus metrics (50+ counters, gauges, histograms) | Метрики Prometheus (50+ счётчиков, гейджей, гистограмм) |
+| [**me-risk**](crates/me-risk/README.md) | Risk management: rate limiting, position limits | Риск-менеджмент: ограничение частоты, лимиты позиций |
+| **me-audit** | Audit logging: JSON events for all matching operations | Аудит: JSON-события всех операций мэтчинга |
 | **me-datagen** | Realistic order flow generator with configurable parameters: volatility, market/limit/stop ratios, cancel/amend ratios | Генератор реалистичного потока ордеров с настраиваемыми параметрами |
 
 ## Features / Возможности
@@ -250,8 +290,52 @@ For detailed byte layouts, see [docs/PROTOCOL.md](docs/PROTOCOL.md) and `clients
 
 Подробные схемы байтов описаны в [docs/PROTOCOL.md](docs/PROTOCOL.md) и `clients/go/meclient/README.md`.
 
+## Quick Start / Быстрый старт
+
+```bash
+# Build and run with defaults (BTC/USDT, ETH/USDT, SOL/USDT)
+cargo build --release
+./target/release/me-server
+
+# Run with custom config
+./target/release/me-server --config config.toml
+
+# Run with CLI overrides
+./target/release/me-server --config config.toml --tcp-addr 127.0.0.1:9090 --shards 8
+```
+
+## Client Examples / Примеры клиентов
+
+Client examples are available in multiple languages:
+
+Примеры клиентов доступны на нескольких языках:
+
+| Language | Path | Dependencies |
+|----------|------|--------------|
+| **Go** | [`examples/go/`](examples/go/) | meclient library |
+| **Python** | [`examples/python/`](examples/python/) | stdlib only (socket + struct) |
+| **TypeScript** | [`examples/typescript/`](examples/typescript/) | Node.js Buffer API |
+| **Rust** | [`examples/rust/`](examples/rust/) | tokio |
+
+The Go client library is available at [`clients/go/meclient/`](clients/go/meclient/).
+
+Go клиентская библиотека находится в [`clients/go/meclient/`](clients/go/meclient/).
+
 ## Documentation / Документация
 
-- [Architecture (deep technical)](docs/ARCHITECTURE.md) / [Архитектура (техническая)](docs/ARCHITECTURE.md)
+**Online (GitHub Pages):** [https://rubx-x.github.io/matching-engine/](https://rubx-x.github.io/matching-engine/)
+
+- [Architecture (English)](docs/ARCHITECTURE.md) / [Архитектура (русский)](docs/ARCHITECTURE_RU.md)
 - [Wire Protocol Specification](docs/PROTOCOL.md) / [Спецификация протокола](docs/PROTOCOL.md)
-- [Go Client README](clients/go/meclient/README.md) / [Go клиент](clients/go/meclient/README.md)
+- [Deployment & Configuration](docs/DEPLOYMENT.md) / [Развёртывание и конфигурация](docs/DEPLOYMENT.md)
+- [Admin HTTP API Reference](docs/API.md) / [Справочник Admin API](docs/API.md)
+- [Go Client](clients/go/meclient/README.md) / [Go клиент](clients/go/meclient/README.md)
+- [Contributing](CONTRIBUTING.md) / [Участие в разработке](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
+
+### Cargo Documentation / Документация Cargo
+
+```bash
+# Generate and open API documentation
+cargo doc --workspace --no-deps --open
+```

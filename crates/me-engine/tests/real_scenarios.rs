@@ -116,7 +116,7 @@ fn test_place_cancel_replace_pattern() {
     for round in 0..100u64 {
         let id = round * 3 + 1;
         let base_price = 9_000_000_000i64 + (round as i64) * 1_000_000; // 90.00 + round * 0.01
-        let replace_price = base_price + 500_000; // not on tick, use base instead
+        let _replace_price = base_price + 500_000; // not on tick, use base instead
         let cmd_place = Command::PlaceOrder(Order::new_limit(
             id,
             SymbolId(0),
@@ -164,7 +164,6 @@ fn test_market_making_scenario() {
 
     // Taker sells 1.0 (hits the bid)
     let events = e.process(market_sell(next_id, 1.0)).to_vec();
-    next_id += 1;
     assert!(count_trades(&events) >= 1);
 
     // Market maker still has orders

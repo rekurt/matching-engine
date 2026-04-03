@@ -58,21 +58,26 @@ All integers are **little-endian**. Prices and quantities use **fixed-point** re
 
 ### Frame Format
 
-Every message is wrapped in a length-prefixed frame:
+Every message is wrapped in a length-prefixed, versioned frame:
 
 ```
-┌──────────┬──────────┬──────────┬─────────────────┐
-│ len: u32 │ type: u8 │ seq: u64 │ payload: [u8]   │
-│ 4 bytes  │ 1 byte   │ 8 bytes  │ variable        │
-└──────────┴──────────┴──────────┴─────────────────┘
+┌──────────┬──────────┬──────────┬──────────┬─────────────────┐
+│ len: u32 │ ver: u8  │ type: u8 │ seq: u64 │ payload: [u8]   │
+│ 4 bytes  │ 1 byte   │ 1 byte   │ 8 bytes  │ variable        │
+└──────────┴──────────┴──────────┴──────────┴─────────────────┘
 ```
 
 - **len** (4 bytes, LE): Length of `payload` only (not including header)
+- **ver** (1 byte): Protocol version (currently 1)
 - **type** (1 byte): Message type identifier
 - **seq** (8 bytes, LE): Sequence number for request/response correlation
 - **payload** (variable): Message-specific data
 
-Header size: 13 bytes total.
+Header size: 14 bytes total.
+
+### Connection Lifecycle
+
+After connecting, the client must send a **Handshake** (0x05) frame before any commands. The server replies with **HandshakeAck** (0x1A). The `Dial` and `DialUDS` functions perform this automatically.
 
 ### Fixed-Point Decimal
 
@@ -86,6 +91,23 @@ All prices and quantities are 64-bit integers with an implicit scale of 10^8:
 
 Prices are **signed i64** (to support comparison arithmetic).
 Quantities are **unsigned u64** (always non-negative).
+
+### Connection Management Messages
+
+#### Handshake (0x05) — 1 byte payload
+`ClientVersion(u8)` — sent by client on connect
+
+#### HandshakeAck (0x1A) — 1 byte payload
+`ServerVersion(u8)` — server response to Handshake
+
+#### Ping (0x04) — 0 bytes payload
+Sent by client; server responds with Pong
+
+#### Pong (0x18) — 0 bytes payload
+Server response to Ping
+
+#### Error (0x19) — variable payload
+`ErrorCode(u16 LE) + MsgLen(u16 LE) + Message(bytes)`
 
 ### Inbound Messages (Client → Engine)
 

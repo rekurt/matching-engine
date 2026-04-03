@@ -1,3 +1,26 @@
+//! # me-core — Foundational Types for the Matching Engine
+//!
+//! This crate provides the core type definitions used across all other crates
+//! in the matching engine workspace.
+//!
+//! ## Key Types
+//!
+//! - [`FixedPrice`] / [`FixedQty`] — Fixed-point decimal types (scale 10^8, no floating-point)
+//! - [`Order`] — Complete order representation with all fields
+//! - [`Trade`] — Executed trade record
+//! - [`MatchEvent`] — Events emitted by the matching engine (accepted, rejected, filled, etc.)
+//! - [`SymbolConfig`] — Per-symbol configuration (tick size, lot size, precision)
+//! - [`EngineError`] — Typed error hierarchy
+//!
+//! ## Fixed-Point Arithmetic
+//!
+//! All prices and quantities use 8-decimal fixed-point representation:
+//! - Price `50000.50` is stored as `i64` value `5_000_050_000_000`
+//! - Quantity `0.5` is stored as `u64` value `50_000_000`
+//! - Scale factor: `10^8 = 100_000_000`
+//!
+//! This eliminates floating-point rounding issues in the matching hot path.
+
 pub mod errors;
 pub mod events;
 pub mod order;

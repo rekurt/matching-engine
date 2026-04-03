@@ -1,0 +1,24 @@
+# Build artifacts
+target/
+**/*.rs.bk
+
+# Dev tooling
+.git/
+.github/
+.vscode/
+.idea/
+
+# Docs & monitoring configs (not needed in image)
+docs/
+monitoring/
+examples/
+
+# CI/CD
+.dockerignore
+Dockerfile*
+docker-compose*
+
+# Local overrides
+*.env
+*.env.*
+config.local.toml

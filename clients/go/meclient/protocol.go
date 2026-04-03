@@ -9,11 +9,15 @@ import (
 
 // Frame header sizes.
 const (
-	frameLenSize  = 4 // u32 length prefix
-	frameTypeSize = 1 // u8 message type
-	frameSeqSize  = 8 // u64 sequence number
-	frameHeaderSize = frameLenSize + frameTypeSize + frameSeqSize // 13 bytes
+	frameLenSize    = 4 // u32 length prefix
+	frameVerSize    = 1 // u8 protocol version
+	frameTypeSize   = 1 // u8 message type
+	frameSeqSize    = 8 // u64 sequence number
+	frameHeaderSize = frameLenSize + frameVerSize + frameTypeSize + frameSeqSize // 14 bytes
 )
+
+// ProtocolVersion is the current wire protocol version.
+const ProtocolVersion uint8 = 1
 
 // Inbound message type IDs (client to engine).
 const (
@@ -22,16 +26,25 @@ const (
 	MsgAmendOrder  uint8 = 0x03
 )
 
+// Connection management message type IDs (bidirectional).
+const (
+	MsgPing      uint8 = 0x04
+	MsgHandshake uint8 = 0x05
+)
+
 // Outbound message type IDs (engine to client).
 const (
-	MsgOrderAccepted      uint8 = 0x10
-	MsgOrderRejected      uint8 = 0x11
-	MsgTrade              uint8 = 0x12
-	MsgOrderFilled        uint8 = 0x13
+	MsgOrderAccepted        uint8 = 0x10
+	MsgOrderRejected        uint8 = 0x11
+	MsgTrade                uint8 = 0x12
+	MsgOrderFilled          uint8 = 0x13
 	MsgOrderPartiallyFilled uint8 = 0x14
-	MsgOrderCancelled     uint8 = 0x15
-	MsgOrderAmended       uint8 = 0x16
-	MsgStopTriggered      uint8 = 0x17
+	MsgOrderCancelled       uint8 = 0x15
+	MsgOrderAmended         uint8 = 0x16
+	MsgStopTriggered        uint8 = 0x17
+	MsgPong                 uint8 = 0x18
+	MsgError                uint8 = 0x19
+	MsgHandshakeAck         uint8 = 0x1A
 )
 
 // Expected payload sizes for outbound messages.
@@ -60,47 +73,58 @@ var (
 	ErrInvalidPayloadSize = errors.New("meclient: invalid payload size")
 	// ErrUnknownMessageType is returned for unrecognized message types.
 	ErrUnknownMessageType = errors.New("meclient: unknown message type")
+	// ErrHandshakeFailed is returned when the server rejects the handshake.
+	ErrHandshakeFailed = errors.New("meclient: handshake failed")
+	// ErrProtocolError is returned when the server sends an Error frame.
+	ErrProtocolError = errors.New("meclient: protocol error")
 )
 
 // EncodeFrame encodes a frame with the given type, sequence number, and
 // payload into a byte slice ready for transmission.
+//
+// Wire layout: len(u32 LE, payload bytes only) + ver(u8) + type(u8) + seq(u64 LE) + payload
 func EncodeFrame(msgType uint8, seq uint64, payload []byte) []byte {
-	// Total frame: 4 (len) + 1 (type) + 8 (seq) + len(payload)
-	innerLen := uint32(frameTypeSize + frameSeqSize + len(payload))
-	buf := make([]byte, frameLenSize+int(innerLen))
-	binary.LittleEndian.PutUint32(buf[0:4], innerLen)
-	buf[4] = msgType
-	binary.LittleEndian.PutUint64(buf[5:13], seq)
-	copy(buf[13:], payload)
+	payloadLen := uint32(len(payload))
+	buf := make([]byte, frameHeaderSize+len(payload))
+	binary.LittleEndian.PutUint32(buf[0:4], payloadLen)
+	buf[4] = ProtocolVersion
+	buf[5] = msgType
+	binary.LittleEndian.PutUint64(buf[6:14], seq)
+	copy(buf[14:], payload)
 	return buf
 }
 
 // ReadFrame reads a single frame from the reader. It returns the message type,
 // sequence number, and payload. It returns io.EOF if the connection is closed
 // cleanly.
+//
+// Wire layout: len(u32 LE, payload bytes only) + ver(u8) + type(u8) + seq(u64 LE) + payload(len bytes)
 func ReadFrame(r io.Reader) (msgType uint8, seq uint64, payload []byte, err error) {
-	// Read length prefix.
-	var lenBuf [frameLenSize]byte
-	if _, err = io.ReadFull(r, lenBuf[:]); err != nil {
+	// Read the 14-byte header: len(4) + ver(1) + type(1) + seq(8)
+	var hdr [frameHeaderSize]byte
+	if _, err = io.ReadFull(r, hdr[:]); err != nil {
 		return 0, 0, nil, err
 	}
-	innerLen := binary.LittleEndian.Uint32(lenBuf[:])
-	if innerLen < uint32(frameTypeSize+frameSeqSize) {
-		return 0, 0, nil, fmt.Errorf("meclient: frame inner length %d too small", innerLen)
-	}
-	if innerLen > uint32(MaxFrameSize) {
+
+	payloadLen := binary.LittleEndian.Uint32(hdr[0:4])
+	// hdr[4] is the version byte (ignored for forward compat)
+	msgType = hdr[5]
+	seq = binary.LittleEndian.Uint64(hdr[6:14])
+
+	if payloadLen > uint32(MaxFrameSize) {
 		return 0, 0, nil, ErrFrameTooLarge
 	}
 
-	// Read the rest of the frame.
-	inner := make([]byte, innerLen)
-	if _, err = io.ReadFull(r, inner); err != nil {
+	if payloadLen == 0 {
+		return msgType, seq, nil, nil
+	}
+
+	// Read the payload.
+	payload = make([]byte, payloadLen)
+	if _, err = io.ReadFull(r, payload); err != nil {
 		return 0, 0, nil, err
 	}
 
-	msgType = inner[0]
-	seq = binary.LittleEndian.Uint64(inner[1:9])
-	payload = inner[9:]
 	return msgType, seq, payload, nil
 }
 
@@ -285,6 +309,20 @@ func DecodeEvent(msgType uint8, payload []byte) (*Event, error) {
 			return nil, err
 		}
 		return &Event{StopTriggered: e}, nil
+	case MsgPong:
+		return &Event{Pong: &PongEvent{}}, nil
+	case MsgError:
+		e, err := DecodeErrorFrame(payload)
+		if err != nil {
+			return nil, err
+		}
+		return &Event{Error: e}, nil
+	case MsgHandshakeAck:
+		e, err := DecodeHandshakeAck(payload)
+		if err != nil {
+			return nil, err
+		}
+		return &Event{HandshakeAck: e}, nil
 	default:
 		return nil, fmt.Errorf("%w: 0x%02x", ErrUnknownMessageType, msgType)
 	}
@@ -383,5 +421,44 @@ func decodeStopTriggered(data []byte) (*StopTriggered, error) {
 		OrderId:      binary.LittleEndian.Uint64(data[0:8]),
 		TriggerPrice: NewDecimalRaw(int64(binary.LittleEndian.Uint64(data[8:16]))),
 		Timestamp:    binary.LittleEndian.Uint64(data[16:24]),
+	}, nil
+}
+
+// ─── Connection management codecs ─────────────────────────────────────────
+
+// EncodeHandshake builds a Handshake payload: a single byte with the client
+// protocol version.
+func EncodeHandshake() []byte {
+	return []byte{ProtocolVersion}
+}
+
+// DecodeHandshakeAck decodes a HandshakeAck payload (1 byte: server version).
+func DecodeHandshakeAck(data []byte) (*HandshakeAckEvent, error) {
+	if len(data) < 1 {
+		return nil, fmt.Errorf("%w: HandshakeAck expected at least 1 byte, got %d", ErrInvalidPayloadSize, len(data))
+	}
+	return &HandshakeAckEvent{
+		ServerVersion: data[0],
+	}, nil
+}
+
+// DecodeErrorFrame decodes an Error frame payload:
+// error_code(u16 LE) + msg_len(u16 LE) + message(bytes).
+func DecodeErrorFrame(data []byte) (*ErrorEvent, error) {
+	if len(data) < 4 {
+		return nil, fmt.Errorf("%w: Error frame expected at least 4 bytes, got %d", ErrInvalidPayloadSize, len(data))
+	}
+	code := binary.LittleEndian.Uint16(data[0:2])
+	msgLen := binary.LittleEndian.Uint16(data[2:4])
+	msg := ""
+	if msgLen > 0 {
+		if len(data) < 4+int(msgLen) {
+			return nil, fmt.Errorf("%w: Error frame message truncated", ErrInvalidPayloadSize)
+		}
+		msg = string(data[4 : 4+msgLen])
+	}
+	return &ErrorEvent{
+		Code:    code,
+		Message: msg,
 	}, nil
 }

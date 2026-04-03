@@ -1,46 +1,68 @@
-# Stage 1: Build
-FROM rust:latest AS builder
+# syntax=docker/dockerfile:1.7
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1 — cargo-chef planner
+#   Computes a "recipe" (dependency manifest) so the next stage can cache deps
+#   independently from source code changes.
+# ─────────────────────────────────────────────────────────────────────────────
+FROM rust:1.88-slim-bookworm AS chef
+RUN cargo install cargo-chef --locked
+WORKDIR /build
 
-WORKDIR /usr/src/matching-engine
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2 — dependency cache
+#   Only re-runs when Cargo.toml / Cargo.lock changes, not on src edits.
+# ─────────────────────────────────────────────────────────────────────────────
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
 
-# Copy manifests first for better layer caching
-COPY Cargo.toml Cargo.lock ./
-COPY crates/me-core/Cargo.toml crates/me-core/Cargo.toml
-COPY crates/me-book/Cargo.toml crates/me-book/Cargo.toml
-COPY crates/me-engine/Cargo.toml crates/me-engine/Cargo.toml
-COPY crates/me-persist/Cargo.toml crates/me-persist/Cargo.toml
-COPY crates/me-io/Cargo.toml crates/me-io/Cargo.toml
-COPY crates/me-bench/Cargo.toml crates/me-bench/Cargo.toml
-COPY crates/me-datagen/Cargo.toml crates/me-datagen/Cargo.toml
-COPY crates/me-server/Cargo.toml crates/me-server/Cargo.toml
+FROM chef AS cacher
+COPY --from=planner /build/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json -p me-server
 
-# Create stub sources so cargo can resolve the workspace
-RUN mkdir -p crates/me-core/src && echo "" > crates/me-core/src/lib.rs && \
-    mkdir -p crates/me-book/src && echo "" > crates/me-book/src/lib.rs && \
-    mkdir -p crates/me-engine/src && echo "" > crates/me-engine/src/lib.rs && \
-    mkdir -p crates/me-persist/src && echo "" > crates/me-persist/src/lib.rs && \
-    mkdir -p crates/me-io/src && echo "" > crates/me-io/src/lib.rs && \
-    mkdir -p crates/me-bench/src && echo "" > crates/me-bench/src/lib.rs && \
-    mkdir -p crates/me-datagen/src && echo "fn main() {}" > crates/me-datagen/src/main.rs && \
-    mkdir -p crates/me-server/src && echo "fn main() {}" > crates/me-server/src/main.rs
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 3 — full build
+# ─────────────────────────────────────────────────────────────────────────────
+FROM chef AS builder
+COPY . .
 
-# Pre-build dependencies
-RUN cargo build --release -p me-server 2>/dev/null || true
-
-# Copy real sources
-COPY crates/ crates/
-
-# Build the actual binary
+# Reuse pre-built deps from cacher stage
+COPY --from=cacher /build/target target
 RUN cargo build --release -p me-server
 
-# Stage 2: Runtime
-FROM debian:bookworm-slim
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 4 — minimal runtime image
+# ─────────────────────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+# Install only what's needed at runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libssl3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 meuser \
+    && useradd  --uid 10001 --gid meuser --no-create-home --shell /sbin/nologin meuser
 
-COPY --from=builder /usr/src/matching-engine/target/release/me-server /usr/local/bin/me-server
+COPY --from=builder /build/target/release/me-server /usr/local/bin/me-server
 
-EXPOSE 9090
+# OCI image metadata
+ARG BUILD_DATE
+ARG GIT_SHA
+LABEL org.opencontainers.image.title="matching-engine" \
+      org.opencontainers.image.description="High-performance HFT cryptocurrency spot matching engine" \
+      org.opencontainers.image.source="https://github.com/rekurt/matching-engine" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.licenses="MIT"
 
-CMD ["me-server", "--tcp-addr", "0.0.0.0:9090"]
+USER meuser
+
+# TCP order gateway | HTTP metrics+admin
+EXPOSE 9090 8080
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+ENTRYPOINT ["/usr/local/bin/me-server"]
+CMD ["--tcp-addr", "0.0.0.0:9090", "--metrics-addr", "0.0.0.0:8080"]
