@@ -115,8 +115,9 @@ pub fn decode_frame(
         .ok_or(DecodeError::InvalidMessageType(msg_type_raw))?;
 
     // Sequence validation: must be strictly increasing.
-    if seq <= conn.last_client_seq && seq != 0 {
-        // seq == 0 is only valid for the very first frame (handshake)
+    // seq == 0 is only valid for the very first Handshake frame.
+    let is_first_handshake = seq == 0 && msg_type == MessageType::Handshake;
+    if seq <= conn.last_client_seq && !is_first_handshake {
         return Err(DecodeError::SequenceOutOfOrder {
             expected_min: conn.last_client_seq + 1,
             got: seq,

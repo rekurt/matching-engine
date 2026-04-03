@@ -55,9 +55,9 @@ cargo audit                      # проверка CVE
 
 ### Обработка ошибок в codec
 
-`decode_frame` возвращает `Result<Option<DecodedFrame>, DecodeError>`:
-- `Ok(None)` — данных недостаточно (Incomplete)
-- `Ok(Some(frame))` — успешный фрейм
+`decode_frame` возвращает `Result<(DecodedFrame, usize), DecodeError>`:
+- `Ok((frame, n))` — успешный фрейм, `n` байт потреблено
+- `Err(DecodeError::Incomplete)` — данных недостаточно
 - `Err(DecodeError::...)` — протокольная ошибка (закрыть соединение)
 
 ### ConnectionCodecState
