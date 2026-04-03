@@ -141,10 +141,10 @@
 - Create: `docs/src/api.md`
 - Create: `docs/src/deployment.md`
 
-- [ ] `docs/src/protocol.md` — перенести из `docs/PROTOCOL.md`, добавить hex-примеры фреймов и объяснения каждого поля
-- [ ] `docs/src/architecture.md` — перенести из `docs/ARCHITECTURE.md`, добавить диаграммы потоков данных
-- [ ] `docs/src/api.md` — перенести из `docs/API.md`, структурировать по типам команд и событий
-- [ ] `docs/src/deployment.md` — перенести из `docs/DEPLOYMENT.md`, добавить Docker Compose пример
+- [x] `docs/src/protocol.md` — перенести из `docs/PROTOCOL.md`, добавить hex-примеры фреймов и объяснения каждого поля
+- [x] `docs/src/architecture.md` — перенести из `docs/ARCHITECTURE.md`, добавить диаграммы потоков данных
+- [x] `docs/src/api.md` — перенести из `docs/API.md`, структурировать по типам команд и событий
+- [x] `docs/src/deployment.md` — перенести из `docs/DEPLOYMENT.md`, добавить Docker Compose пример
 
 ### Task 5e: GitHub Actions для публикации mdBook на GitHub Pages
 
