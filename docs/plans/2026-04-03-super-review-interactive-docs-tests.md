@@ -93,10 +93,10 @@
 **Files:**
 - Create: `crates/me-risk/tests/risk_tests.rs`
 
-- [ ] Тест: rate limiting — превышение лимита возвращает ошибку
-- [ ] Тест: position limit — превышение отклоняет ордер
-- [ ] Тест: корректный сброс rate limit counter после истечения окна
-- [ ] Запустить `cargo test -p me-risk` — все должны пройти
+- [x] Тест: rate limiting — превышение лимита возвращает ошибку
+- [x] Тест: position limit — превышение отклоняет ордер
+- [x] Тест: корректный сброс rate limit counter после истечения окна
+- [x] Запустить `cargo test -p me-risk` — все должны пройти
 
 ### Task 5a: mdBook — структура проекта в docs/
 
