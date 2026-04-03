@@ -279,10 +279,14 @@ Client examples are available in multiple languages:
 
 | Language | Path | Dependencies |
 |----------|------|--------------|
-| **Go** | [`clients/go/meclient/`](clients/go/meclient/) | stdlib only |
+| **Go** | [`examples/go/`](examples/go/) | meclient library |
 | **Python** | [`examples/python/`](examples/python/) | stdlib only (socket + struct) |
 | **TypeScript** | [`examples/typescript/`](examples/typescript/) | Node.js Buffer API |
 | **Rust** | [`examples/rust/`](examples/rust/) | tokio |
+
+The Go client library is available at [`clients/go/meclient/`](clients/go/meclient/).
+
+Go клиентская библиотека находится в [`clients/go/meclient/`](clients/go/meclient/).
 
 ## Documentation / Документация
 
