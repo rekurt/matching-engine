@@ -21,11 +21,11 @@ struct StopLocation {
 /// Stop-sell orders trigger when market price falls to/below stop_price.
 pub struct StopBook {
     /// Stop-buy orders: triggered when price >= stop_price.
-    /// BTreeMap<stop_price ascending, Vec<Order>>
+    /// `BTreeMap<stop_price ascending, Vec<Order>>`
     stop_buys: BTreeMap<FixedPrice, Vec<Order>>,
 
     /// Stop-sell orders: triggered when price <= stop_price.
-    /// BTreeMap<Reverse(stop_price) so lowest stop_price is first, Vec<Order>>
+    /// `BTreeMap<Reverse(stop_price), Vec<Order>>` — lowest stop_price first
     stop_sells: BTreeMap<Reverse<FixedPrice>, Vec<Order>>,
 
     /// Index for O(1) cancel of stop orders.

@@ -1,7 +1,7 @@
 /// Integration tests: Limit orders, Market orders, Price-Time priority
 /// Covers test scenarios A (1-8), B (9-22), D (36-40) from the plan.
-use me_core::events::{EventBuffer, MatchEvent, RejectReason};
-use me_core::order::{Order, OrderStatus, OrderType, TimeInForce};
+use me_core::events::{MatchEvent, RejectReason};
+use me_core::order::{Order, TimeInForce};
 use me_core::symbol::SymbolConfig;
 use me_core::types::*;
 use me_engine::command::Command;

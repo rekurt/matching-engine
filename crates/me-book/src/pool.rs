@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn test_remove_and_reuse() {
         let mut slab = Slab::with_capacity(4);
-        let k0 = slab.insert("a");
+        let _k0 = slab.insert("a");
         let k1 = slab.insert("b");
         let _k2 = slab.insert("c");
 

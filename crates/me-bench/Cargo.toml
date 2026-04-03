@@ -22,3 +22,7 @@ harness = false
 [[bench]]
 name = "e2e"
 harness = false
+
+[[bench]]
+name = "stress"
+harness = false

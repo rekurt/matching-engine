@@ -60,10 +60,14 @@ func TestEncodeAmendNoFields(t *testing.T) {
 func TestEncodeFrame(t *testing.T) {
 	payload := EncodePlaceOrder(&PlaceOrderRequest{OrderId: 1, Qty: NewDecimal(1.0)})
 	frame := EncodeFrame(0x01, 100, payload)
-	// Frame: 4 (len) + 1 (type) + 8 (seq) + 37 (payload) = 50
-	if len(frame) != 50 { t.Fatalf("expected 50, got %d", len(frame)) }
-	if frame[4] != 0x01 { t.Fatal("type") }
-	seq := binary.LittleEndian.Uint64(frame[5:13])
+	// Frame: 4 (len) + 1 (ver) + 1 (type) + 8 (seq) + 37 (payload) = 51
+	if len(frame) != 51 { t.Fatalf("expected 51, got %d", len(frame)) }
+	// len field covers payload only (37 bytes)
+	payloadLen := binary.LittleEndian.Uint32(frame[0:4])
+	if payloadLen != 37 { t.Fatalf("expected payload len 37, got %d", payloadLen) }
+	if frame[4] != ProtocolVersion { t.Fatalf("version: got %d", frame[4]) }
+	if frame[5] != 0x01 { t.Fatal("type") }
+	seq := binary.LittleEndian.Uint64(frame[6:14])
 	if seq != 100 { t.Fatalf("seq: %d", seq) }
 }
 
@@ -168,9 +172,24 @@ func TestDecodeStopTriggered(t *testing.T) {
 // ─── Edge Cases ─────────────────────────────────────────────────────────────
 
 func TestReadFrameIncomplete(t *testing.T) {
+	// Only 5 bytes, but header needs 14 -- should fail with unexpected EOF.
 	r := bytes.NewReader([]byte{5, 0, 0, 0, 1})
 	_, _, _, err := ReadFrame(r)
 	if err == nil { t.Fatal("expected error") }
+}
+
+func TestReadFrameIncompletePayload(t *testing.T) {
+	// Valid 14-byte header claiming 10-byte payload, but only 2 payload bytes.
+	var hdr [16]byte
+	binary.LittleEndian.PutUint32(hdr[0:4], 10) // payload len = 10
+	hdr[4] = ProtocolVersion
+	hdr[5] = MsgOrderAccepted
+	binary.LittleEndian.PutUint64(hdr[6:14], 1) // seq
+	hdr[14] = 0xAA // partial payload
+	hdr[15] = 0xBB
+	r := bytes.NewReader(hdr[:])
+	_, _, _, err := ReadFrame(r)
+	if err == nil { t.Fatal("expected error for incomplete payload") }
 }
 
 func TestDecodeInvalidType(t *testing.T) {
@@ -181,6 +200,67 @@ func TestDecodeInvalidType(t *testing.T) {
 func TestDecodeShortPayload(t *testing.T) {
 	_, err := DecodeEvent(0x10, make([]byte, 8))
 	if err == nil { t.Fatal("expected error") }
+}
+
+// ─── Connection management message tests ──────────────────────────────────
+
+func TestEncodeHandshake(t *testing.T) {
+	payload := EncodeHandshake()
+	if len(payload) != 1 { t.Fatalf("expected 1, got %d", len(payload)) }
+	if payload[0] != ProtocolVersion { t.Fatalf("expected version %d, got %d", ProtocolVersion, payload[0]) }
+}
+
+func TestDecodeHandshakeAck(t *testing.T) {
+	ev := decodeFirst(t, mkFrame(MsgHandshakeAck, 1, []byte{ProtocolVersion}))
+	if ev.HandshakeAck == nil { t.Fatal("nil") }
+	if ev.HandshakeAck.ServerVersion != ProtocolVersion {
+		t.Fatalf("server version: got %d, want %d", ev.HandshakeAck.ServerVersion, ProtocolVersion)
+	}
+}
+
+func TestDecodePong(t *testing.T) {
+	ev := decodeFirst(t, mkFrame(MsgPong, 42, nil))
+	if ev.Pong == nil { t.Fatal("nil") }
+}
+
+func TestDecodeErrorFrame(t *testing.T) {
+	// Build error payload: code(2) + msg_len(2) + message
+	msg := "handshake required"
+	payload := make([]byte, 4+len(msg))
+	binary.LittleEndian.PutUint16(payload[0:2], ErrorCodeHandshakeRequired)
+	binary.LittleEndian.PutUint16(payload[2:4], uint16(len(msg)))
+	copy(payload[4:], msg)
+
+	ev := decodeFirst(t, mkFrame(MsgError, 1, payload))
+	if ev.Error == nil { t.Fatal("nil") }
+	if ev.Error.Code != ErrorCodeHandshakeRequired {
+		t.Fatalf("code: got %d, want %d", ev.Error.Code, ErrorCodeHandshakeRequired)
+	}
+	if ev.Error.Message != msg {
+		t.Fatalf("message: got %q, want %q", ev.Error.Message, msg)
+	}
+}
+
+func TestDecodeErrorFrameEmpty(t *testing.T) {
+	// Error with zero-length message.
+	payload := make([]byte, 4)
+	binary.LittleEndian.PutUint16(payload[0:2], ErrorCodeBackpressure)
+	binary.LittleEndian.PutUint16(payload[2:4], 0)
+
+	ev := decodeFirst(t, mkFrame(MsgError, 1, payload))
+	if ev.Error == nil { t.Fatal("nil") }
+	if ev.Error.Code != ErrorCodeBackpressure { t.Fatal("code") }
+	if ev.Error.Message != "" { t.Fatalf("message should be empty, got %q", ev.Error.Message) }
+}
+
+func TestEncodeFrameZeroPayload(t *testing.T) {
+	// Ping has no payload.
+	frame := EncodeFrame(MsgPing, 5, nil)
+	// 14 header + 0 payload = 14
+	if len(frame) != 14 { t.Fatalf("expected 14, got %d", len(frame)) }
+	payloadLen := binary.LittleEndian.Uint32(frame[0:4])
+	if payloadLen != 0 { t.Fatalf("expected payload len 0, got %d", payloadLen) }
+	if frame[5] != MsgPing { t.Fatalf("type: got 0x%02x", frame[5]) }
 }
 
 func TestAllRejectReasons(t *testing.T) {

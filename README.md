@@ -1,5 +1,8 @@
 # Matching Engine
 
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **HFT Cryptocurrency Spot Matching Engine** written in Rust.
 
 A high-performance, deterministic order matching engine designed for cryptocurrency spot trading. Built as a Rust workspace with clear separation of concerns, zero-allocation hot paths, and a binary wire protocol for sub-microsecond network overhead.
@@ -60,6 +63,10 @@ A high-performance, deterministic order matching engine designed for cryptocurre
 | **me-persist** | Write-Ahead Log (WAL) with CRC32 checksums, snapshot save/load with atomic writes | WAL с CRC32 контрольными суммами, сохранение/загрузка снепшотов с атомарной записью |
 | **me-io** | Binary wire protocol definition, frame codec (encode/decode), TCP and Unix Domain Socket async servers (tokio) | Определение бинарного протокола, кодек фреймов, TCP и UDS серверы (tokio) |
 | **me-bench** | Criterion benchmarks: throughput, latency, end-to-end scenarios (18 benchmarks) | Бенчмарки Criterion: пропускная способность, задержка, сквозные сценарии (18 бенчмарков) |
+| **me-server** | Server binary: TCP + UDS listeners, TOML config, admin REST API (Axum) | Серверный бинарник: TCP + UDS, TOML конфигурация, REST API администрирования |
+| **me-metrics** | Prometheus metrics (50+ counters, gauges, histograms) | Метрики Prometheus (50+ счётчиков, гейджей, гистограмм) |
+| **me-risk** | Risk management: rate limiting, position limits | Риск-менеджмент: ограничение частоты, лимиты позиций |
+| **me-audit** | Audit logging: JSON events for all matching operations | Аудит: JSON-события всех операций мэтчинга |
 | **me-datagen** | Realistic order flow generator with configurable parameters: volatility, market/limit/stop ratios, cancel/amend ratios | Генератор реалистичного потока ордеров с настраиваемыми параметрами |
 
 ## Features / Возможности
@@ -250,8 +257,50 @@ For detailed byte layouts, see [docs/PROTOCOL.md](docs/PROTOCOL.md) and `clients
 
 Подробные схемы байтов описаны в [docs/PROTOCOL.md](docs/PROTOCOL.md) и `clients/go/meclient/README.md`.
 
+## Quick Start / Быстрый старт
+
+```bash
+# Build and run with defaults (BTC/USDT, ETH/USDT, SOL/USDT)
+cargo build --release
+./target/release/me-server
+
+# Run with custom config
+./target/release/me-server --config config.toml
+
+# Run with CLI overrides
+./target/release/me-server --config config.toml --tcp-addr 127.0.0.1:9090 --shards 8
+```
+
+## Client Examples / Примеры клиентов
+
+Client examples are available in multiple languages:
+
+Примеры клиентов доступны на нескольких языках:
+
+| Language | Path | Dependencies |
+|----------|------|--------------|
+| **Go** | [`examples/go/`](examples/go/) | meclient library |
+| **Python** | [`examples/python/`](examples/python/) | stdlib only (socket + struct) |
+| **TypeScript** | [`examples/typescript/`](examples/typescript/) | Node.js Buffer API |
+| **Rust** | [`examples/rust/`](examples/rust/) | tokio |
+
+The Go client library is available at [`clients/go/meclient/`](clients/go/meclient/).
+
+Go клиентская библиотека находится в [`clients/go/meclient/`](clients/go/meclient/).
+
 ## Documentation / Документация
 
-- [Architecture (deep technical)](docs/ARCHITECTURE.md) / [Архитектура (техническая)](docs/ARCHITECTURE.md)
+- [Architecture (English)](docs/ARCHITECTURE.md) / [Архитектура (русский)](docs/ARCHITECTURE_RU.md)
 - [Wire Protocol Specification](docs/PROTOCOL.md) / [Спецификация протокола](docs/PROTOCOL.md)
-- [Go Client README](clients/go/meclient/README.md) / [Go клиент](clients/go/meclient/README.md)
+- [Deployment & Configuration](docs/DEPLOYMENT.md) / [Развёртывание и конфигурация](docs/DEPLOYMENT.md)
+- [Admin HTTP API Reference](docs/API.md) / [Справочник Admin API](docs/API.md)
+- [Go Client](clients/go/meclient/README.md) / [Go клиент](clients/go/meclient/README.md)
+- [Contributing](CONTRIBUTING.md) / [Участие в разработке](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
+
+### Cargo Documentation / Документация Cargo
+
+```bash
+# Generate and open API documentation
+cargo doc --workspace --no-deps --open
+```

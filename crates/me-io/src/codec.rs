@@ -84,7 +84,11 @@ pub fn decode_frame(
         return Err(DecodeError::Incomplete);
     }
 
-    let len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+    let len = u32::from_le_bytes(
+        buf[0..4]
+            .try_into()
+            .expect("frame len: buf checked >= FRAME_HEADER_SIZE"),
+    );
     if len > MAX_PAYLOAD_SIZE {
         return Err(DecodeError::PayloadTooLarge(len));
     }
@@ -100,7 +104,11 @@ pub fn decode_frame(
     }
 
     let msg_type_raw = buf[5];
-    let seq = u64::from_le_bytes(buf[6..14].try_into().unwrap());
+    let seq = u64::from_le_bytes(
+        buf[6..14]
+            .try_into()
+            .expect("frame seq: buf checked >= FRAME_HEADER_SIZE"),
+    );
     let payload = &buf[FRAME_HEADER_SIZE..total_size];
 
     let msg_type = MessageType::from_u8(msg_type_raw)
@@ -170,13 +178,14 @@ fn decode_place_order(payload: &[u8]) -> Result<Command, DecodeError> {
     if payload.len() < 37 {
         return Err(DecodeError::InvalidPayload("PlaceOrder too short".into()));
     }
-    let order_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    // Safety: payload.len() >= 37 checked above.
+    let order_id = u64::from_le_bytes(payload[0..8].try_into().expect("PlaceOrder: order_id"));
     if order_id == 0 {
         return Err(DecodeError::InvalidPayload(
             "PlaceOrder order_id must be non-zero".into(),
         ));
     }
-    let symbol = SymbolId(u16::from_le_bytes(payload[8..10].try_into().unwrap()));
+    let symbol = SymbolId(u16::from_le_bytes(payload[8..10].try_into().expect("PlaceOrder: symbol")));
     let side = match payload[10] {
         0 => Side::Buy,
         1 => Side::Sell,
@@ -199,9 +208,9 @@ fn decode_place_order(payload: &[u8]) -> Result<Command, DecodeError> {
         2 => TimeInForce::FOK,
         v => return Err(DecodeError::InvalidPayload(format!("Invalid TIF: {v}"))),
     };
-    let price = FixedPrice::from_raw(i64::from_le_bytes(payload[13..21].try_into().unwrap()));
-    let stop_price = FixedPrice::from_raw(i64::from_le_bytes(payload[21..29].try_into().unwrap()));
-    let qty_raw = u64::from_le_bytes(payload[29..37].try_into().unwrap());
+    let price = FixedPrice::from_raw(i64::from_le_bytes(payload[13..21].try_into().expect("PlaceOrder: price")));
+    let stop_price = FixedPrice::from_raw(i64::from_le_bytes(payload[21..29].try_into().expect("PlaceOrder: stop_price")));
+    let qty_raw = u64::from_le_bytes(payload[29..37].try_into().expect("PlaceOrder: qty"));
     if qty_raw == 0 {
         return Err(DecodeError::InvalidPayload(
             "PlaceOrder qty must be non-zero".into(),
@@ -263,13 +272,14 @@ fn decode_cancel_order(payload: &[u8]) -> Result<Command, DecodeError> {
     if payload.len() < 10 {
         return Err(DecodeError::InvalidPayload("CancelOrder too short".into()));
     }
-    let order_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    // Safety: payload.len() >= 10 checked above.
+    let order_id = u64::from_le_bytes(payload[0..8].try_into().expect("CancelOrder: order_id"));
     if order_id == 0 {
         return Err(DecodeError::InvalidPayload(
             "CancelOrder order_id must be non-zero".into(),
         ));
     }
-    let symbol = SymbolId(u16::from_le_bytes(payload[8..10].try_into().unwrap()));
+    let symbol = SymbolId(u16::from_le_bytes(payload[8..10].try_into().expect("CancelOrder: symbol")));
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -288,13 +298,14 @@ fn decode_amend_order(payload: &[u8]) -> Result<Command, DecodeError> {
     if payload.len() < 12 {
         return Err(DecodeError::InvalidPayload("AmendOrder too short".into()));
     }
-    let order_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    // Safety: payload.len() >= 12 checked above.
+    let order_id = u64::from_le_bytes(payload[0..8].try_into().expect("AmendOrder: order_id"));
     if order_id == 0 {
         return Err(DecodeError::InvalidPayload(
             "AmendOrder order_id must be non-zero".into(),
         ));
     }
-    let symbol = SymbolId(u16::from_le_bytes(payload[8..10].try_into().unwrap()));
+    let symbol = SymbolId(u16::from_le_bytes(payload[8..10].try_into().expect("AmendOrder: symbol")));
 
     let mut offset = 10;
     let new_price = if payload[offset] == 1 {
@@ -304,7 +315,7 @@ fn decode_amend_order(payload: &[u8]) -> Result<Command, DecodeError> {
                 "AmendOrder price truncated".into(),
             ));
         }
-        let p = i64::from_le_bytes(payload[offset..offset + 8].try_into().unwrap());
+        let p = i64::from_le_bytes(payload[offset..offset + 8].try_into().expect("AmendOrder: new_price"));
         offset += 8;
         let price = FixedPrice::from_raw(p);
         if !price.is_positive() {
@@ -325,7 +336,7 @@ fn decode_amend_order(payload: &[u8]) -> Result<Command, DecodeError> {
                 "AmendOrder qty truncated".into(),
             ));
         }
-        let q = u64::from_le_bytes(payload[offset..offset + 8].try_into().unwrap());
+        let q = u64::from_le_bytes(payload[offset..offset + 8].try_into().expect("AmendOrder: new_qty"));
         if q == 0 {
             return Err(DecodeError::InvalidPayload(
                 "AmendOrder new_qty must be non-zero".into(),

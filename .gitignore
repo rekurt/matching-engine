@@ -3,3 +3,6 @@
 *.swo
 *~
 .DS_Store
+
+# ralphex progress logs
+.ralphex/progress/
