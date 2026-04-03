@@ -13,7 +13,7 @@ fn bench_limit_order_throughput(c: &mut Criterion) {
             let mut engine = Engine::new(config);
 
             // Pre-populate asks
-            for i in 0..1000 {
+            for i in 0..1000u64 {
                 let order = Order::new_limit(
                     i + 100_000,
                     SymbolId(0),
@@ -26,6 +26,8 @@ fn bench_limit_order_throughput(c: &mut Criterion) {
                 engine.process(Command::PlaceOrder(order));
             }
 
+            // All bids at the SAME price — BTreeMap stays at 1 bid level,
+            // PriceLevel queue grows O(1) per append.
             let start = std::time::Instant::now();
             for i in 0..iters {
                 let order = Order::new_limit(
@@ -50,9 +52,8 @@ fn bench_market_order_throughput(c: &mut Criterion) {
             let config = SymbolConfig::default_btc_usdt();
             let mut engine = Engine::new(config);
 
-            let start = std::time::Instant::now();
+            // Pre-populate: one ask per iteration (all at same price)
             for i in 0..iters {
-                // Place an ask, then sweep it with a market buy
                 let ask = Order::new_limit(
                     i * 2 + 1,
                     SymbolId(0),
@@ -63,7 +64,11 @@ fn bench_market_order_throughput(c: &mut Criterion) {
                     0,
                 );
                 engine.process(Command::PlaceOrder(ask));
+            }
 
+            // Measure ONLY market order sweeps
+            let start = std::time::Instant::now();
+            for i in 0..iters {
                 let buy = Order::new_market(
                     i * 2 + 2,
                     SymbolId(0),

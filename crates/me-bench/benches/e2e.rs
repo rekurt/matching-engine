@@ -74,21 +74,24 @@ fn engine_with_bids(n_levels: usize, orders_per_level: usize) -> (Engine, u64) {
 // ---------------------------------------------------------------------------
 
 fn bench_limit_no_match(c: &mut Criterion) {
-    let (mut engine, mut next_id) = engine_with_asks(100, 1);
-
     c.bench_function("e2e_limit_no_match", |b| {
-        b.iter(|| {
-            next_id += 1;
-            let order = Order::new_limit(
-                next_id,
-                SymbolId(0),
-                Side::Buy,
-                TimeInForce::GTC,
-                FixedPrice::from_raw(BASE_PRICE - 100 * TICK), // well below asks
-                FixedQty::from_raw(ONE_BTC),
-                0,
-            );
-            engine.process(Command::PlaceOrder(order));
+        b.iter_custom(|iters| {
+            let (mut engine, _) = engine_with_asks(100, 1);
+
+            let start = std::time::Instant::now();
+            for i in 0..iters {
+                let order = Order::new_limit(
+                    101 + i,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE - 100 * TICK), // well below asks
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
+                );
+                engine.process(Command::PlaceOrder(order));
+            }
+            start.elapsed()
         });
     });
 }
@@ -364,34 +367,35 @@ fn bench_fok_success(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 fn bench_fok_reject(c: &mut Criterion) {
-    // Book has 1 BTC ask, FOK wants 2 => reject.
-    let mut engine = fresh_engine();
-    let ask = Order::new_limit(
-        1,
-        SymbolId(0),
-        Side::Sell,
-        TimeInForce::GTC,
-        FixedPrice::from_raw(BASE_PRICE),
-        FixedQty::from_raw(ONE_BTC),
-        0,
-    );
-    engine.process(Command::PlaceOrder(ask));
-
-    let mut next_id = 100u64;
-
     c.bench_function("e2e_fok_reject", |b| {
-        b.iter(|| {
-            next_id += 1;
-            let buy = Order::new_limit(
-                next_id,
+        b.iter_custom(|iters| {
+            // Book has 1 BTC ask, FOK wants 2 => reject.
+            let mut engine = fresh_engine();
+            let ask = Order::new_limit(
+                1,
                 SymbolId(0),
-                Side::Buy,
-                TimeInForce::FOK,
+                Side::Sell,
+                TimeInForce::GTC,
                 FixedPrice::from_raw(BASE_PRICE),
-                FixedQty::from_raw(ONE_BTC * 2), // insufficient liquidity
+                FixedQty::from_raw(ONE_BTC),
                 0,
             );
-            engine.process(Command::PlaceOrder(buy));
+            engine.process(Command::PlaceOrder(ask));
+
+            let start = std::time::Instant::now();
+            for i in 0..iters {
+                let buy = Order::new_limit(
+                    100 + i,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::FOK,
+                    FixedPrice::from_raw(BASE_PRICE),
+                    FixedQty::from_raw(ONE_BTC * 2), // insufficient liquidity
+                    0,
+                );
+                engine.process(Command::PlaceOrder(buy));
+            }
+            start.elapsed()
         });
     });
 }
@@ -404,8 +408,8 @@ fn bench_cancel_mid_book(c: &mut Criterion) {
     c.bench_function("e2e_cancel_mid_book", |b| {
         b.iter_custom(|iters| {
             let mut engine = fresh_engine();
-            // Build a book with bids at many levels; we will cancel from the middle.
-            let total = iters.max(200);
+            // Ensure enough orders so every cancel targets a unique existing order.
+            let total = (iters * 2).max(200);
             for i in 0..total {
                 let order = Order::new_limit(
                     i + 1,
@@ -419,13 +423,12 @@ fn bench_cancel_mid_book(c: &mut Criterion) {
                 engine.process(Command::PlaceOrder(order));
             }
 
-            // Cancel from the middle range
-            let start_cancel = total / 4;
+            // Cancel from the middle range — each order exactly once
+            let start_offset = total / 4;
             let start = std::time::Instant::now();
             for i in 0..iters {
-                let id_to_cancel = start_cancel + (i % (total / 2)) + 1;
                 engine.process(Command::CancelOrder {
-                    order_id: id_to_cancel,
+                    order_id: start_offset + i + 1,
                     symbol: SymbolId(0),
                     timestamp: 0,
                 });
@@ -551,23 +554,25 @@ fn bench_amend_price_change(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 fn bench_stop_order_placement(c: &mut Criterion) {
-    let mut engine = fresh_engine();
-    let mut next_id = 1u64;
-
     c.bench_function("e2e_stop_order_placement", |b| {
-        b.iter(|| {
-            next_id += 1;
-            let order = Order::new_stop_limit(
-                next_id,
-                SymbolId(0),
-                Side::Buy,
-                TimeInForce::GTC,
-                FixedPrice::from_raw(BASE_PRICE + 10 * TICK), // limit price
-                FixedPrice::from_raw(BASE_PRICE + 5 * TICK),  // stop trigger
-                FixedQty::from_raw(ONE_BTC),
-                0,
-            );
-            engine.process(Command::PlaceOrder(order));
+        b.iter_custom(|iters| {
+            let mut engine = fresh_engine();
+
+            let start = std::time::Instant::now();
+            for i in 0..iters {
+                let order = Order::new_stop_limit(
+                    i + 1,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE + 10 * TICK), // limit price
+                    FixedPrice::from_raw(BASE_PRICE + 5 * TICK),  // stop trigger
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
+                );
+                engine.process(Command::PlaceOrder(order));
+            }
+            start.elapsed()
         });
     });
 }
@@ -663,11 +668,12 @@ fn bench_deep_book_match(c: &mut Criterion) {
         b.iter_custom(|iters| {
             let mut engine = fresh_engine();
             let levels: u64 = 1000;
+            let mut id: u64 = 1;
 
-            // Place 1000 ask levels, 1 order each
+            // Initial population: 1000 ask levels
             for lvl in 0..levels {
                 let ask = Order::new_limit(
-                    lvl + 1,
+                    id,
                     SymbolId(0),
                     Side::Sell,
                     TimeInForce::GTC,
@@ -676,13 +682,15 @@ fn bench_deep_book_match(c: &mut Criterion) {
                     0,
                 );
                 engine.process(Command::PlaceOrder(ask));
+                id += 1;
             }
 
-            let start = std::time::Instant::now();
-            for i in 0..iters {
-                // Each iter: sweep all 1000 levels, then replenish.
+            // Measure ONLY sweep time, replenish untimed
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..iters {
+                let start = std::time::Instant::now();
                 let sweep = Order::new_market(
-                    levels + 1 + i * (levels + 1),
+                    id,
                     SymbolId(0),
                     Side::Buy,
                     TimeInForce::GTC,
@@ -690,11 +698,13 @@ fn bench_deep_book_match(c: &mut Criterion) {
                     0,
                 );
                 engine.process(Command::PlaceOrder(sweep));
+                total += start.elapsed();
+                id += 1;
 
-                // Replenish asks for next iteration
+                // Untimed: replenish asks for next iteration
                 for lvl in 0..levels {
                     let ask = Order::new_limit(
-                        levels + 2 + i * (levels + 1) + lvl,
+                        id,
                         SymbolId(0),
                         Side::Sell,
                         TimeInForce::GTC,
@@ -703,9 +713,10 @@ fn bench_deep_book_match(c: &mut Criterion) {
                         0,
                     );
                     engine.process(Command::PlaceOrder(ask));
+                    id += 1;
                 }
             }
-            start.elapsed()
+            total
         });
     });
 }
@@ -825,6 +836,340 @@ fn bench_full_lifecycle(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// 19. Stop-market order placement
+// ---------------------------------------------------------------------------
+
+fn bench_stop_market_placement(c: &mut Criterion) {
+    c.bench_function("e2e_stop_market_placement", |b| {
+        b.iter_custom(|iters| {
+            let mut engine = fresh_engine();
+
+            let start = std::time::Instant::now();
+            for i in 0..iters {
+                let order = Order::new_stop_market(
+                    i + 1,
+                    SymbolId(0),
+                    Side::Sell,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE - 5 * TICK), // stop trigger below
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
+                );
+                engine.process(Command::PlaceOrder(order));
+            }
+            start.elapsed()
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 20. Amend qty UP (cancel+replace path, loses time priority)
+// ---------------------------------------------------------------------------
+
+fn bench_amend_qty_up(c: &mut Criterion) {
+    c.bench_function("e2e_amend_qty_up", |b| {
+        b.iter_custom(|iters| {
+            let mut engine = fresh_engine();
+            let count = 1000u64;
+            for i in 0..count {
+                let order = Order::new_limit(
+                    i + 1,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE - (i as i64 + 100) * TICK),
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
+                );
+                engine.process(Command::PlaceOrder(order));
+            }
+
+            let start = std::time::Instant::now();
+            for i in 0..iters {
+                let target_id = (i % count) + 1;
+                // Vary qty upward to always trigger cancel+replace path
+                let new_qty = ONE_BTC * 2 + (i % 8) as u64 * ONE_BTC;
+                engine.process(Command::AmendOrder {
+                    order_id: target_id,
+                    symbol: SymbolId(0),
+                    new_price: None,
+                    new_qty: Some(FixedQty::from_raw(new_qty)),
+                    timestamp: i,
+                });
+            }
+            start.elapsed()
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 21. Amend triggers match (price change crosses spread)
+// ---------------------------------------------------------------------------
+
+fn bench_amend_triggers_match(c: &mut Criterion) {
+    c.bench_function("e2e_amend_triggers_match", |b| {
+        b.iter_custom(|iters| {
+            let mut engine = fresh_engine();
+            let mut id = 1u64;
+
+            // For each iteration: place an ask + a low bid
+            for _ in 0..iters {
+                let ask = Order::new_limit(
+                    id,
+                    SymbolId(0),
+                    Side::Sell,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE),
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
+                );
+                engine.process(Command::PlaceOrder(ask));
+                id += 1;
+
+                let bid = Order::new_limit(
+                    id,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE - 100 * TICK), // won't cross
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
+                );
+                engine.process(Command::PlaceOrder(bid));
+                id += 1;
+            }
+
+            // Amend each bid's price UP to cross the spread → triggers match
+            let start = std::time::Instant::now();
+            for i in 0..iters {
+                let bid_id = (i * 2) + 2; // bid IDs: 2, 4, 6, ...
+                engine.process(Command::AmendOrder {
+                    order_id: bid_id,
+                    symbol: SymbolId(0),
+                    new_price: Some(FixedPrice::from_raw(BASE_PRICE)),
+                    new_qty: None,
+                    timestamp: i,
+                });
+            }
+            start.elapsed()
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 22. Market order on empty book (rejection fast-path)
+// ---------------------------------------------------------------------------
+
+fn bench_market_order_empty_book(c: &mut Criterion) {
+    c.bench_function("e2e_market_order_empty_book", |b| {
+        b.iter_custom(|iters| {
+            let mut engine = fresh_engine();
+
+            let start = std::time::Instant::now();
+            for i in 0..iters {
+                let buy = Order::new_market(
+                    i + 1,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
+                );
+                engine.process(Command::PlaceOrder(buy));
+            }
+            start.elapsed()
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 23. Trading halt rejection (circuit breaker)
+// ---------------------------------------------------------------------------
+
+fn bench_trading_halt_rejection(c: &mut Criterion) {
+    c.bench_function("e2e_trading_halt_rejection", |b| {
+        b.iter_custom(|iters| {
+            let mut engine = fresh_engine();
+            engine.halt_trading();
+
+            let start = std::time::Instant::now();
+            for i in 0..iters {
+                let order = Order::new_limit(
+                    i + 1,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE),
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
+                );
+                engine.process(Command::PlaceOrder(order));
+            }
+            start.elapsed()
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 24. Deep queue at single price level (10k orders FIFO)
+// ---------------------------------------------------------------------------
+
+fn bench_deep_queue_single_level(c: &mut Criterion) {
+    c.bench_function("e2e_deep_queue_single_level", |b| {
+        b.iter_custom(|iters| {
+            let mut engine = fresh_engine();
+            let depth = 10_000u64;
+            let mut id: u64 = 1;
+
+            // 10,000 asks all at the same price
+            for _ in 0..depth {
+                let ask = Order::new_limit(
+                    id,
+                    SymbolId(0),
+                    Side::Sell,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE),
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
+                );
+                engine.process(Command::PlaceOrder(ask));
+                id += 1;
+            }
+
+            // Measure sweep only, replenish untimed
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..iters {
+                let start = std::time::Instant::now();
+                let sweep = Order::new_market(
+                    id,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
+                    FixedQty::from_raw(ONE_BTC * depth),
+                    0,
+                );
+                engine.process(Command::PlaceOrder(sweep));
+                total += start.elapsed();
+                id += 1;
+
+                // Untimed: replenish
+                for _ in 0..depth {
+                    let ask = Order::new_limit(
+                        id,
+                        SymbolId(0),
+                        Side::Sell,
+                        TimeInForce::GTC,
+                        FixedPrice::from_raw(BASE_PRICE),
+                        FixedQty::from_raw(ONE_BTC),
+                        0,
+                    );
+                    engine.process(Command::PlaceOrder(ask));
+                    id += 1;
+                }
+            }
+            total
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 25. Cancel non-existent order (OrderNotFound fast-path)
+// ---------------------------------------------------------------------------
+
+fn bench_cancel_nonexistent(c: &mut Criterion) {
+    c.bench_function("e2e_cancel_nonexistent", |b| {
+        b.iter_custom(|iters| {
+            let mut engine = fresh_engine();
+            // Populate some orders so the hash map isn't empty
+            for i in 0..100u64 {
+                let order = Order::new_limit(
+                    i + 1,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE - (i as i64) * TICK),
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
+                );
+                engine.process(Command::PlaceOrder(order));
+            }
+
+            let start = std::time::Instant::now();
+            for i in 0..iters {
+                engine.process(Command::CancelOrder {
+                    order_id: 1_000_000 + i, // IDs that don't exist
+                    symbol: SymbolId(0),
+                    timestamp: 0,
+                });
+            }
+            start.elapsed()
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 26. HFT cancel-replace pattern (cancel + place on every tick)
+// ---------------------------------------------------------------------------
+
+fn bench_hft_cancel_replace(c: &mut Criterion) {
+    c.bench_function("e2e_hft_cancel_replace", |b| {
+        b.iter_custom(|iters| {
+            let mut engine = fresh_engine();
+            // Seed ask side for realistic spread
+            for i in 0..100u64 {
+                let ask = Order::new_limit(
+                    i + 1,
+                    SymbolId(0),
+                    Side::Sell,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE + (i as i64 + 1) * TICK),
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
+                );
+                engine.process(Command::PlaceOrder(ask));
+            }
+
+            // Place initial bid
+            let mut bid_id = 10_000u64;
+            let initial = Order::new_limit(
+                bid_id,
+                SymbolId(0),
+                Side::Buy,
+                TimeInForce::GTC,
+                FixedPrice::from_raw(BASE_PRICE - TICK),
+                FixedQty::from_raw(ONE_BTC),
+                0,
+            );
+            engine.process(Command::PlaceOrder(initial));
+
+            let start = std::time::Instant::now();
+            for i in 0..iters {
+                // Cancel current bid
+                engine.process(Command::CancelOrder {
+                    order_id: bid_id,
+                    symbol: SymbolId(0),
+                    timestamp: i,
+                });
+                // Place new bid at slightly different price
+                bid_id += 1;
+                let price_offset = (i % 10) as i64 + 1;
+                let new_bid = Order::new_limit(
+                    bid_id,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE - price_offset * TICK),
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
+                );
+                engine.process(Command::PlaceOrder(new_bid));
+            }
+            start.elapsed()
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Criterion groups
 // ---------------------------------------------------------------------------
 
@@ -848,5 +1193,14 @@ criterion_group!(
     bench_deep_book_match,
     bench_multi_pair_routing,
     bench_full_lifecycle,
+    // New benchmarks
+    bench_stop_market_placement,
+    bench_amend_qty_up,
+    bench_amend_triggers_match,
+    bench_market_order_empty_book,
+    bench_trading_halt_rejection,
+    bench_deep_queue_single_level,
+    bench_cancel_nonexistent,
+    bench_hft_cancel_replace,
 );
 criterion_main!(benches);
