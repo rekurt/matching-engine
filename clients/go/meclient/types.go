@@ -221,15 +221,42 @@ type StopTriggered struct {
 	Timestamp    uint64
 }
 
+// PongEvent is received in response to a Ping.
+type PongEvent struct{}
+
+// ErrorEvent is received when the server sends a protocol-level error.
+type ErrorEvent struct {
+	Code    uint16 // ErrorCode from the protocol (see ErrorCode* constants)
+	Message string
+}
+
+// HandshakeAckEvent is received in response to a Handshake.
+type HandshakeAckEvent struct {
+	ServerVersion uint8
+}
+
+// Protocol-level error codes sent in Error (0x19) frames.
+const (
+	ErrorCodeUnsupportedVersion uint16 = 1
+	ErrorCodeSequenceOutOfOrder uint16 = 2
+	ErrorCodeHandshakeRequired  uint16 = 3
+	ErrorCodeInvalidPayload     uint16 = 4
+	ErrorCodeServerShuttingDown uint16 = 5
+	ErrorCodeBackpressure       uint16 = 6
+)
+
 // Event is a union type for all outbound messages from the engine.
 // Exactly one field will be non-nil.
 type Event struct {
-	OrderAccepted      *OrderAccepted
-	OrderRejected      *OrderRejected
-	Trade              *Trade
-	OrderFilled        *OrderFilled
+	OrderAccepted        *OrderAccepted
+	OrderRejected        *OrderRejected
+	Trade                *Trade
+	OrderFilled          *OrderFilled
 	OrderPartiallyFilled *OrderPartiallyFilled
-	OrderCancelled     *OrderCancelled
-	OrderAmended       *OrderAmended
-	StopTriggered      *StopTriggered
+	OrderCancelled       *OrderCancelled
+	OrderAmended         *OrderAmended
+	StopTriggered        *StopTriggered
+	Pong                 *PongEvent
+	Error                *ErrorEvent
+	HandshakeAck         *HandshakeAckEvent
 }

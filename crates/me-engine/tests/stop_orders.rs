@@ -1,6 +1,6 @@
 /// Integration tests: Stop orders (G50-G57)
-use me_core::events::{MatchEvent, RejectReason};
-use me_core::order::{Order, OrderType, TimeInForce};
+use me_core::events::MatchEvent;
+use me_core::order::{Order, TimeInForce};
 use me_core::symbol::SymbolConfig;
 use me_core::types::*;
 use me_engine::command::Command;
@@ -32,13 +32,6 @@ fn limit_sell(id: OrderId, price: f64, qty: f64) -> Command {
         FixedQty::from_f64(qty),
         id * 1000,
     ))
-}
-
-fn count_trades(events: &[MatchEvent]) -> usize {
-    events
-        .iter()
-        .filter(|e| matches!(e, MatchEvent::Trade(_)))
-        .count()
 }
 
 /// G50: Stop-limit buy triggers on price rise → converts to limit + matches
