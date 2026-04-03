@@ -29,7 +29,9 @@ pub struct ServerConfig {
     pub heartbeat: HeartbeatConfig,
     #[serde(default)]
     pub session: SessionConfig,
+    /// TLS configuration — only consumed when me-io is built with the `tls` feature.
     #[serde(default)]
+    #[allow(dead_code)]
     pub tls: TlsConfig,
 }
 
@@ -57,7 +59,9 @@ pub struct SessionConfig {
 }
 
 /// Optional TLS configuration. If cert_path/key_path are absent, TLS is disabled.
+/// Fields are read only when the `me-io/tls` feature is enabled.
 #[derive(Debug, Deserialize, Default)]
+#[allow(dead_code)]
 pub struct TlsConfig {
     pub cert_path: Option<String>,
     pub key_path: Option<String>,
