@@ -117,10 +117,10 @@
 - Create: `docs/src/configuration.md`
 - Create: `docs/src/trading-pairs.md`
 
-- [ ] `docs/src/quickstart.md` — 5 шагов от установки до первого ордера (build, config, run, connect, place order)
-- [ ] `docs/src/configuration.md` — все поля `[[symbols]]` с объяснениями: price_scale, qty_scale, min_qty, price_step, max_orders_per_second
-- [ ] `docs/src/trading-pairs.md` — готовые конфиги для: BTC/USDT, ETH/USDT, SOL/USDT, мем-коин (8 decimal), USDC/USDT
-- [ ] Добавить раздел "Частые ошибки" — неправильный scale, overlapping symbol ID
+- [x] `docs/src/quickstart.md` — 5 шагов от установки до первого ордера (build, config, run, connect, place order)
+- [x] `docs/src/configuration.md` — все поля `[[symbols]]` с объяснениями: price_scale, qty_scale, min_qty, price_step, max_orders_per_second
+- [x] `docs/src/trading-pairs.md` — готовые конфиги для: BTC/USDT, ETH/USDT, SOL/USDT, мем-коин (8 decimal), USDC/USDT
+- [x] Добавить раздел "Частые ошибки" — неправильный scale, overlapping symbol ID
 
 ### Task 5c: mdBook — руководство по интеграции (Go и Python)
 
