@@ -67,13 +67,13 @@
 - Create: `crates/me-io/tests/codec_tests.rs`
 - Modify: `crates/me-io/Cargo.toml` (добавить [dev-dependencies] если нужно)
 
-- [ ] Тест roundtrip encode→decode для `PlaceOrder` (limit, market, stop-limit, stop-market)
-- [ ] Тест roundtrip для `CancelOrder` и `AmendOrder`
-- [ ] Тест decode всех outbound событий: OrderAccepted, Trade, OrderFilled, StopTriggered
-- [ ] Тест граничных случаев: пустой буфер (Incomplete), невалидный тип сообщения, слишком большой payload
-- [ ] Тест протокольных нарушений: команда без handshake, неверная версия протокола
-- [ ] Тест sequence number out-of-order
-- [ ] Запустить `cargo test -p me-io` — все должны пройти
+- [x] Тест roundtrip encode→decode для `PlaceOrder` (limit, market, stop-limit, stop-market)
+- [x] Тест roundtrip для `CancelOrder` и `AmendOrder`
+- [x] Тест decode всех outbound событий: OrderAccepted, Trade, OrderFilled, StopTriggered
+- [x] Тест граничных случаев: пустой буфер (Incomplete), невалидный тип сообщения, слишком большой payload
+- [x] Тест протокольных нарушений: команда без handshake, неверная версия протокола
+- [x] Тест sequence number out-of-order
+- [x] Запустить `cargo test -p me-io` — все должны пройти
 
 ### Task 4a: Тесты для me-book/matching
 
