@@ -19,7 +19,7 @@ use crate::protocol::{
 use crate::session_store::SessionStore;
 
 #[cfg(feature = "tls")]
-use tokio_rustls::{rustls, TlsAcceptor};
+use tokio_rustls::TlsAcceptor;
 
 /// TCP server for the binary protocol.
 ///

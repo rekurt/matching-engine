@@ -337,16 +337,88 @@ async fn main() {
     }
 
     // TCP listener (blocks until shutdown)
-    let tcp_server = TcpServer::new_with_config(
+    #[allow(unused_mut)]
+    let mut tcp_server = TcpServer::new_with_config(
         Arc::clone(&router),
         Some(Arc::clone(&metrics)),
         Arc::clone(&session_store),
         hb_interval_ms,
         hb_timeout_ms,
     );
+
+    #[cfg(feature = "tls")]
+    {
+        use tokio_rustls::TlsAcceptor;
+
+        if let (Some(cert_path), Some(key_path)) =
+            (&cfg.server.tls.cert_path, &cfg.server.tls.key_path)
+        {
+            match load_tls_config(cert_path, key_path, cfg.server.tls.client_ca_path.as_deref()) {
+                Ok(rustls_cfg) => {
+                    let acceptor = TlsAcceptor::from(Arc::new(rustls_cfg));
+                    tcp_server = tcp_server.with_tls(acceptor);
+                    info!("TLS enabled");
+                }
+                Err(e) => {
+                    error!(error = %e, "Failed to load TLS certificates");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
     info!(addr = %cfg.server.tcp_addr, "TCP listening");
     if let Err(e) = tcp_server.listen(&cfg.server.tcp_addr, shutdown_rx).await {
         warn!(error = %e, "TCP server error");
         std::process::exit(1);
     }
+}
+
+// ─── TLS helpers (compiled only with `tls` feature) ──────────────────────────
+
+#[cfg(feature = "tls")]
+fn load_tls_config(
+    cert_path: &str,
+    key_path: &str,
+    client_ca_path: Option<&str>,
+) -> Result<tokio_rustls::rustls::ServerConfig, String> {
+    use rustls_pemfile::{certs, private_key};
+    use std::fs::File;
+    use std::io::BufReader;
+    use tokio_rustls::rustls;
+    use tokio_rustls::rustls::server::WebPkiClientVerifier;
+    use tokio_rustls::rustls::RootCertStore;
+
+    let cert_file = File::open(cert_path).map_err(|e| format!("cert: {e}"))?;
+    let cert_chain: Vec<_> = certs(&mut BufReader::new(cert_file))
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("cert parse: {e}"))?;
+
+    let key_file = File::open(key_path).map_err(|e| format!("key: {e}"))?;
+    let key = private_key(&mut BufReader::new(key_file))
+        .map_err(|e| format!("key parse: {e}"))?
+        .ok_or_else(|| "no private key found".to_string())?;
+
+    let builder = if let Some(ca_path) = client_ca_path {
+        // mTLS: require client certificate
+        let ca_file = File::open(ca_path).map_err(|e| format!("client CA: {e}"))?;
+        let ca_certs: Vec<_> = certs(&mut BufReader::new(ca_file))
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("CA parse: {e}"))?;
+        let mut root_store = RootCertStore::empty();
+        for cert in ca_certs {
+            root_store.add(cert).map_err(|e| format!("CA add: {e}"))?;
+        }
+        let verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
+            .build()
+            .map_err(|e| format!("verifier: {e}"))?;
+        rustls::ServerConfig::builder()
+            .with_client_cert_verifier(verifier)
+    } else {
+        rustls::ServerConfig::builder().with_no_client_auth()
+    };
+
+    builder
+        .with_single_cert(cert_chain, key)
+        .map_err(|e| format!("TLS config: {e}"))
 }

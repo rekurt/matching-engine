@@ -8,6 +8,9 @@ description = "Matching engine binary — TCP + UDS server"
 name = "me-server"
 path = "src/main.rs"
 
+[features]
+tls = ["me-io/tls", "dep:tokio-rustls", "dep:rustls-pemfile"]
+
 [dependencies]
 me-core = { workspace = true }
 me-engine = { workspace = true }
@@ -23,3 +26,7 @@ prometheus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+
+# Optional TLS support (enabled by --features tls)
+tokio-rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
