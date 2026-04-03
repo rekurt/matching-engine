@@ -212,7 +212,8 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
         order_type,
         tif,
         status,
-        _pad: [0; 2],
+        flags: 0,
+        _pad: 0,
     })
 }
 

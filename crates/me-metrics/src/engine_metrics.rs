@@ -747,6 +747,16 @@ impl EngineMetrics {
                         .with_label_values(&[symbol])
                         .inc();
                 }
+                MatchEvent::OrderStatus { .. } => {
+                    self.events_total
+                        .with_label_values(&["order_status"])
+                        .inc();
+                }
+                MatchEvent::OrderNotFound { .. } => {
+                    self.events_total
+                        .with_label_values(&["order_not_found"])
+                        .inc();
+                }
             }
         }
 
@@ -1051,6 +1061,7 @@ fn reject_reason_label(reason: RejectReason) -> &'static str {
         RejectReason::SymbolNotFound => "symbol_not_found",
         RejectReason::TradingHalted => "trading_halted",
         RejectReason::RiskCheckFailed => "risk_check_failed",
+        RejectReason::WouldTakeMarket => "would_take_market",
     }
 }
 

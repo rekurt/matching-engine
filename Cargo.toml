@@ -37,7 +37,9 @@ rustc-hash = "2.1"
 crossbeam-channel = "0.5"
 bincode = "2.0.0-rc.3"
 crc32fast = "1.4"
-tokio = { version = "1", features = ["net", "rt-multi-thread", "io-util", "macros", "sync", "signal"] }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "io-util", "macros", "sync", "signal", "time"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
 bytes = "1"
 prometheus = "0.13"
 tracing = "0.1"

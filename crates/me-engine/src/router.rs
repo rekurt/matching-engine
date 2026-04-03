@@ -7,7 +7,7 @@ use tracing::{debug, info_span, trace};
 
 use me_core::events::{MatchEvent, RejectReason};
 use me_core::symbol::SymbolConfig;
-use me_core::types::SymbolId;
+use me_core::types::{FixedQty, OrderId, SymbolId};
 use me_metrics::EngineMetrics;
 
 use crate::command::Command;
@@ -231,6 +231,11 @@ enum ShardMsg {
         cmd: Command,
         reply: Sender<Vec<MatchEvent>>,
     },
+    QueryOrder {
+        order_id: OrderId,
+        symbol: SymbolId,
+        reply: Sender<Vec<MatchEvent>>,
+    },
     AddSymbol(SymbolConfig),
     HaltSymbol(SymbolId),
     ResumeSymbol(SymbolId),
@@ -338,6 +343,33 @@ impl ShardedRouterV2 {
         }
     }
 
+    /// Query the status of a resting order.
+    ///
+    /// Returns `MatchEvent::OrderStatus` if found, `MatchEvent::OrderNotFound` otherwise.
+    /// The query is routed to the shard that owns `symbol` and executed synchronously.
+    pub fn query_order(&self, order_id: OrderId, symbol: SymbolId) -> Vec<MatchEvent> {
+        let shard_idx = match self.symbol_to_shard.get(&symbol) {
+            Some(&idx) => idx,
+            None => return vec![MatchEvent::OrderNotFound { order_id }],
+        };
+
+        let (reply_tx, reply_rx) = bounded(1);
+        if self.shards[shard_idx]
+            .cmd_tx
+            .send(ShardMsg::QueryOrder {
+                order_id,
+                symbol,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return vec![MatchEvent::OrderNotFound { order_id }];
+        }
+        reply_rx
+            .recv()
+            .unwrap_or_else(|_| vec![MatchEvent::OrderNotFound { order_id }])
+    }
+
     /// Resume trading for a symbol.
     pub fn resume_symbol(&self, symbol: SymbolId) -> bool {
         if let Some(&shard_idx) = self.symbol_to_shard.get(&symbol) {
@@ -436,6 +468,29 @@ fn shard_v2_worker_loop(
                     "command processed"
                 );
 
+                let _ = reply.send(events);
+            }
+            ShardMsg::QueryOrder { order_id, symbol, reply } => {
+                let events = if let Some(engine) = engines.get(&symbol) {
+                    match engine.book().get_order(order_id) {
+                        Some(order) => {
+                            let filled = FixedQty::from_raw(
+                                order.qty.raw().saturating_sub(order.remaining_qty.raw()),
+                            );
+                            vec![MatchEvent::OrderStatus {
+                                order_id,
+                                status: order.status as u8,
+                                filled_qty: filled,
+                                remaining_qty: order.remaining_qty,
+                                price: order.price,
+                                timestamp: order.timestamp,
+                            }]
+                        }
+                        None => vec![MatchEvent::OrderNotFound { order_id }],
+                    }
+                } else {
+                    vec![MatchEvent::OrderNotFound { order_id }]
+                };
                 let _ = reply.send(events);
             }
             ShardMsg::AddSymbol(config) => {

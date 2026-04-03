@@ -1,4 +1,4 @@
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
 use me_core::events::MatchEvent;
 use me_core::order::{Order, OrderType, TimeInForce};
@@ -7,8 +7,11 @@ use me_core::types::*;
 use me_engine::command::Command;
 
 use crate::protocol::{
-    ConnectionState, ErrorCode, MessageType, FRAME_HEADER_SIZE, MAX_PAYLOAD_SIZE, PROTOCOL_VERSION,
+    ConnectionState, ErrorCode, MessageType, TLV_CAPABILITIES, TLV_HEARTBEAT_MS, TLV_SESSION_ID,
+    FRAME_HEADER_SIZE, MAX_PAYLOAD_SIZE, MAX_PAYLOAD_SIZE_BATCH, MAX_BATCH_CANCEL, MAX_BATCH_PLACE,
+    PROTOCOL_VERSION,
 };
+use crate::session_store::SessionId;
 
 // ─── Decode types ───────────────────────────────────────────────────────────
 
@@ -44,17 +47,31 @@ impl std::fmt::Display for DecodeError {
 pub enum DecodedFrame {
     /// A matching-engine command (PlaceOrder, CancelOrder, AmendOrder).
     Command(Command, u64),
+    /// One or more commands from a batch frame.
+    Batch(Vec<Command>, u64),
     /// Client sent a Ping; server should reply with Pong.
     Ping(u64),
     /// Client sent a Handshake; server should reply with HandshakeAck.
     Handshake { client_version: u8, seq: u64 },
+    /// Client is reconnecting and wants to resume a previous session.
+    ResumeSession {
+        session_id: SessionId,
+        last_recv_seq: u64,
+        seq: u64,
+    },
+    /// Client is querying the status of a resting order.
+    QueryOrder { order_id: u64, symbol_id: u16, seq: u64 },
 }
 
-/// Per-connection state used during decoding to enforce protocol rules.
+/// Per-connection state used during decoding and session management.
 pub struct ConnectionCodecState {
     pub state: ConnectionState,
     /// The last sequence number we accepted from the client.
     pub last_client_seq: u64,
+    /// Session ID assigned to this connection at handshake.
+    pub session_id: SessionId,
+    /// Monotonic counter for outbound frames (used by session replay).
+    pub server_frame_seq: u64,
 }
 
 impl ConnectionCodecState {
@@ -62,6 +79,8 @@ impl ConnectionCodecState {
         Self {
             state: ConnectionState::HandshakePending,
             last_client_seq: 0,
+            session_id: [0u8; 16],
+            server_frame_seq: 0,
         }
     }
 }
@@ -69,6 +88,44 @@ impl ConnectionCodecState {
 impl Default for ConnectionCodecState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ─── TLV helpers ─────────────────────────────────────────────────────────────
+
+/// Write a TLV record: tag(2 LE) + len(2 LE) + value.
+pub fn write_tlv(buf: &mut BytesMut, tag: u16, value: &[u8]) {
+    buf.put_u16_le(tag);
+    buf.put_u16_le(value.len() as u16);
+    buf.put_slice(value);
+}
+
+/// Iterate over TLV records in a byte slice, yielding (tag, value) pairs.
+/// Unknown tags are silently skipped by the caller.
+pub fn tlv_iter(data: &[u8]) -> impl Iterator<Item = (u16, &[u8])> {
+    TlvIter { data }
+}
+
+struct TlvIter<'a> {
+    data: &'a [u8],
+}
+
+impl<'a> Iterator for TlvIter<'a> {
+    type Item = (u16, &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.data.len() < 4 {
+            return None;
+        }
+        let tag = u16::from_le_bytes([self.data[0], self.data[1]]);
+        let len = u16::from_le_bytes([self.data[2], self.data[3]]) as usize;
+        self.data = &self.data[4..];
+        if self.data.len() < len {
+            return None;
+        }
+        let value = &self.data[..len];
+        self.data = &self.data[len..];
+        Some((tag, value))
     }
 }
 
@@ -85,13 +142,23 @@ pub fn decode_frame(
     }
 
     let len = u32::from_le_bytes(
-        buf[0..4]
-            .try_into()
-            .expect("frame len: buf checked >= FRAME_HEADER_SIZE"),
+        buf[0..4].try_into().expect("frame len: buf checked >= FRAME_HEADER_SIZE"),
     );
-    if len > MAX_PAYLOAD_SIZE {
+
+    let msg_type_raw = buf[5];
+
+    // Per-type payload size limit (batch frames are larger).
+    let max_payload = if msg_type_raw == MessageType::BatchPlaceOrder as u8
+        || msg_type_raw == MessageType::BatchCancelOrder as u8
+    {
+        MAX_PAYLOAD_SIZE_BATCH
+    } else {
+        MAX_PAYLOAD_SIZE
+    };
+    if len > max_payload {
         return Err(DecodeError::PayloadTooLarge(len));
     }
+
     let total_size = FRAME_HEADER_SIZE + len as usize;
     if buf.len() < total_size {
         return Err(DecodeError::Incomplete);
@@ -103,11 +170,8 @@ pub fn decode_frame(
         return Err(DecodeError::UnsupportedVersion(version));
     }
 
-    let msg_type_raw = buf[5];
     let seq = u64::from_le_bytes(
-        buf[6..14]
-            .try_into()
-            .expect("frame seq: buf checked >= FRAME_HEADER_SIZE"),
+        buf[6..14].try_into().expect("frame seq: buf checked >= FRAME_HEADER_SIZE"),
     );
     let payload = &buf[FRAME_HEADER_SIZE..total_size];
 
@@ -116,44 +180,49 @@ pub fn decode_frame(
 
     // Sequence validation: must be strictly increasing.
     if seq <= conn.last_client_seq && seq != 0 {
-        // seq == 0 is only valid for the very first frame (handshake)
         return Err(DecodeError::SequenceOutOfOrder {
             expected_min: conn.last_client_seq + 1,
             got: seq,
         });
     }
 
-    // State machine: handshake must come first.
+    // State machine dispatch.
     match msg_type {
         MessageType::Handshake => {
-            // Handshake is always allowed (even for re-handshake).
             conn.last_client_seq = seq;
-            let client_version = if payload.is_empty() {
-                PROTOCOL_VERSION
-            } else {
-                payload[0]
-            };
+            let client_version = if payload.is_empty() { PROTOCOL_VERSION } else { payload[0] };
+            return Ok((DecodedFrame::Handshake { client_version, seq }, total_size));
+        }
+
+        MessageType::ResumeSession => {
+            // Allowed from HandshakePending (reconnect path).
+            if payload.len() < 24 {
+                return Err(DecodeError::InvalidPayload("ResumeSession too short".into()));
+            }
+            conn.last_client_seq = seq;
+            let mut session_id = [0u8; 16];
+            session_id.copy_from_slice(&payload[0..16]);
+            let last_recv_seq = u64::from_le_bytes(
+                payload[16..24].try_into().expect("ResumeSession: last_recv_seq"),
+            );
             return Ok((
-                DecodedFrame::Handshake {
-                    client_version,
-                    seq,
-                },
+                DecodedFrame::ResumeSession { session_id, last_recv_seq, seq },
                 total_size,
             ));
         }
+
         MessageType::Ping => {
-            // Ping is allowed in any state after handshake, or even during
-            // HandshakePending as a keepalive.
             conn.last_client_seq = seq;
             return Ok((DecodedFrame::Ping(seq), total_size));
         }
+
         _ if msg_type.is_inbound_command() => {
             if conn.state != ConnectionState::Active {
                 return Err(DecodeError::HandshakeRequired);
             }
         }
+
         _ => {
-            // Outbound message types from a client are invalid.
             return Err(DecodeError::InvalidPayload(
                 "Client sent an outbound-only message type".into(),
             ));
@@ -162,28 +231,87 @@ pub fn decode_frame(
 
     conn.last_client_seq = seq;
 
-    let cmd = match msg_type {
-        MessageType::PlaceOrder => decode_place_order(payload)?,
-        MessageType::CancelOrder => decode_cancel_order(payload)?,
-        MessageType::AmendOrder => decode_amend_order(payload)?,
-        _ => unreachable!(), // handled above
+    // Decode active-state commands.
+    let frame = match msg_type {
+        MessageType::PlaceOrder => {
+            let cmd = decode_place_order(payload)?;
+            DecodedFrame::Command(cmd, seq)
+        }
+        MessageType::CancelOrder => {
+            let cmd = decode_cancel_order(payload)?;
+            DecodedFrame::Command(cmd, seq)
+        }
+        MessageType::AmendOrder => {
+            let cmd = decode_amend_order(payload)?;
+            DecodedFrame::Command(cmd, seq)
+        }
+        MessageType::GetOrderStatus => {
+            if payload.len() < 10 {
+                return Err(DecodeError::InvalidPayload("GetOrderStatus too short".into()));
+            }
+            let order_id = u64::from_le_bytes(payload[0..8].try_into().expect("GetOrderStatus: order_id"));
+            let symbol_id = u16::from_le_bytes(payload[8..10].try_into().expect("GetOrderStatus: symbol_id"));
+            DecodedFrame::QueryOrder { order_id, symbol_id, seq }
+        }
+        MessageType::BatchPlaceOrder => {
+            if payload.is_empty() {
+                return Err(DecodeError::InvalidPayload("BatchPlaceOrder empty".into()));
+            }
+            let count = payload[0];
+            if count == 0 || count > MAX_BATCH_PLACE {
+                return Err(DecodeError::InvalidPayload(
+                    format!("BatchPlaceOrder count must be 1..{MAX_BATCH_PLACE}, got {count}"),
+                ));
+            }
+            let mut cmds = Vec::with_capacity(count as usize);
+            let mut offset = 1usize;
+            for _ in 0..count {
+                if payload.len() < offset + 37 {
+                    return Err(DecodeError::InvalidPayload("BatchPlaceOrder truncated".into()));
+                }
+                // Each sub-payload is 37 or 38 bytes.
+                let sub_len = if payload.len() >= offset + 38 { 38 } else { 37 };
+                cmds.push(decode_place_order(&payload[offset..offset + sub_len])?);
+                offset += sub_len;
+            }
+            DecodedFrame::Batch(cmds, seq)
+        }
+        MessageType::BatchCancelOrder => {
+            if payload.is_empty() {
+                return Err(DecodeError::InvalidPayload("BatchCancelOrder empty".into()));
+            }
+            let count = payload[0];
+            if count == 0 || count > MAX_BATCH_CANCEL {
+                return Err(DecodeError::InvalidPayload(
+                    format!("BatchCancelOrder count must be 1..{MAX_BATCH_CANCEL}, got {count}"),
+                ));
+            }
+            let mut cmds = Vec::with_capacity(count as usize);
+            let mut offset = 1usize;
+            for _ in 0..count {
+                if payload.len() < offset + 10 {
+                    return Err(DecodeError::InvalidPayload("BatchCancelOrder truncated".into()));
+                }
+                cmds.push(decode_cancel_order(&payload[offset..offset + 10])?);
+                offset += 10;
+            }
+            DecodedFrame::Batch(cmds, seq)
+        }
+        _ => unreachable!("handled above"),
     };
 
-    Ok((DecodedFrame::Command(cmd, seq), total_size))
+    Ok((frame, total_size))
 }
 
-/// PlaceOrder payload (37 bytes):
-/// OrderId(8) + SymbolId(2) + Side(1) + OrderType(1) + TIF(1) + Price(8) + StopPrice(8) + Qty(8)
+/// PlaceOrder payload (37 or 38 bytes):
+/// OrderId(8) + SymbolId(2) + Side(1) + OrderType(1) + TIF(1) + Price(8) + StopPrice(8) + Qty(8) [+ Flags(1)]
 fn decode_place_order(payload: &[u8]) -> Result<Command, DecodeError> {
     if payload.len() < 37 {
         return Err(DecodeError::InvalidPayload("PlaceOrder too short".into()));
     }
-    // Safety: payload.len() >= 37 checked above.
     let order_id = u64::from_le_bytes(payload[0..8].try_into().expect("PlaceOrder: order_id"));
     if order_id == 0 {
-        return Err(DecodeError::InvalidPayload(
-            "PlaceOrder order_id must be non-zero".into(),
-        ));
+        return Err(DecodeError::InvalidPayload("PlaceOrder order_id must be non-zero".into()));
     }
     let symbol = SymbolId(u16::from_le_bytes(payload[8..10].try_into().expect("PlaceOrder: symbol")));
     let side = match payload[10] {
@@ -196,11 +324,7 @@ fn decode_place_order(payload: &[u8]) -> Result<Command, DecodeError> {
         1 => OrderType::Market,
         2 => OrderType::StopLimit,
         3 => OrderType::StopMarket,
-        v => {
-            return Err(DecodeError::InvalidPayload(format!(
-                "Invalid order type: {v}"
-            )))
-        }
+        v => return Err(DecodeError::InvalidPayload(format!("Invalid order type: {v}"))),
     };
     let tif = match payload[12] {
         0 => TimeInForce::GTC,
@@ -212,13 +336,13 @@ fn decode_place_order(payload: &[u8]) -> Result<Command, DecodeError> {
     let stop_price = FixedPrice::from_raw(i64::from_le_bytes(payload[21..29].try_into().expect("PlaceOrder: stop_price")));
     let qty_raw = u64::from_le_bytes(payload[29..37].try_into().expect("PlaceOrder: qty"));
     if qty_raw == 0 {
-        return Err(DecodeError::InvalidPayload(
-            "PlaceOrder qty must be non-zero".into(),
-        ));
+        return Err(DecodeError::InvalidPayload("PlaceOrder qty must be non-zero".into()));
     }
     let qty = FixedQty::from_raw(qty_raw);
 
-    // Validate: limit orders need a positive price.
+    // Backward-compatible flags: byte 37 if present, else 0.
+    let flags = if payload.len() >= 38 { payload[37] } else { 0u8 };
+
     match order_type {
         OrderType::Limit | OrderType::StopLimit => {
             if !price.is_positive() {
@@ -229,8 +353,6 @@ fn decode_place_order(payload: &[u8]) -> Result<Command, DecodeError> {
         }
         _ => {}
     }
-
-    // Validate: stop orders need a positive stop_price.
     match order_type {
         OrderType::StopLimit | OrderType::StopMarket => {
             if !stop_price.is_positive() {
@@ -261,7 +383,8 @@ fn decode_place_order(payload: &[u8]) -> Result<Command, DecodeError> {
         order_type,
         tif,
         status: me_core::order::OrderStatus::New,
-        _pad: [0; 2],
+        flags,
+        _pad: 0,
     };
 
     Ok(Command::PlaceOrder(order))
@@ -272,12 +395,9 @@ fn decode_cancel_order(payload: &[u8]) -> Result<Command, DecodeError> {
     if payload.len() < 10 {
         return Err(DecodeError::InvalidPayload("CancelOrder too short".into()));
     }
-    // Safety: payload.len() >= 10 checked above.
     let order_id = u64::from_le_bytes(payload[0..8].try_into().expect("CancelOrder: order_id"));
     if order_id == 0 {
-        return Err(DecodeError::InvalidPayload(
-            "CancelOrder order_id must be non-zero".into(),
-        ));
+        return Err(DecodeError::InvalidPayload("CancelOrder order_id must be non-zero".into()));
     }
     let symbol = SymbolId(u16::from_le_bytes(payload[8..10].try_into().expect("CancelOrder: symbol")));
 
@@ -286,11 +406,7 @@ fn decode_cancel_order(payload: &[u8]) -> Result<Command, DecodeError> {
         .unwrap_or_default()
         .as_nanos() as u64;
 
-    Ok(Command::CancelOrder {
-        order_id,
-        symbol,
-        timestamp,
-    })
+    Ok(Command::CancelOrder { order_id, symbol, timestamp })
 }
 
 /// AmendOrder payload (variable): OrderId(8) + SymbolId(2) + has_price(1) + [price(8)] + has_qty(1) + [qty(8)]
@@ -298,12 +414,9 @@ fn decode_amend_order(payload: &[u8]) -> Result<Command, DecodeError> {
     if payload.len() < 12 {
         return Err(DecodeError::InvalidPayload("AmendOrder too short".into()));
     }
-    // Safety: payload.len() >= 12 checked above.
     let order_id = u64::from_le_bytes(payload[0..8].try_into().expect("AmendOrder: order_id"));
     if order_id == 0 {
-        return Err(DecodeError::InvalidPayload(
-            "AmendOrder order_id must be non-zero".into(),
-        ));
+        return Err(DecodeError::InvalidPayload("AmendOrder order_id must be non-zero".into()));
     }
     let symbol = SymbolId(u16::from_le_bytes(payload[8..10].try_into().expect("AmendOrder: symbol")));
 
@@ -311,17 +424,13 @@ fn decode_amend_order(payload: &[u8]) -> Result<Command, DecodeError> {
     let new_price = if payload[offset] == 1 {
         offset += 1;
         if offset + 8 > payload.len() {
-            return Err(DecodeError::InvalidPayload(
-                "AmendOrder price truncated".into(),
-            ));
+            return Err(DecodeError::InvalidPayload("AmendOrder price truncated".into()));
         }
         let p = i64::from_le_bytes(payload[offset..offset + 8].try_into().expect("AmendOrder: new_price"));
         offset += 8;
         let price = FixedPrice::from_raw(p);
         if !price.is_positive() {
-            return Err(DecodeError::InvalidPayload(
-                "AmendOrder new_price must be positive".into(),
-            ));
+            return Err(DecodeError::InvalidPayload("AmendOrder new_price must be positive".into()));
         }
         Some(price)
     } else {
@@ -332,15 +441,11 @@ fn decode_amend_order(payload: &[u8]) -> Result<Command, DecodeError> {
     let new_qty = if offset < payload.len() && payload[offset] == 1 {
         offset += 1;
         if offset + 8 > payload.len() {
-            return Err(DecodeError::InvalidPayload(
-                "AmendOrder qty truncated".into(),
-            ));
+            return Err(DecodeError::InvalidPayload("AmendOrder qty truncated".into()));
         }
         let q = u64::from_le_bytes(payload[offset..offset + 8].try_into().expect("AmendOrder: new_qty"));
         if q == 0 {
-            return Err(DecodeError::InvalidPayload(
-                "AmendOrder new_qty must be non-zero".into(),
-            ));
+            return Err(DecodeError::InvalidPayload("AmendOrder new_qty must be non-zero".into()));
         }
         Some(FixedQty::from_raw(q))
     } else {
@@ -348,9 +453,7 @@ fn decode_amend_order(payload: &[u8]) -> Result<Command, DecodeError> {
     };
 
     if new_price.is_none() && new_qty.is_none() {
-        return Err(DecodeError::InvalidPayload(
-            "AmendOrder must change at least one field".into(),
-        ));
+        return Err(DecodeError::InvalidPayload("AmendOrder must change at least one field".into()));
     }
 
     let timestamp = std::time::SystemTime::now()
@@ -358,13 +461,7 @@ fn decode_amend_order(payload: &[u8]) -> Result<Command, DecodeError> {
         .unwrap_or_default()
         .as_nanos() as u64;
 
-    Ok(Command::AmendOrder {
-        order_id,
-        symbol,
-        new_price,
-        new_qty,
-        timestamp,
-    })
+    Ok(Command::AmendOrder { order_id, symbol, new_price, new_qty, timestamp })
 }
 
 // ─── Encoding ────────────────────────────────────────────────────────────────
@@ -378,29 +475,19 @@ pub fn encode_events(events: &[MatchEvent], seq: u64, buf: &mut BytesMut) {
 
 fn encode_event(event: &MatchEvent, seq: u64, buf: &mut BytesMut) {
     match event {
-        MatchEvent::OrderAccepted {
-            order_id,
-            timestamp,
-        } => {
-            let payload_len = 16u32; // order_id(8) + timestamp(8)
-            write_header(buf, payload_len, MessageType::OrderAccepted as u8, seq);
+        MatchEvent::OrderAccepted { order_id, timestamp } => {
+            write_header(buf, 16, MessageType::OrderAccepted as u8, seq);
             buf.put_u64_le(*order_id);
             buf.put_u64_le(*timestamp);
         }
-        MatchEvent::OrderRejected {
-            order_id,
-            reason,
-            timestamp,
-        } => {
-            let payload_len = 17u32;
-            write_header(buf, payload_len, MessageType::OrderRejected as u8, seq);
+        MatchEvent::OrderRejected { order_id, reason, timestamp } => {
+            write_header(buf, 17, MessageType::OrderRejected as u8, seq);
             buf.put_u64_le(*order_id);
             buf.put_u8(reject_reason_to_u8(reason));
             buf.put_u64_le(*timestamp);
         }
         MatchEvent::Trade(trade) => {
-            let payload_len = 51u32;
-            write_header(buf, payload_len, MessageType::Trade as u8, seq);
+            write_header(buf, 51, MessageType::Trade as u8, seq);
             buf.put_u64_le(trade.trade_id);
             buf.put_u16_le(trade.symbol.0);
             buf.put_i64_le(trade.price.raw());
@@ -410,73 +497,53 @@ fn encode_event(event: &MatchEvent, seq: u64, buf: &mut BytesMut) {
             buf.put_u8(trade.maker_side as u8);
             buf.put_u64_le(trade.timestamp);
         }
-        MatchEvent::OrderFilled {
-            order_id,
-            filled_qty,
-            price,
-            timestamp,
-        } => {
-            let payload_len = 32u32;
-            write_header(buf, payload_len, MessageType::OrderFilled as u8, seq);
+        MatchEvent::OrderFilled { order_id, filled_qty, price, timestamp } => {
+            write_header(buf, 32, MessageType::OrderFilled as u8, seq);
             buf.put_u64_le(*order_id);
             buf.put_u64_le(filled_qty.raw());
             buf.put_i64_le(price.raw());
             buf.put_u64_le(*timestamp);
         }
-        MatchEvent::OrderPartiallyFilled {
-            order_id,
-            filled_qty,
-            remaining_qty,
-            price,
-            timestamp,
-        } => {
-            let payload_len = 40u32;
-            write_header(
-                buf,
-                payload_len,
-                MessageType::OrderPartiallyFilled as u8,
-                seq,
-            );
+        MatchEvent::OrderPartiallyFilled { order_id, filled_qty, remaining_qty, price, timestamp } => {
+            write_header(buf, 40, MessageType::OrderPartiallyFilled as u8, seq);
             buf.put_u64_le(*order_id);
             buf.put_u64_le(filled_qty.raw());
             buf.put_u64_le(remaining_qty.raw());
             buf.put_i64_le(price.raw());
             buf.put_u64_le(*timestamp);
         }
-        MatchEvent::OrderCancelled {
-            order_id,
-            remaining_qty,
-            timestamp,
-        } => {
-            let payload_len = 24u32;
-            write_header(buf, payload_len, MessageType::OrderCancelled as u8, seq);
+        MatchEvent::OrderCancelled { order_id, remaining_qty, timestamp } => {
+            write_header(buf, 24, MessageType::OrderCancelled as u8, seq);
             buf.put_u64_le(*order_id);
             buf.put_u64_le(remaining_qty.raw());
             buf.put_u64_le(*timestamp);
         }
-        MatchEvent::OrderAmended {
-            order_id,
-            new_price,
-            new_qty,
-            timestamp,
-        } => {
-            let payload_len = 32u32;
-            write_header(buf, payload_len, MessageType::OrderAmended as u8, seq);
+        MatchEvent::OrderAmended { order_id, new_price, new_qty, timestamp } => {
+            write_header(buf, 32, MessageType::OrderAmended as u8, seq);
             buf.put_u64_le(*order_id);
             buf.put_i64_le(new_price.raw());
             buf.put_u64_le(new_qty.raw());
             buf.put_u64_le(*timestamp);
         }
-        MatchEvent::StopTriggered {
-            order_id,
-            trigger_price,
-            timestamp,
-        } => {
-            let payload_len = 24u32;
-            write_header(buf, payload_len, MessageType::StopTriggered as u8, seq);
+        MatchEvent::StopTriggered { order_id, trigger_price, timestamp } => {
+            write_header(buf, 24, MessageType::StopTriggered as u8, seq);
             buf.put_u64_le(*order_id);
             buf.put_i64_le(trigger_price.raw());
             buf.put_u64_le(*timestamp);
+        }
+        MatchEvent::OrderStatus { order_id, status, filled_qty, remaining_qty, price, timestamp } => {
+            // order_id(8) + status(1) + filled(8) + remaining(8) + price(8) + ts(8) = 41
+            write_header(buf, 41, MessageType::OrderStatus as u8, seq);
+            buf.put_u64_le(*order_id);
+            buf.put_u8(*status);
+            buf.put_u64_le(filled_qty.raw());
+            buf.put_u64_le(remaining_qty.raw());
+            buf.put_i64_le(price.raw());
+            buf.put_u64_le(*timestamp);
+        }
+        MatchEvent::OrderNotFound { order_id } => {
+            write_header(buf, 8, MessageType::OrderNotFound as u8, seq);
+            buf.put_u64_le(*order_id);
         }
     }
 }
@@ -486,11 +553,43 @@ pub fn encode_pong(seq: u64, buf: &mut BytesMut) {
     write_header(buf, 0, MessageType::Pong as u8, seq);
 }
 
-/// Encode a HandshakeAck response frame.
-/// Payload: server_version(1)
-pub fn encode_handshake_ack(seq: u64, buf: &mut BytesMut) {
-    write_header(buf, 1, MessageType::HandshakeAck as u8, seq);
+/// Encode a HandshakeAck response frame with TLV extensions.
+///
+/// Payload layout:
+/// - server_version(1)
+/// - TLV: TLV_CAPABILITIES (u64, 8 bytes)  = 12 bytes
+/// - TLV: TLV_SESSION_ID  ([u8;16])         = 20 bytes
+/// - TLV: TLV_HEARTBEAT_MS (u32, 4 bytes)   = 8 bytes
+/// Total payload: 41 bytes
+pub fn encode_handshake_ack(
+    seq: u64,
+    session_id: SessionId,
+    capabilities: u64,
+    heartbeat_interval_ms: u32,
+    buf: &mut BytesMut,
+) {
+    // Pre-compute payload size to write correct header.
+    // version(1) + cap_tlv(12) + sid_tlv(20) + hb_tlv(8) = 41
+    let payload_len: u32 = 1 + (2 + 2 + 8) + (2 + 2 + 16) + (2 + 2 + 4);
+    write_header(buf, payload_len, MessageType::HandshakeAck as u8, seq);
     buf.put_u8(PROTOCOL_VERSION);
+    write_tlv(buf, TLV_CAPABILITIES, &capabilities.to_le_bytes());
+    write_tlv(buf, TLV_SESSION_ID, &session_id);
+    write_tlv(buf, TLV_HEARTBEAT_MS, &heartbeat_interval_ms.to_le_bytes());
+}
+
+/// Encode a SessionResumed frame.
+/// Payload: replayed_count(4)
+pub fn encode_session_resumed(replayed: u32, seq: u64, buf: &mut BytesMut) {
+    write_header(buf, 4, MessageType::SessionResumed as u8, seq);
+    buf.put_u32_le(replayed);
+}
+
+/// Write raw replay frames directly into the write buffer.
+pub fn encode_replay_frames(frames: &[Bytes], buf: &mut BytesMut) {
+    for frame in frames {
+        buf.extend_from_slice(frame);
+    }
 }
 
 /// Encode a protocol-level Error frame.
@@ -526,5 +625,6 @@ fn reject_reason_to_u8(reason: &me_core::events::RejectReason) -> u8 {
         RejectReason::SymbolNotFound => 8,
         RejectReason::TradingHalted => 9,
         RejectReason::RiskCheckFailed => 10,
+        RejectReason::WouldTakeMarket => 11,
     }
 }
