@@ -94,7 +94,7 @@ impl RiskEngine {
     pub fn is_trading_enabled(&self, symbol: SymbolId) -> bool {
         self.configs
             .get(&symbol)
-            .map_or(false, |c| c.trading_enabled)
+            .is_some_and(|c| c.trading_enabled)
     }
 
     /// Perform all pre-trade risk checks on an order.
