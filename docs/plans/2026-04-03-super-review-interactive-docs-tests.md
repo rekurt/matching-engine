@@ -105,10 +105,10 @@
 - Create: `docs/src/SUMMARY.md`
 - Create: `docs/src/introduction.md`
 
-- [ ] Создать `book.toml` с настройками: `title`, `authors`, `src = "docs/src"`, `build-dir = "docs/book"`; встроенный поиск включён по умолчанию
-- [ ] Создать `docs/src/SUMMARY.md` — полная структура навигации со всеми главами
-- [ ] Написать `docs/src/introduction.md` — что такое matching-engine, для кого, архитектура в 10 строк
-- [ ] Добавить `docs/book/` в `.gitignore` (build output), `docs/src/` остаётся в git
+- [x] Создать `book.toml` с настройками: `title`, `authors`, `src = "docs/src"`, `build-dir = "docs/book"`; встроенный поиск включён по умолчанию
+- [x] Создать `docs/src/SUMMARY.md` — полная структура навигации со всеми главами
+- [x] Написать `docs/src/introduction.md` — что такое matching-engine, для кого, архитектура в 10 строк
+- [x] Добавить `docs/book/` в `.gitignore` (build output), `docs/src/` остаётся в git
 
 ### Task 5b: mdBook — quickstart и конфигурация торговых пар
 
