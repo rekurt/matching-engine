@@ -24,7 +24,9 @@ cargo audit                      # проверка CVE
 ### Паттерн helper-функций в тестах
 
 В `crates/me-book/tests/matching_tests.rs` и `crates/me-engine/tests/` используется паттерн:
-- `make_order(id, side, price, qty, tif)` — создаёт Order без повторения полей
+- `limit(id, side, price, qty, tif)` — создаёт лимитный Order без повторения полей
+- `market(id, side, qty)` — создаёт рыночный Order
+- `stop_limit(id, side, stop, lim, qty)` — создаёт стоп-лимитный Order
 - `new_book()` — создаёт OrderBook с дефолтным конфигом BTC/USDT
 - `make_config()` — возвращает `SymbolConfig::default_btc_usdt()`
 
