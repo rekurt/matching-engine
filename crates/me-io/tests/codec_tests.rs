@@ -1,13 +1,15 @@
 use bytes::BytesMut;
-use me_core::events::MatchEvent;
+use me_core::events::{MatchEvent, RejectReason};
 use me_core::trade::Trade;
 use me_core::types::{FixedPrice, FixedQty, Side, SymbolId};
 use me_engine::command::Command;
 use me_io::codec::{
-    decode_frame, encode_events, encode_handshake_ack, encode_pong, ConnectionCodecState,
-    DecodeError, DecodedFrame,
+    decode_frame, encode_error, encode_events, encode_handshake_ack, encode_pong,
+    ConnectionCodecState, DecodeError, DecodedFrame,
 };
-use me_io::protocol::{ConnectionState, FRAME_HEADER_SIZE, MAX_PAYLOAD_SIZE, PROTOCOL_VERSION};
+use me_io::protocol::{
+    ConnectionState, ErrorCode, FRAME_HEADER_SIZE, MAX_PAYLOAD_SIZE, PROTOCOL_VERSION,
+};
 
 // ─── Frame builder helpers ───────────────────────────────────────────────────
 
@@ -353,6 +355,24 @@ fn test_encode_trade() {
     assert_eq!(buf.len(), 73);
     let payload_len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
     assert_eq!(payload_len, 59);
+    // Verify field values at known offsets (payload starts at byte 14)
+    let trade_id = u64::from_le_bytes(buf[14..22].try_into().unwrap());
+    assert_eq!(trade_id, 1);
+    let symbol = u16::from_le_bytes(buf[22..24].try_into().unwrap());
+    assert_eq!(symbol, 1);
+    let price = i64::from_le_bytes(buf[24..32].try_into().unwrap());
+    assert_eq!(price, FixedPrice::from_f64(30_000.0).raw());
+    let qty = u64::from_le_bytes(buf[32..40].try_into().unwrap());
+    assert_eq!(qty, FixedQty::from_f64(0.5).raw());
+    let maker_order_id = u64::from_le_bytes(buf[40..48].try_into().unwrap());
+    assert_eq!(maker_order_id, 10);
+    let taker_order_id = u64::from_le_bytes(buf[48..56].try_into().unwrap());
+    assert_eq!(taker_order_id, 20);
+    assert_eq!(buf[56], Side::Buy as u8);
+    let timestamp = u64::from_le_bytes(buf[57..65].try_into().unwrap());
+    assert_eq!(timestamp, 99999);
+    let sequence = u64::from_le_bytes(buf[65..73].try_into().unwrap());
+    assert_eq!(sequence, 1);
 }
 
 #[test]
@@ -365,8 +385,16 @@ fn test_encode_order_filled() {
     };
     let mut buf = BytesMut::new();
     encode_events(&[event], 1, &mut buf);
-    // Header (14) + payload (32)
+    // Header (14) + payload (32): order_id(8) + filled_qty(8) + price(8) + timestamp(8)
     assert_eq!(buf.len(), 46);
+    let order_id = u64::from_le_bytes(buf[14..22].try_into().unwrap());
+    assert_eq!(order_id, 55);
+    let filled_qty = u64::from_le_bytes(buf[22..30].try_into().unwrap());
+    assert_eq!(filled_qty, FixedQty::from_f64(1.0).raw());
+    let price = i64::from_le_bytes(buf[30..38].try_into().unwrap());
+    assert_eq!(price, FixedPrice::from_f64(30_000.0).raw());
+    let timestamp = u64::from_le_bytes(buf[38..46].try_into().unwrap());
+    assert_eq!(timestamp, 11111);
 }
 
 #[test]
@@ -378,8 +406,14 @@ fn test_encode_stop_triggered() {
     };
     let mut buf = BytesMut::new();
     encode_events(&[event], 1, &mut buf);
-    // Header (14) + payload (24): order_id(8) + price(8) + timestamp(8)
+    // Header (14) + payload (24): order_id(8) + trigger_price(8) + timestamp(8)
     assert_eq!(buf.len(), 38);
+    let order_id = u64::from_le_bytes(buf[14..22].try_into().unwrap());
+    assert_eq!(order_id, 88);
+    let trigger_price = i64::from_le_bytes(buf[22..30].try_into().unwrap());
+    assert_eq!(trigger_price, FixedPrice::from_f64(28_500.0).raw());
+    let timestamp = u64::from_le_bytes(buf[30..38].try_into().unwrap());
+    assert_eq!(timestamp, 22222);
 }
 
 #[test]
@@ -397,6 +431,139 @@ fn test_encode_multiple_events() {
     encode_events(&events, 1, &mut buf);
     // OrderAccepted: 14 + 16 = 30; OrderFilled: 14 + 32 = 46
     assert_eq!(buf.len(), 76);
+}
+
+#[test]
+fn test_encode_order_rejected() {
+    let event = MatchEvent::OrderRejected {
+        order_id: 42,
+        reason: RejectReason::NoLiquidity,
+        timestamp: 55555,
+    };
+    let mut buf = BytesMut::new();
+    encode_events(&[event], 1, &mut buf);
+    // Header (14) + payload (17): order_id(8) + reason(1) + timestamp(8)
+    assert_eq!(buf.len(), 31);
+    let payload_len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+    assert_eq!(payload_len, 17);
+    let order_id = u64::from_le_bytes(buf[14..22].try_into().unwrap());
+    assert_eq!(order_id, 42);
+    assert_eq!(buf[22], 0); // NoLiquidity = 0
+    let timestamp = u64::from_le_bytes(buf[23..31].try_into().unwrap());
+    assert_eq!(timestamp, 55555);
+}
+
+#[test]
+fn test_encode_order_partially_filled() {
+    let event = MatchEvent::OrderPartiallyFilled {
+        order_id: 33,
+        filled_qty: FixedQty::from_f64(0.5),
+        remaining_qty: FixedQty::from_f64(0.5),
+        price: FixedPrice::from_f64(50_000.0),
+        timestamp: 77777,
+    };
+    let mut buf = BytesMut::new();
+    encode_events(&[event], 1, &mut buf);
+    // Header (14) + payload (40): order_id(8) + filled_qty(8) + remaining_qty(8) + price(8) + timestamp(8)
+    assert_eq!(buf.len(), 54);
+    let payload_len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+    assert_eq!(payload_len, 40);
+    let order_id = u64::from_le_bytes(buf[14..22].try_into().unwrap());
+    assert_eq!(order_id, 33);
+    let filled_qty = u64::from_le_bytes(buf[22..30].try_into().unwrap());
+    assert_eq!(filled_qty, FixedQty::from_f64(0.5).raw());
+    let remaining_qty = u64::from_le_bytes(buf[30..38].try_into().unwrap());
+    assert_eq!(remaining_qty, FixedQty::from_f64(0.5).raw());
+    let price = i64::from_le_bytes(buf[38..46].try_into().unwrap());
+    assert_eq!(price, FixedPrice::from_f64(50_000.0).raw());
+    let timestamp = u64::from_le_bytes(buf[46..54].try_into().unwrap());
+    assert_eq!(timestamp, 77777);
+}
+
+#[test]
+fn test_encode_order_cancelled() {
+    let event = MatchEvent::OrderCancelled {
+        order_id: 99,
+        remaining_qty: FixedQty::from_f64(2.0),
+        timestamp: 33333,
+    };
+    let mut buf = BytesMut::new();
+    encode_events(&[event], 1, &mut buf);
+    // Header (14) + payload (24): order_id(8) + remaining_qty(8) + timestamp(8)
+    assert_eq!(buf.len(), 38);
+    let payload_len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+    assert_eq!(payload_len, 24);
+    let order_id = u64::from_le_bytes(buf[14..22].try_into().unwrap());
+    assert_eq!(order_id, 99);
+    let remaining_qty = u64::from_le_bytes(buf[22..30].try_into().unwrap());
+    assert_eq!(remaining_qty, FixedQty::from_f64(2.0).raw());
+    let timestamp = u64::from_le_bytes(buf[30..38].try_into().unwrap());
+    assert_eq!(timestamp, 33333);
+}
+
+#[test]
+fn test_encode_order_amended() {
+    let event = MatchEvent::OrderAmended {
+        order_id: 11,
+        new_price: FixedPrice::from_f64(45_000.0),
+        new_qty: FixedQty::from_f64(0.25),
+        timestamp: 44444,
+    };
+    let mut buf = BytesMut::new();
+    encode_events(&[event], 1, &mut buf);
+    // Header (14) + payload (32): order_id(8) + new_price(8) + new_qty(8) + timestamp(8)
+    assert_eq!(buf.len(), 46);
+    let payload_len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+    assert_eq!(payload_len, 32);
+    let order_id = u64::from_le_bytes(buf[14..22].try_into().unwrap());
+    assert_eq!(order_id, 11);
+    let new_price = i64::from_le_bytes(buf[22..30].try_into().unwrap());
+    assert_eq!(new_price, FixedPrice::from_f64(45_000.0).raw());
+    let new_qty = u64::from_le_bytes(buf[30..38].try_into().unwrap());
+    assert_eq!(new_qty, FixedQty::from_f64(0.25).raw());
+    let timestamp = u64::from_le_bytes(buf[38..46].try_into().unwrap());
+    assert_eq!(timestamp, 44444);
+}
+
+// ─── Error frame encoding ─────────────────────────────────────────────────────
+
+#[test]
+fn test_encode_error_normal() {
+    let mut buf = BytesMut::new();
+    encode_error(3, ErrorCode::SequenceOutOfOrder, "seq out of order", &mut buf);
+    // Header (14) + payload: code(2) + msg_len(2) + msg(16) = 20
+    assert_eq!(buf.len(), 34);
+    let payload_len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+    assert_eq!(payload_len, 20);
+    let seq = u64::from_le_bytes(buf[6..14].try_into().unwrap());
+    assert_eq!(seq, 3);
+    let code = u16::from_le_bytes(buf[14..16].try_into().unwrap());
+    assert_eq!(code, ErrorCode::SequenceOutOfOrder as u16);
+    let msg_len = u16::from_le_bytes(buf[16..18].try_into().unwrap());
+    assert_eq!(msg_len, 16);
+    assert_eq!(&buf[18..34], b"seq out of order");
+}
+
+#[test]
+fn test_encode_error_empty_message() {
+    let mut buf = BytesMut::new();
+    encode_error(0, ErrorCode::HandshakeRequired, "", &mut buf);
+    // Header (14) + payload: code(2) + msg_len(2) = 4
+    assert_eq!(buf.len(), 18);
+    let msg_len = u16::from_le_bytes(buf[16..18].try_into().unwrap());
+    assert_eq!(msg_len, 0);
+}
+
+#[test]
+fn test_encode_error_long_message_truncated() {
+    let long_msg = "x".repeat(300);
+    let mut buf = BytesMut::new();
+    encode_error(0, ErrorCode::InvalidPayload, &long_msg, &mut buf);
+    // Message must be truncated to 255 bytes
+    let msg_len = u16::from_le_bytes(buf[16..18].try_into().unwrap());
+    assert_eq!(msg_len, 255);
+    // Total: header(14) + code(2) + msg_len(2) + 255 = 273
+    assert_eq!(buf.len(), 273);
 }
 
 // ─── Pong encoding ───────────────────────────────────────────────────────────
