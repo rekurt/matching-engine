@@ -161,10 +161,10 @@
 **Files:**
 - Modify: `README.md`
 
-- [ ] Добавить секцию "5-minute quickstart" (build, run, place first order — 5 строк кода)
-- [ ] Добавить badge и ссылку на GitHub Pages документацию
-- [ ] Добавить таблицу крейтов с однострочным описанием и ссылками на crate README.md
-- [ ] Запустить `cargo test --workspace` — финальная проверка
+- [x] Добавить секцию "5-minute quickstart" (build, run, place first order — 5 строк кода)
+- [x] Добавить badge и ссылку на GitHub Pages документацию
+- [x] Добавить таблицу крейтов с однострочным описанием и ссылками на crate README.md
+- [x] Запустить `cargo test --workspace` — финальная проверка
 
 ### Task 7: Verify acceptance criteria
 
