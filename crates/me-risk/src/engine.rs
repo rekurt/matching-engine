@@ -2,7 +2,7 @@ use rustc_hash::FxHashMap;
 use tracing::{debug, warn};
 
 use me_core::order::{Order, OrderType};
-use me_core::types::{FixedPrice, SymbolId};
+use me_core::types::{FixedPrice, SymbolId, SCALE_U64};
 
 use crate::config::RiskConfig;
 use crate::limits::{RateLimiter, RiskRejectReason};
@@ -94,7 +94,7 @@ impl RiskEngine {
     pub fn is_trading_enabled(&self, symbol: SymbolId) -> bool {
         self.configs
             .get(&symbol)
-            .map_or(false, |c| c.trading_enabled)
+            .is_some_and(|c| c.trading_enabled)
     }
 
     /// Perform all pre-trade risk checks on an order.
@@ -125,8 +125,9 @@ impl RiskEngine {
 
         // 4. Max notional value (price * qty)
         if matches!(order.order_type, OrderType::Limit | OrderType::StopLimit) {
-            let notional =
-                (order.price.raw() as u128) * (order.qty.raw() as u128) / 100_000_000;
+            let notional = (order.price.raw().unsigned_abs() as u128)
+                * (order.qty.raw() as u128)
+                / SCALE_U64 as u128;
             if notional > config.max_order_notional as u128 {
                 return Err(RiskRejectReason::ExceedsMaxNotional);
             }

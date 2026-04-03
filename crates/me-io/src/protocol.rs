@@ -1,15 +1,15 @@
-/// Wire protocol message types for the binary API transport.
-///
-/// Frame format (length-prefixed, versioned):
-/// ┌──────────┬──────────┬──────────┬──────────┬─────────────────┐
-/// │ len: u32 │ ver: u8  │ type: u8 │ seq: u64 │ payload: [u8]   │
-/// │ 4 bytes  │ 1 byte   │ 1 byte   │ 8 bytes  │ variable        │
-/// └──────────┴──────────┴──────────┴──────────┴─────────────────┘
-///
-/// `len` covers only the payload bytes (not the header).
-/// `ver` is the protocol version (currently 1).
-/// `type` is one of the MessageType variants.
-/// `seq` is a monotonically increasing sequence number per connection.
+// Wire protocol message types for the binary API transport.
+//
+// Frame format (length-prefixed, versioned):
+// ┌──────────┬──────────┬──────────┬──────────┬─────────────────┐
+// │ len: u32 │ ver: u8  │ type: u8 │ seq: u64 │ payload: [u8]   │
+// │ 4 bytes  │ 1 byte   │ 1 byte   │ 8 bytes  │ variable        │
+// └──────────┴──────────┴──────────┴──────────┴─────────────────┘
+//
+// `len` covers only the payload bytes (not the header).
+// `ver` is the protocol version (currently 1).
+// `type` is one of the MessageType variants.
+// `seq` is a monotonically increasing sequence number per connection.
 
 /// Current wire protocol version.
 pub const PROTOCOL_VERSION: u8 = 1;

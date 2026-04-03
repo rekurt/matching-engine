@@ -888,7 +888,7 @@ fn bench_amend_qty_up(c: &mut Criterion) {
             for i in 0..iters {
                 let target_id = (i % count) + 1;
                 // Vary qty upward to always trigger cancel+replace path
-                let new_qty = ONE_BTC * 2 + (i % 8) as u64 * ONE_BTC;
+                let new_qty = ONE_BTC * 2 + (i % 8) * ONE_BTC;
                 engine.process(Command::AmendOrder {
                     order_id: target_id,
                     symbol: SymbolId(0),

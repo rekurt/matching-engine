@@ -8,5 +8,8 @@
 .ralphex/progress/
 docs/plans/*
 
-# ralphex progress logs
+# ralphex worktrees
 .ralphex/worktrees/
+
+# mdBook build output
+docs/book/

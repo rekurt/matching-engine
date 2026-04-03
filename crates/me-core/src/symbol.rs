@@ -72,7 +72,7 @@ mod tests {
     fn test_validate_price() {
         let cfg = SymbolConfig::default_btc_usdt();
         // tick = 0.01 = 1_000_000 raw
-        assert!(cfg.validate_price(FixedPrice::from_raw(100_000_000_00))); // 100.00
+        assert!(cfg.validate_price(FixedPrice::from_raw(10_000_000_000))); // 100.00
         assert!(cfg.validate_price(FixedPrice::from_raw(1_000_000))); // 0.01
         assert!(!cfg.validate_price(FixedPrice::ZERO));
         assert!(!cfg.validate_price(FixedPrice::from_raw(500_000))); // 0.005 not on tick

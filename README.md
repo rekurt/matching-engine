@@ -2,6 +2,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://rubx-x.github.io/matching-engine/)
 
 **HFT Cryptocurrency Spot Matching Engine** written in Rust.
 
@@ -12,6 +13,38 @@ A high-performance, deterministic order matching engine designed for cryptocurre
 **HFT Криптовалютный Спот Матчинг-Движок** на Rust.
 
 Высокопроизводительный детерминированный движок сведения ордеров, спроектированный для спотовой торговли криптовалютами. Построен как Rust workspace с четким разделением ответственности, нулевыми аллокациями на горячем пути и бинарным сетевым протоколом для минимальных сетевых задержек.
+
+---
+
+## 5-Minute Quickstart
+
+```bash
+# 1. Build
+cargo build --release
+
+# 2. Run (BTC/USDT, ETH/USDT, SOL/USDT by default)
+./target/release/me-server
+
+# 3. Place your first order (Go)
+go run examples/go/place_order/main.go
+```
+
+```go
+// 4. Connect and place an order
+client, _ := meclient.Dial("localhost:9090")
+defer client.Close()
+client.PlaceOrder(&meclient.PlaceOrderMsg{
+    OrderID: 1, SymbolID: 0, Side: meclient.SideBuy,
+    OrderType: meclient.OrderTypeLimit, TimeInForce: meclient.TimeInForceGTC,
+    Price: meclient.NewDecimal(50000.0), Qty: meclient.NewDecimal(0.5),
+})
+
+// 5. Read the response
+event, _ := client.ReadEvent()
+fmt.Printf("event: %+v\n", event)
+```
+
+Full walkthrough: [docs.rubx-x.github.io/matching-engine/](https://rubx-x.github.io/matching-engine/quickstart.html)
 
 ---
 
@@ -57,15 +90,15 @@ A high-performance, deterministic order matching engine designed for cryptocurre
 
 | Crate | Description | Описание |
 |-------|-------------|----------|
-| **me-core** | Foundational types: `FixedPrice`, `FixedQty`, `Order`, `Trade`, `SymbolConfig`, `MatchEvent`, error types | Базовые типы: цены, количества, ордера, сделки, события, ошибки |
-| **me-book** | Order book implementation: `OrderBook` (BTreeMap + Slab + intrusive linked list), `PriceLevel`, `StopBook`, matching algorithm | Стакан ордеров: BTreeMap + Slab + интрузивный связанный список, уровни цен, стоп-книга, алгоритм мэтчинга |
-| **me-engine** | Engine per trading pair, `Command` dispatch, `Router` (single-thread), `ShardedRouterV2` (multi-thread) | Движок на пару, диспетчеризация команд, маршрутизатор (однопоточный и шардированный) |
+| [**me-core**](crates/me-core/README.md) | Foundational types: `FixedPrice`, `FixedQty`, `Order`, `Trade`, `SymbolConfig`, `MatchEvent`, error types | Базовые типы: цены, количества, ордера, сделки, события, ошибки |
+| [**me-book**](crates/me-book/README.md) | Order book implementation: `OrderBook` (BTreeMap + Slab + intrusive linked list), `PriceLevel`, `StopBook`, matching algorithm | Стакан ордеров: BTreeMap + Slab + интрузивный связанный список, уровни цен, стоп-книга, алгоритм мэтчинга |
+| [**me-engine**](crates/me-engine/README.md) | Engine per trading pair, `Command` dispatch, `Router` (single-thread), `ShardedRouterV2` (multi-thread) | Движок на пару, диспетчеризация команд, маршрутизатор (однопоточный и шардированный) |
 | **me-persist** | Write-Ahead Log (WAL) with CRC32 checksums, snapshot save/load with atomic writes | WAL с CRC32 контрольными суммами, сохранение/загрузка снепшотов с атомарной записью |
-| **me-io** | Binary wire protocol definition, frame codec (encode/decode), TCP and Unix Domain Socket async servers (tokio) | Определение бинарного протокола, кодек фреймов, TCP и UDS серверы (tokio) |
+| [**me-io**](crates/me-io/README.md) | Binary wire protocol definition, frame codec (encode/decode), TCP and Unix Domain Socket async servers (tokio) | Определение бинарного протокола, кодек фреймов, TCP и UDS серверы (tokio) |
 | **me-bench** | Criterion benchmarks: throughput, latency, end-to-end scenarios (18 benchmarks) | Бенчмарки Criterion: пропускная способность, задержка, сквозные сценарии (18 бенчмарков) |
-| **me-server** | Server binary: TCP + UDS listeners, TOML config, admin REST API (Axum) | Серверный бинарник: TCP + UDS, TOML конфигурация, REST API администрирования |
+| [**me-server**](crates/me-server/README.md) | Server binary: TCP + UDS listeners, TOML config, admin REST API (Axum) | Серверный бинарник: TCP + UDS, TOML конфигурация, REST API администрирования |
 | **me-metrics** | Prometheus metrics (50+ counters, gauges, histograms) | Метрики Prometheus (50+ счётчиков, гейджей, гистограмм) |
-| **me-risk** | Risk management: rate limiting, position limits | Риск-менеджмент: ограничение частоты, лимиты позиций |
+| [**me-risk**](crates/me-risk/README.md) | Risk management: rate limiting, position limits | Риск-менеджмент: ограничение частоты, лимиты позиций |
 | **me-audit** | Audit logging: JSON events for all matching operations | Аудит: JSON-события всех операций мэтчинга |
 | **me-datagen** | Realistic order flow generator with configurable parameters: volatility, market/limit/stop ratios, cancel/amend ratios | Генератор реалистичного потока ордеров с настраиваемыми параметрами |
 
@@ -239,13 +272,14 @@ The engine communicates via a custom binary protocol over TCP or Unix Domain Soc
 **Frame format / Формат фрейма:**
 
 ```
-+----------+----------+----------+-----------------+
-| len: u32 | type: u8 | seq: u64 | payload: [u8]   |
-| 4 bytes  | 1 byte   | 8 bytes  | variable        |
-+----------+----------+----------+-----------------+
++----------+---------+----------+----------+-----------------+
+| len: u32 | ver: u8 | type: u8 | seq: u64 | payload: [u8]   |
+| 4 bytes  | 1 byte  | 1 byte   | 8 bytes  | variable        |
++----------+---------+----------+----------+-----------------+
 ```
 
-- `len` -- payload length (does not include the 13-byte header) / длина payload (не включает 13-байтный заголовок)
+- `len` -- payload length (does not include the 14-byte header) / длина payload (не включает 14-байтный заголовок)
+- `ver` -- protocol version, must be `0x01` / версия протокола, должна быть `0x01`
 - `type` -- message type identifier / идентификатор типа сообщения
 - `seq` -- sequence number for request/response correlation / порядковый номер для корреляции запрос/ответ
 
@@ -289,6 +323,8 @@ The Go client library is available at [`clients/go/meclient/`](clients/go/meclie
 Go клиентская библиотека находится в [`clients/go/meclient/`](clients/go/meclient/).
 
 ## Documentation / Документация
+
+**Online (GitHub Pages):** [https://rubx-x.github.io/matching-engine/](https://rubx-x.github.io/matching-engine/)
 
 - [Architecture (English)](docs/ARCHITECTURE.md) / [Архитектура (русский)](docs/ARCHITECTURE_RU.md)
 - [Wire Protocol Specification](docs/PROTOCOL.md) / [Спецификация протокола](docs/PROTOCOL.md)

@@ -179,7 +179,11 @@ pub fn decode_frame(
         .ok_or(DecodeError::InvalidMessageType(msg_type_raw))?;
 
     // Sequence validation: must be strictly increasing.
-    if seq <= conn.last_client_seq && seq != 0 {
+    // seq == 0 is only valid for the very first Handshake frame (while still in HandshakePending).
+    let is_first_handshake = seq == 0
+        && msg_type == MessageType::Handshake
+        && conn.state == ConnectionState::HandshakePending;
+    if seq <= conn.last_client_seq && !is_first_handshake {
         return Err(DecodeError::SequenceOutOfOrder {
             expected_min: conn.last_client_seq + 1,
             got: seq,
@@ -487,7 +491,8 @@ fn encode_event(event: &MatchEvent, seq: u64, buf: &mut BytesMut) {
             buf.put_u64_le(*timestamp);
         }
         MatchEvent::Trade(trade) => {
-            write_header(buf, 51, MessageType::Trade as u8, seq);
+            // trade_id(8)+symbol(2)+price(8)+qty(8)+maker_id(8)+taker_id(8)+side(1)+ts(8)+seq(8) = 59
+            write_header(buf, 59, MessageType::Trade as u8, seq);
             buf.put_u64_le(trade.trade_id);
             buf.put_u16_le(trade.symbol.0);
             buf.put_i64_le(trade.price.raw());
@@ -496,6 +501,7 @@ fn encode_event(event: &MatchEvent, seq: u64, buf: &mut BytesMut) {
             buf.put_u64_le(trade.taker_order_id);
             buf.put_u8(trade.maker_side as u8);
             buf.put_u64_le(trade.timestamp);
+            buf.put_u64_le(trade.sequence);
         }
         MatchEvent::OrderFilled { order_id, filled_qty, price, timestamp } => {
             write_header(buf, 32, MessageType::OrderFilled as u8, seq);
