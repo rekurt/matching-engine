@@ -7,3 +7,6 @@
 # ralphex progress logs
 .ralphex/progress/
 docs/plans/*
+
+# ralphex progress logs
+.ralphex/worktrees/
