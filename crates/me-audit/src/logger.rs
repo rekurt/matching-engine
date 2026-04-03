@@ -108,6 +108,8 @@ impl AuditLogger {
                         trigger_price_raw: trigger_price.raw(),
                     }
                 }
+                // Query-response events are not audit-loggable trading events.
+                MatchEvent::OrderStatus { .. } | MatchEvent::OrderNotFound { .. } => continue,
             };
             self.emit(audit);
         }

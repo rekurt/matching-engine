@@ -122,9 +122,12 @@ fn test_decode_handshake() {
 #[test]
 fn test_handshake_ack_encode() {
     let mut buf = BytesMut::new();
-    encode_handshake_ack(0, &mut buf);
-    // Header (14) + payload (1)
-    assert_eq!(buf.len(), 15);
+    let session_id = [0u8; 16];
+    let caps = 0u64;
+    let hb_ms = 5_000u32;
+    encode_handshake_ack(0, session_id, caps, hb_ms, &mut buf);
+    // Header (14) + payload: version(1) + cap_tlv(12) + sid_tlv(20) + hb_tlv(8) = 41
+    assert_eq!(buf.len(), 14 + 41);
     // Verify version byte in payload
     assert_eq!(buf[14], PROTOCOL_VERSION);
 }

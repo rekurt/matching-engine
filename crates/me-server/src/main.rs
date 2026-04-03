@@ -12,6 +12,7 @@ use axum::{
 use clap::Parser;
 use config::{default_config, load_config, Config};
 use me_engine::router::ShardedRouterV2;
+use me_io::session_store::SessionStore;
 use me_io::tcp_server::TcpServer;
 use me_io::uds_server::UdsServer;
 use me_metrics::EngineMetrics;
@@ -294,10 +295,37 @@ async fn main() {
         axum::serve(listener, app).await.unwrap();
     });
 
+    // Shared session store (TCP and UDS share the same store so reconnects across
+    // transports are also supported).
+    let session_store = Arc::new(SessionStore::new(
+        cfg.server.session.replay_buffer_size,
+        std::time::Duration::from_secs(cfg.server.session.ttl_secs),
+    ));
+
+    let hb_interval_ms = cfg.server.heartbeat.interval_ms as u32;
+    let hb_timeout_ms = cfg.server.heartbeat.timeout_ms;
+
+    // Background GC task: evict expired sessions every 30 s.
+    {
+        let gc_store = Arc::clone(&session_store);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                gc_store.gc();
+            }
+        });
+    }
+
     // Spawn optional UDS listener
     if let Some(ref uds_path) = cfg.server.uds_path {
-        let uds_server =
-            UdsServer::new_with_metrics(Arc::clone(&router), Some(Arc::clone(&metrics)));
+        let uds_server = UdsServer::new_with_config(
+            Arc::clone(&router),
+            Some(Arc::clone(&metrics)),
+            Arc::clone(&session_store),
+            hb_interval_ms,
+            hb_timeout_ms,
+        );
         let path = uds_path.clone();
         let uds_shutdown = shutdown_rx.clone();
         tokio::spawn(async move {
@@ -309,8 +337,13 @@ async fn main() {
     }
 
     // TCP listener (blocks until shutdown)
-    let tcp_server =
-        TcpServer::new_with_metrics(Arc::clone(&router), Some(Arc::clone(&metrics)));
+    let tcp_server = TcpServer::new_with_config(
+        Arc::clone(&router),
+        Some(Arc::clone(&metrics)),
+        Arc::clone(&session_store),
+        hb_interval_ms,
+        hb_timeout_ms,
+    );
     info!(addr = %cfg.server.tcp_addr, "TCP listening");
     if let Err(e) = tcp_server.listen(&cfg.server.tcp_addr, shutdown_rx).await {
         warn!(error = %e, "TCP server error");

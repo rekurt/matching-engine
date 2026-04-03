@@ -25,6 +25,44 @@ pub struct ServerConfig {
     pub admin: AdminConfig,
     #[serde(default)]
     pub shutdown: ShutdownConfig,
+    #[serde(default)]
+    pub heartbeat: HeartbeatConfig,
+    #[serde(default)]
+    pub session: SessionConfig,
+    #[serde(default)]
+    pub tls: TlsConfig,
+}
+
+/// Heartbeat / keepalive configuration.
+#[derive(Debug, Deserialize)]
+pub struct HeartbeatConfig {
+    /// Interval (ms) the server advertises to clients via TLV_HEARTBEAT_MS.
+    #[serde(default = "default_heartbeat_interval_ms")]
+    pub interval_ms: u64,
+    /// Server-side read timeout (ms). Connection dropped if no data received
+    /// within this window (should be > interval_ms to allow for jitter).
+    #[serde(default = "default_heartbeat_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+/// Session recovery configuration.
+#[derive(Debug, Deserialize)]
+pub struct SessionConfig {
+    /// Number of outbound frames buffered per session for replay after reconnect.
+    #[serde(default = "default_replay_buffer_size")]
+    pub replay_buffer_size: usize,
+    /// Seconds an idle session is retained before GC evicts it.
+    #[serde(default = "default_session_ttl_secs")]
+    pub ttl_secs: u64,
+}
+
+/// Optional TLS configuration. If cert_path/key_path are absent, TLS is disabled.
+#[derive(Debug, Deserialize, Default)]
+pub struct TlsConfig {
+    pub cert_path: Option<String>,
+    pub key_path: Option<String>,
+    /// If set, enables mutual TLS and requires a client certificate signed by this CA.
+    pub client_ca_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -67,6 +105,18 @@ fn default_metrics_addr() -> String {
 fn default_drain_timeout() -> u64 {
     30
 }
+fn default_heartbeat_interval_ms() -> u64 {
+    5_000
+}
+fn default_heartbeat_timeout_ms() -> u64 {
+    15_000
+}
+fn default_replay_buffer_size() -> usize {
+    1_000
+}
+fn default_session_ttl_secs() -> u64 {
+    60
+}
 fn default_price_scale() -> u8 {
     2
 }
@@ -95,6 +145,27 @@ impl Default for ServerConfig {
             uds_path: None,
             admin: AdminConfig::default(),
             shutdown: ShutdownConfig::default(),
+            heartbeat: HeartbeatConfig::default(),
+            session: SessionConfig::default(),
+            tls: TlsConfig::default(),
+        }
+    }
+}
+
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            interval_ms: default_heartbeat_interval_ms(),
+            timeout_ms: default_heartbeat_timeout_ms(),
+        }
+    }
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            replay_buffer_size: default_replay_buffer_size(),
+            ttl_secs: default_session_ttl_secs(),
         }
     }
 }

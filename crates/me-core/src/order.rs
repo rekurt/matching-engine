@@ -2,6 +2,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{FixedPrice, FixedQty, OrderId, SequenceId, Side, SymbolId};
 
+// ─── Order execution flags (bit mask, stored in Order.flags) ─────────────────
+
+/// Reject the order if it would immediately cross the spread (maker-only).
+pub const ORDER_FLAG_POST_ONLY: u8 = 0x01;
+/// Reject if the order would not reduce an open position (futures semantics).
+pub const ORDER_FLAG_REDUCE_ONLY: u8 = 0x02;
+/// Like POST_ONLY but also applies to stop orders once triggered.
+pub const ORDER_FLAG_MAKER_OR_CANCEL: u8 = 0x04;
+
 // ─── OrderType ───────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -60,7 +69,9 @@ pub struct Order {
     pub order_type: OrderType,
     pub tif: TimeInForce,
     pub status: OrderStatus,
-    pub _pad: [u8; 2],
+    /// Execution flags bit-mask (ORDER_FLAG_POST_ONLY, etc.). Former _pad[0].
+    pub flags: u8,
+    pub _pad: u8,
 }
 
 impl Order {
@@ -88,7 +99,8 @@ impl Order {
             order_type: OrderType::Limit,
             tif,
             status: OrderStatus::New,
-            _pad: [0; 2],
+            flags: 0,
+            _pad: 0,
         }
     }
 
@@ -115,7 +127,8 @@ impl Order {
             order_type: OrderType::Market,
             tif,
             status: OrderStatus::New,
-            _pad: [0; 2],
+            flags: 0,
+            _pad: 0,
         }
     }
 
@@ -145,7 +158,8 @@ impl Order {
             order_type: OrderType::StopLimit,
             tif,
             status: OrderStatus::New,
-            _pad: [0; 2],
+            flags: 0,
+            _pad: 0,
         }
     }
 
@@ -173,7 +187,8 @@ impl Order {
             order_type: OrderType::StopMarket,
             tif,
             status: OrderStatus::New,
-            _pad: [0; 2],
+            flags: 0,
+            _pad: 0,
         }
     }
 
