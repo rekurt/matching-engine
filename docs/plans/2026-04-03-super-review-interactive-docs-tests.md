@@ -151,10 +151,10 @@
 **Files:**
 - Create: `.github/workflows/docs.yml`
 
-- [ ] Создать workflow: trigger on push to master/main при изменениях в `docs/src/` или `book.toml`
-- [ ] Шаги: checkout → install mdbook → `mdbook build` → deploy to GitHub Pages (actions/deploy-pages@v4)
-- [ ] Добавить permissions: `contents: read`, `pages: write`, `id-token: write`
-- [ ] Использовать `actions/configure-pages@v4` + `actions/upload-pages-artifact@v3` с path `docs/book`
+- [x] Создать workflow: trigger on push to master/main при изменениях в `docs/src/` или `book.toml`
+- [x] Шаги: checkout → install mdbook → `mdbook build` → deploy to GitHub Pages (actions/deploy-pages@v4)
+- [x] Добавить permissions: `contents: read`, `pages: write`, `id-token: write`
+- [x] Использовать `actions/configure-pages@v4` + `actions/upload-pages-artifact@v3` с path `docs/book`
 
 ### Task 6: Обновление README.md проекта
 
