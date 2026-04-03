@@ -168,12 +168,12 @@
 
 ### Task 7: Verify acceptance criteria
 
-- [ ] manual test: `cargo build --release && ./target/release/me-server` запускается без ошибок
-- [ ] run full test suite: `cargo test --workspace` — все тесты проходят
-- [ ] run linter: `cargo clippy --workspace -- -D warnings` — 0 предупреждений
-- [ ] verify test coverage: новых тестов >= 40 (me-io: ~15, me-book: ~12, me-risk: ~5, интеграционные: ~5)
-- [ ] каждый крейт имеет README.md с code snippet
-- [ ] GitHub Actions workflow файл создан и валиден (yaml lint)
+- [x] manual test: `cargo build --release && ./target/release/me-server` запускается без ошибок
+- [x] run full test suite: `cargo test --workspace` — все тесты проходят
+- [x] run linter: `cargo clippy --workspace -- -D warnings` — 0 предупреждений
+- [x] verify test coverage: новых тестов >= 40 (me-io: ~15, me-book: ~12, me-risk: ~5, интеграционные: ~5)
+- [x] каждый крейт имеет README.md с code snippet
+- [x] GitHub Actions workflow файл создан и валиден (yaml lint)
 
 ### Task 8: Update documentation
 
