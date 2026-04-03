@@ -349,10 +349,10 @@ fn test_encode_trade() {
     let event = MatchEvent::Trade(trade);
     let mut buf = BytesMut::new();
     encode_events(&[event], 1, &mut buf);
-    // Header (14) + payload (51)
-    assert_eq!(buf.len(), 65);
+    // Header (14) + payload (59): trade_id(8) + symbol(2) + price(8) + qty(8) + maker_order_id(8) + taker_order_id(8) + maker_side(1) + timestamp(8) + sequence(8)
+    assert_eq!(buf.len(), 73);
     let payload_len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
-    assert_eq!(payload_len, 51);
+    assert_eq!(payload_len, 59);
 }
 
 #[test]

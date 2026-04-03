@@ -125,8 +125,9 @@ impl RiskEngine {
 
         // 4. Max notional value (price * qty)
         if matches!(order.order_type, OrderType::Limit | OrderType::StopLimit) {
-            let notional =
-                (order.price.raw() as u128) * (order.qty.raw() as u128) / SCALE_U64 as u128;
+            let notional = (order.price.raw().unsigned_abs() as u128)
+                * (order.qty.raw() as u128)
+                / SCALE_U64 as u128;
             if notional > config.max_order_notional as u128 {
                 return Err(RiskRejectReason::ExceedsMaxNotional);
             }

@@ -402,7 +402,7 @@ fn encode_event(event: &MatchEvent, seq: u64, buf: &mut BytesMut) {
             buf.put_u64_le(*timestamp);
         }
         MatchEvent::Trade(trade) => {
-            let payload_len = 51u32;
+            let payload_len = 59u32;
             write_header(buf, payload_len, MessageType::Trade as u8, seq);
             buf.put_u64_le(trade.trade_id);
             buf.put_u16_le(trade.symbol.0);
@@ -412,6 +412,7 @@ fn encode_event(event: &MatchEvent, seq: u64, buf: &mut BytesMut) {
             buf.put_u64_le(trade.taker_order_id);
             buf.put_u8(trade.maker_side as u8);
             buf.put_u64_le(trade.timestamp);
+            buf.put_u64_le(trade.sequence);
         }
         MatchEvent::OrderFilled {
             order_id,
