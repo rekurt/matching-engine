@@ -34,6 +34,7 @@ fn make_frame_with_version(msg_type: u8, seq: u64, version: u8, payload: &[u8]) 
 }
 
 /// Build a PlaceOrder payload (37 bytes).
+#[allow(clippy::too_many_arguments)]
 fn place_order_payload(
     order_id: u64,
     symbol: u16,

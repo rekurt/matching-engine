@@ -62,8 +62,8 @@ cargo audit                      # проверка CVE
 
 ### ConnectionCodecState
 
-Состояние кодека (`ConnectionCodecState`) содержит `ConnectionState` и `seq_counter`.
-Команды до handshake отклоняются с `DecodeError::CommandBeforeHandshake`.
+Состояние кодека (`ConnectionCodecState`) содержит `ConnectionState` и `last_client_seq`.
+Команды до handshake отклоняются с `DecodeError::HandshakeRequired`.
 
 ## Документация
 

@@ -307,7 +307,7 @@ fn test_c34_partial_fill_below_min() {
 
     // After fill, order 2 should still be on book even if remaining is small
     // (min_qty is only checked at order entry, not after fills)
-    assert!(count_trades(events) >= 2);
+    assert_eq!(count_trades(events), 2);
 }
 
 /// C35: Fill for exactly qty_step units — correct remaining
@@ -324,7 +324,7 @@ fn test_c35_fill_exact_step() {
         2000,
     )));
 
-    assert!(count_trades(events) >= 1);
+    assert_eq!(count_trades(events), 1);
     // Remaining of ask should be 1.0 - 0.00001
     assert!(e.book().contains_order(1)); // ask still on book
 }
@@ -340,7 +340,7 @@ fn test_e41_ioc_full_fill() {
         .process(limit_buy_tif(2, 100.0, 1.0, TimeInForce::IOC))
         .to_vec();
 
-    assert!(count_trades(&events) >= 1);
+    assert_eq!(count_trades(&events), 1);
     assert_eq!(e.book().order_count(), 0);
 }
 
@@ -353,7 +353,7 @@ fn test_e42_ioc_partial_fill() {
         .process(limit_buy_tif(2, 100.0, 1.0, TimeInForce::IOC))
         .to_vec();
 
-    assert!(count_trades(&events) >= 1);
+    assert_eq!(count_trades(&events), 1);
     assert!(events
         .iter()
         .any(|ev| matches!(ev, MatchEvent::OrderCancelled { order_id: 2, .. })));
@@ -386,7 +386,7 @@ fn test_e44_ioc_sell() {
         .process(limit_sell_tif(2, 100.0, 1.0, TimeInForce::IOC))
         .to_vec();
 
-    assert!(count_trades(&events) >= 1);
+    assert_eq!(count_trades(&events), 1);
     assert!(!e.book().contains_order(2));
 }
 
@@ -401,7 +401,7 @@ fn test_f45_fok_exact_fill() {
         .process(limit_buy_tif(2, 100.0, 1.0, TimeInForce::FOK))
         .to_vec();
 
-    assert!(count_trades(&events) >= 1);
+    assert_eq!(count_trades(&events), 1);
     assert_eq!(e.book().order_count(), 0);
 }
 
@@ -441,7 +441,7 @@ fn test_f47_fok_multi_level() {
         .process(limit_buy_tif(3, 101.0, 1.0, TimeInForce::FOK))
         .to_vec();
 
-    assert!(count_trades(&events) >= 2);
+    assert_eq!(count_trades(&events), 2);
     assert_eq!(e.book().order_count(), 0);
 }
 
@@ -466,7 +466,7 @@ fn test_f49_fok_sell() {
     let events = e
         .process(limit_sell_tif(2, 100.0, 1.0, TimeInForce::FOK))
         .to_vec();
-    assert!(count_trades(&events) >= 1);
+    assert_eq!(count_trades(&events), 1);
 }
 
 // ─── H. Cancel ──────────────────────────────────────────────────────────────
