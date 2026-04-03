@@ -129,9 +129,9 @@
 - Create: `docs/src/clients/go.md`
 - Create: `docs/src/clients/python.md`
 
-- [ ] `docs/src/integration.md` — общий обзор: TCP протокол, handshake, отправка команд, получение событий
-- [ ] `docs/src/clients/go.md` — полный пример на Go: подключение, place order, обработка ответа (переработать из `examples/go/`)
-- [ ] `docs/src/clients/python.md` — аналогичный пример на Python (raw socket + struct)
+- [x] `docs/src/integration.md` — общий обзор: TCP протокол, handshake, отправка команд, получение событий
+- [x] `docs/src/clients/go.md` — полный пример на Go: подключение, place order, обработка ответа (переработать из `examples/go/`)
+- [x] `docs/src/clients/python.md` — аналогичный пример на Python (raw socket + struct)
 
 ### Task 5d: mdBook — протокол, архитектура, API, деплой
 
