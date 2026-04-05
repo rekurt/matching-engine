@@ -93,14 +93,13 @@ pub struct ConnectionCodecState {
     pub last_client_seq: u64,
     /// Session ID assigned to this connection at handshake.
     pub session_id: SessionId,
-    /// Monotonic seq to assign to the NEXT outbound frame in the REPLAY
-    /// PIPELINE. Starts at 1 so that `last_recv_seq=0` (the sentinel meaning
-    /// "client has received nothing") yields all frames on replay.
+    /// Monotonic seq counter for outbound frames in the REPLAY PIPELINE.
+    /// Wraps `ServerFrameSeq` to make seq=0 structurally unrepresentable.
     ///
     /// Out-of-band error frames (ServerShuttingDown, HeartbeatTimeout,
     /// Backpressure, InvalidPayload) DO use seq=0 — they're deliberately
     /// outside the ordered stream and are never pushed to the replay buffer.
-    pub server_frame_seq: u64,
+    pub server_frame_seq: crate::session_store::ServerFrameSeq,
 }
 
 impl ConnectionCodecState {
@@ -109,7 +108,7 @@ impl ConnectionCodecState {
             state: ConnectionState::HandshakePending,
             last_client_seq: 0,
             session_id: SessionId::NONE,
-            server_frame_seq: 1,
+            server_frame_seq: crate::session_store::ServerFrameSeq::FIRST,
         }
     }
 }

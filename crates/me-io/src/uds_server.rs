@@ -298,17 +298,17 @@ async fn handle_uds_connection_inner(
                                                     conn.session_id = session_id;
                                                     // CRITICAL: re-sync outbound seq counter with the
                                                     // session's replay buffer state.
-                                                    conn.server_frame_seq =
-                                                        session_store.next_outbound_seq(&session_id);
+                                                    conn.server_frame_seq
+                                                        .reset_to(session_store.next_outbound_seq(&session_id));
                                                     codec::encode_session_resumed(count, seq, &mut write_buf);
                                                     codec::encode_replay_frames(&replay_frames, &mut write_buf);
-                                                    debug!(replayed = count, next_seq = conn.server_frame_seq, "session resumed");
+                                                    debug!(replayed = count, next_seq = conn.server_frame_seq.peek(), "session resumed");
                                                 }
                                                 ReplayResult::Gap { missing_from, missing_to } => {
                                                     conn.state = ConnectionState::Active;
                                                     conn.session_id = session_id;
-                                                    conn.server_frame_seq =
-                                                        session_store.next_outbound_seq(&session_id);
+                                                    conn.server_frame_seq
+                                                        .reset_to(session_store.next_outbound_seq(&session_id));
                                                     codec::encode_replay_gap(
                                                         seq,
                                                         missing_from,
@@ -318,7 +318,7 @@ async fn handle_uds_connection_inner(
                                                     warn!(
                                                         missing_from,
                                                         missing_to,
-                                                        next_seq = conn.server_frame_seq,
+                                                        next_seq = conn.server_frame_seq.peek(),
                                                         "replay gap: client must resync via GetOpenOrders"
                                                     );
                                                 }
@@ -326,8 +326,8 @@ async fn handle_uds_connection_inner(
                                                     let new_id = session_store.create();
                                                     conn.state = ConnectionState::Active;
                                                     conn.session_id = new_id;
-                                                    conn.server_frame_seq =
-                                                        session_store.next_outbound_seq(&new_id);
+                                                    conn.server_frame_seq
+                                                        .reset_to(session_store.next_outbound_seq(&new_id));
                                                     codec::encode_handshake_ack(
                                                         seq,
                                                         new_id,
@@ -409,7 +409,7 @@ async fn handle_uds_connection_inner(
                                                     );
                                                     Vec::new()
                                                 });
-                                                let snapshot_seq = conn.server_frame_seq;
+                                                let snapshot_seq = conn.server_frame_seq.peek();
                                                 codec::encode_open_orders_begin(
                                                     seq,
                                                     request_id,
@@ -445,10 +445,10 @@ async fn handle_uds_connection_inner(
                                     {
                                         let frames_pushed = session_store.push_frames_with_seq_rewrite(
                                             &conn.session_id,
-                                            conn.server_frame_seq,
+                                            conn.server_frame_seq.peek(),
                                             &mut write_buf,
                                         );
-                                        conn.server_frame_seq += frames_pushed;
+                                        conn.server_frame_seq.advance_by(frames_pushed);
 
                                         if let Some(req_id) = new_dedup_request_id {
                                             let frame_bytes = Bytes::copy_from_slice(&write_buf);
@@ -468,10 +468,10 @@ async fn handle_uds_connection_inner(
                                             let warn_pushed = session_store
                                                 .push_frames_with_seq_rewrite(
                                                     &conn.session_id,
-                                                    conn.server_frame_seq,
+                                                    conn.server_frame_seq.peek(),
                                                     &mut warn_buf,
                                                 );
-                                            conn.server_frame_seq += warn_pushed;
+                                            conn.server_frame_seq.advance_by(warn_pushed);
                                             write_buf.extend_from_slice(&warn_buf);
                                             if is_hard {
                                                 warn!(buffer_pct = pct, "slow consumer: hard limit");

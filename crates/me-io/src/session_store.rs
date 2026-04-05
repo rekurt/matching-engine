@@ -35,6 +35,59 @@ use rustc_hash::FxHashMap;
 // Re-export from me-core so existing me-io callers keep working.
 pub use me_core::SessionId;
 
+/// Monotonic outbound-frame sequence counter for a connection.
+///
+/// Encodes the "seq=0 is the 'unsent' sentinel" invariant at the type
+/// level: `FIRST` is 1, `next()` only increments, and `reset_to()` is
+/// the only way to externally rewrite the counter (used after ResumeSession
+/// to continue from `SessionStore::next_outbound_seq()`).
+///
+/// See RFC-0001 Task B (`docs/rfcs/0001-type-safety-newtypes.md`).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct ServerFrameSeq(u64);
+
+impl ServerFrameSeq {
+    /// The first seq to assign (seq=0 is reserved as "unsent").
+    pub const FIRST: Self = Self(1);
+
+    /// Return the current seq and advance to +1. This is the
+    /// per-frame assignment primitive. Named `next` by analogy with
+    /// Iterator, but ServerFrameSeq deliberately does NOT implement
+    /// Iterator — it's a mutable counter, not a stream.
+    #[inline]
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> u64 {
+        let s = self.0;
+        self.0 += 1;
+        s
+    }
+
+    /// Advance the counter by `n` after a batch push of `n` frames.
+    #[inline]
+    pub fn advance_by(&mut self, n: u64) {
+        self.0 += n;
+    }
+
+    /// Peek at the next-to-assign seq without consuming it.
+    #[inline]
+    pub fn peek(&self) -> u64 {
+        self.0
+    }
+
+    /// Re-seed from `SessionStore::next_outbound_seq()` after ResumeSession.
+    /// This is the ONLY way to rewrite the counter from outside.
+    #[inline]
+    pub fn reset_to(&mut self, next_seq: u64) {
+        self.0 = next_seq;
+    }
+}
+
+impl Default for ServerFrameSeq {
+    fn default() -> Self {
+        Self::FIRST
+    }
+}
+
 /// Number of lock shards. Must be a power of 2 so we can use bit-masking for
 /// shard selection. 64 shards gives us good contention reduction without
 /// excessive overhead for small deployments.

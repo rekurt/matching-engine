@@ -352,18 +352,18 @@ where
                                                     // session's replay buffer state. Without this,
                                                     // the fresh ConnectionCodecState's server_frame_seq=1
                                                     // would collide with seqs already in the buffer.
-                                                    conn.server_frame_seq =
-                                                        session_store.next_outbound_seq(&session_id);
+                                                    conn.server_frame_seq
+                                                        .reset_to(session_store.next_outbound_seq(&session_id));
                                                     codec::encode_session_resumed(count, seq, &mut write_buf);
                                                     codec::encode_replay_frames(&replay_frames, &mut write_buf);
-                                                    debug!(replayed = count, next_seq = conn.server_frame_seq, "session resumed");
+                                                    debug!(replayed = count, next_seq = conn.server_frame_seq.peek(), "session resumed");
                                                 }
                                                 ReplayResult::Gap { missing_from, missing_to } => {
                                                     // Frames client needs were evicted — client must resync.
                                                     conn.state = ConnectionState::Active;
                                                     conn.session_id = session_id;
-                                                    conn.server_frame_seq =
-                                                        session_store.next_outbound_seq(&session_id);
+                                                    conn.server_frame_seq
+                                                        .reset_to(session_store.next_outbound_seq(&session_id));
                                                     codec::encode_replay_gap(
                                                         seq,
                                                         missing_from,
@@ -373,7 +373,7 @@ where
                                                     warn!(
                                                         missing_from,
                                                         missing_to,
-                                                        next_seq = conn.server_frame_seq,
+                                                        next_seq = conn.server_frame_seq.peek(),
                                                         "replay gap: client must resync via GetOpenOrders"
                                                     );
                                                 }
@@ -382,8 +382,8 @@ where
                                                     conn.state = ConnectionState::Active;
                                                     conn.session_id = new_id;
                                                     // new_id is a freshly-created session — next seq is 1.
-                                                    conn.server_frame_seq =
-                                                        session_store.next_outbound_seq(&new_id);
+                                                    conn.server_frame_seq
+                                                        .reset_to(session_store.next_outbound_seq(&new_id));
                                                     codec::encode_handshake_ack(
                                                         seq,
                                                         new_id,
@@ -478,7 +478,7 @@ where
                                                     );
                                                     Vec::new()
                                                 });
-                                                let snapshot_seq = conn.server_frame_seq;
+                                                let snapshot_seq = conn.server_frame_seq.peek();
                                                 codec::encode_open_orders_begin(
                                                     seq,
                                                     request_id,
@@ -523,10 +523,10 @@ where
                                     {
                                         let frames_pushed = session_store.push_frames_with_seq_rewrite(
                                             &conn.session_id,
-                                            conn.server_frame_seq,
+                                            conn.server_frame_seq.peek(),
                                             &mut write_buf,
                                         );
-                                        conn.server_frame_seq += frames_pushed;
+                                        conn.server_frame_seq.advance_by(frames_pushed);
 
                                         // Cache finalized bytes (with assigned server_seqs) for
                                         // dedup — retries will re-send these exact bytes so the
@@ -551,10 +551,10 @@ where
                                             let warn_pushed = session_store
                                                 .push_frames_with_seq_rewrite(
                                                     &conn.session_id,
-                                                    conn.server_frame_seq,
+                                                    conn.server_frame_seq.peek(),
                                                     &mut warn_buf,
                                                 );
-                                            conn.server_frame_seq += warn_pushed;
+                                            conn.server_frame_seq.advance_by(warn_pushed);
                                             write_buf.extend_from_slice(&warn_buf);
                                             if is_hard {
                                                 warn!(
