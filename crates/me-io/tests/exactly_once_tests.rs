@@ -11,14 +11,14 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use me_io::session_store::SessionStore;
+use me_io::session_store::{SessionId, SessionStore};
 
 /// Simulate a "process + cache" step: lookup request_id; if hit, return cached;
 /// otherwise invoke a fresh "handler" closure, cache the response, return it.
 /// This mirrors the hot path in tcp_server.rs / uds_server.rs.
 fn process_or_replay<F>(
     store: &SessionStore,
-    sid: &[u8; 16],
+    sid: &SessionId,
     request_id: u64,
     handler: F,
 ) -> Bytes

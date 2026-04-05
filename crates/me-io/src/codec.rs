@@ -108,7 +108,7 @@ impl ConnectionCodecState {
         Self {
             state: ConnectionState::HandshakePending,
             last_client_seq: 0,
-            session_id: [0u8; 16],
+            session_id: SessionId::NONE,
             server_frame_seq: 1,
         }
     }
@@ -292,8 +292,9 @@ pub fn decode_frame(
                 ));
             }
             conn.last_client_seq = seq;
-            let mut session_id = [0u8; 16];
-            session_id.copy_from_slice(&payload[0..16]);
+            let mut bytes = [0u8; 16];
+            bytes.copy_from_slice(&payload[0..16]);
+            let session_id = SessionId::from_bytes(bytes);
             let last_recv_seq = u64::from_le_bytes(
                 payload[16..24]
                     .try_into()
@@ -557,7 +558,7 @@ fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Com
         // Note: session_id is injected post-decode by tcp_server/uds_server
         // using with_session_id(), since it's a property of the connection
         // not the wire payload.
-        client_session_id: [0u8; 16],
+        client_session_id: SessionId::NONE,
     };
 
     Ok(Command::PlaceOrder(order))
@@ -839,7 +840,7 @@ pub fn encode_handshake_ack(
     write_header(buf, payload_len, MessageType::HandshakeAck as u8, seq, 0);
     buf.put_u8(PROTOCOL_VERSION);
     write_tlv(buf, TLV_CAPABILITIES, &capabilities.to_le_bytes());
-    write_tlv(buf, TLV_SESSION_ID, &session_id);
+    write_tlv(buf, TLV_SESSION_ID, session_id.as_bytes());
     write_tlv(buf, TLV_HEARTBEAT_MS, &heartbeat_interval_ms.to_le_bytes());
 }
 

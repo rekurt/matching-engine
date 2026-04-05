@@ -85,7 +85,7 @@ enum ShardMsg {
     /// Query all open orders for a client session across all symbols in this shard.
     /// Used by protocol v2 GetOpenOrders → OpenOrders snapshot response.
     GetOpenOrdersBySession {
-        session_id: [u8; 16],
+        session_id: me_core::SessionId,
         reply: Sender<Vec<me_core::order::Order>>,
     },
     AddSymbol {
@@ -386,7 +386,7 @@ impl Router {
     /// blocks until all shards respond.
     ///
     /// Used by protocol v2 GetOpenOrders handler for post-gap resync.
-    pub fn get_open_orders_by_session(&self, session_id: [u8; 16]) -> Vec<me_core::order::Order> {
+    pub fn get_open_orders_by_session(&self, session_id: me_core::SessionId) -> Vec<me_core::order::Order> {
         let mut all_orders = Vec::new();
         let mut replies = Vec::with_capacity(self.num_shards);
 
@@ -734,7 +734,7 @@ fn shard_worker_loop(
                     // it's a correctness gap in the exactly-once contract.
                     tracing::error!(
                         shard_id,
-                        session_id_prefix = ?&session_id[..4],
+                        session_id = %session_id.log_prefix(),
                         lost_orders = collected_count,
                         "GetOpenOrdersBySession reply dropped: snapshot INCOMPLETE for this shard"
                     );
@@ -937,7 +937,7 @@ mod dead_shard_tests {
         // With multiple shards, one dead → snapshot is partial, not fatal.
         let mut router = Router::new(4);
         router.add_symbol(btc_cfg());
-        let session = [0xAAu8; 16];
+        let session = me_core::SessionId::from_bytes([0xAAu8; 16]);
 
         // Place an order (goes to whichever shard owns symbol 0).
         let mut cmd = place_order_cmd(1, SymbolId(0));

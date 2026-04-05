@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::session::SessionId;
 use crate::types::{FixedPrice, FixedQty, OrderId, SequenceId, Side, SymbolId};
 
 // ─── Order execution flags (bit mask, stored in Order.flags) ─────────────────
@@ -81,8 +82,8 @@ pub struct Order {
     pub _pad: u8,
     /// Client session that submitted this order. Used for per-client
     /// OpenOrders snapshot queries (protocol v2 GetOpenOrders handler).
-    /// All-zero bytes indicate "no session" (internal tests, fixtures).
-    pub client_session_id: [u8; 16],
+    /// `SessionId::NONE` indicates "no session" (internal tests, fixtures).
+    pub client_session_id: SessionId,
 }
 
 /// Compile-time size guard: if someone adds a field that changes Order layout,
@@ -120,7 +121,7 @@ impl Order {
             status: OrderStatus::New,
             flags: 0,
             _pad: 0,
-            client_session_id: [0u8; 16],
+            client_session_id: SessionId::NONE,
         }
     }
 
@@ -149,7 +150,7 @@ impl Order {
             status: OrderStatus::New,
             flags: 0,
             _pad: 0,
-            client_session_id: [0u8; 16],
+            client_session_id: SessionId::NONE,
         }
     }
 
@@ -181,7 +182,7 @@ impl Order {
             status: OrderStatus::New,
             flags: 0,
             _pad: 0,
-            client_session_id: [0u8; 16],
+            client_session_id: SessionId::NONE,
         }
     }
 
@@ -211,7 +212,7 @@ impl Order {
             status: OrderStatus::New,
             flags: 0,
             _pad: 0,
-            client_session_id: [0u8; 16],
+            client_session_id: SessionId::NONE,
         }
     }
 
@@ -220,7 +221,7 @@ impl Order {
     ///
     /// Used by the codec when decoding client-submitted orders.
     #[inline]
-    pub fn with_session_id(mut self, session_id: [u8; 16]) -> Self {
+    pub fn with_session_id(mut self, session_id: SessionId) -> Self {
         self.client_session_id = session_id;
         self
     }

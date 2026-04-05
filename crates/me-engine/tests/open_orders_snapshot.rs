@@ -23,7 +23,7 @@ fn eth_config() -> SymbolConfig {
     c
 }
 
-fn limit_buy(id: u64, symbol: SymbolId, price: f64, qty: f64, session: [u8; 16]) -> Command {
+fn limit_buy(id: u64, symbol: SymbolId, price: f64, qty: f64, session: me_core::SessionId) -> Command {
     Command::PlaceOrder(
         Order::new_limit(
             id,
@@ -38,7 +38,7 @@ fn limit_buy(id: u64, symbol: SymbolId, price: f64, qty: f64, session: [u8; 16])
     )
 }
 
-fn limit_sell(id: u64, symbol: SymbolId, price: f64, qty: f64, session: [u8; 16]) -> Command {
+fn limit_sell(id: u64, symbol: SymbolId, price: f64, qty: f64, session: me_core::SessionId) -> Command {
     Command::PlaceOrder(
         Order::new_limit(
             id,
@@ -58,7 +58,7 @@ fn limit_sell(id: u64, symbol: SymbolId, price: f64, qty: f64, session: [u8; 16]
 #[test]
 fn test_empty_snapshot_for_new_session() {
     let router = Router::new(1);
-    let session = [0xAAu8; 16];
+    let session = me_core::SessionId::from_bytes([0xAAu8; 16]);
     let orders = router.get_open_orders_by_session(session);
     assert!(orders.is_empty());
 }
@@ -67,7 +67,7 @@ fn test_empty_snapshot_for_new_session() {
 fn test_snapshot_returns_placed_orders() {
     let mut router = Router::new(1);
     router.add_symbol(btc_config());
-    let session = [0xAAu8; 16];
+    let session = me_core::SessionId::from_bytes([0xAAu8; 16]);
 
     // Place 3 orders on different price levels
     router.process(limit_buy(1, SymbolId(0), 50_000.0, 1.0, session));
@@ -87,8 +87,8 @@ fn test_snapshot_returns_placed_orders() {
 fn test_snapshot_isolates_sessions() {
     let mut router = Router::new(1);
     router.add_symbol(btc_config());
-    let session_a = [0xAAu8; 16];
-    let session_b = [0xBBu8; 16];
+    let session_a = me_core::SessionId::from_bytes([0xAAu8; 16]);
+    let session_b = me_core::SessionId::from_bytes([0xBBu8; 16]);
 
     // Session A places 2 orders
     router.process(limit_buy(1, SymbolId(0), 50_000.0, 1.0, session_a));
@@ -116,7 +116,7 @@ fn test_snapshot_isolates_sessions() {
 fn test_snapshot_after_cancel() {
     let mut router = Router::new(1);
     router.add_symbol(btc_config());
-    let session = [0xCCu8; 16];
+    let session = me_core::SessionId::from_bytes([0xCCu8; 16]);
 
     router.process(limit_buy(1, SymbolId(0), 50_000.0, 1.0, session));
     router.process(limit_buy(2, SymbolId(0), 49_000.0, 1.0, session));
@@ -142,13 +142,13 @@ fn test_snapshot_after_cancel() {
 fn test_snapshot_excludes_filled_orders() {
     let mut router = Router::new(1);
     router.add_symbol(btc_config());
-    let session = [0xDDu8; 16];
+    let session = me_core::SessionId::from_bytes([0xDDu8; 16]);
 
     // Place a sell that will be fully consumed by incoming buy
     router.process(limit_sell(1, SymbolId(0), 50_000.0, 1.0, session));
 
     // Opposing buy from a different session consumes the full sell
-    let other_session = [0xEEu8; 16];
+    let other_session = me_core::SessionId::from_bytes([0xEEu8; 16]);
     router.process(limit_buy(2, SymbolId(0), 50_000.0, 1.0, other_session));
 
     // The resting sell (id=1) should now be filled → not in snapshot
@@ -166,7 +166,7 @@ fn test_snapshot_aggregates_across_symbols() {
     let mut router = Router::new(2); // 2 shards
     router.add_symbol(btc_config());
     router.add_symbol(eth_config());
-    let session = [0x11u8; 16];
+    let session = me_core::SessionId::from_bytes([0x11u8; 16]);
 
     // Place on BTC (symbol 0)
     router.process(limit_buy(1, SymbolId(0), 50_000.0, 1.0, session));
@@ -195,13 +195,13 @@ fn test_snapshot_aggregates_across_symbols() {
 fn test_snapshot_partial_fill_shows_remaining() {
     let mut router = Router::new(1);
     router.add_symbol(btc_config());
-    let session = [0x22u8; 16];
+    let session = me_core::SessionId::from_bytes([0x22u8; 16]);
 
     // Place sell of 10 BTC
     router.process(limit_sell(1, SymbolId(0), 50_000.0, 10.0, session));
 
     // Partial fill: buy 3 BTC
-    let other = [0x33u8; 16];
+    let other = me_core::SessionId::from_bytes([0x33u8; 16]);
     router.process(limit_buy(2, SymbolId(0), 50_000.0, 3.0, other));
 
     let snapshot = router.get_open_orders_by_session(session);
@@ -218,7 +218,7 @@ fn test_snapshot_partial_fill_shows_remaining() {
 fn test_snapshot_scales_to_many_orders() {
     let mut router = Router::new(1);
     router.add_symbol(btc_config());
-    let session = [0x44u8; 16];
+    let session = me_core::SessionId::from_bytes([0x44u8; 16]);
 
     // Place 100 orders at distinct prices
     for i in 1..=100u64 {
@@ -241,11 +241,11 @@ fn test_nonexistent_session_returns_empty() {
     router.add_symbol(btc_config());
 
     // Place with one session
-    let active = [0x55u8; 16];
+    let active = me_core::SessionId::from_bytes([0x55u8; 16]);
     router.process(limit_buy(1, SymbolId(0), 50_000.0, 1.0, active));
 
     // Query with a different session that has never placed anything
-    let fake = [0xFFu8; 16];
+    let fake = me_core::SessionId::from_bytes([0xFFu8; 16]);
     let snapshot = router.get_open_orders_by_session(fake);
     assert!(snapshot.is_empty());
 }

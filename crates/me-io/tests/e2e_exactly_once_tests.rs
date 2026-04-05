@@ -66,7 +66,7 @@ fn place_order_payload(order_id: u64, symbol: u16, qty_raw: u64) -> Vec<u8> {
 }
 
 /// Stand up an active ConnectionCodecState bound to a known session_id.
-fn active_conn(session_id: [u8; 16]) -> ConnectionCodecState {
+fn active_conn(session_id: me_io::session_store::SessionId) -> ConnectionCodecState {
     let mut conn = ConnectionCodecState::new();
     conn.state = ConnectionState::Active;
     conn.session_id = session_id;

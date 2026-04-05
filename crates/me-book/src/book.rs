@@ -189,7 +189,7 @@ impl OrderBook {
     /// Used by the OpenOrders snapshot handler (protocol v2 GetOpenOrders).
     /// O(N) scan over all resting orders — intended for occasional resync,
     /// NOT a hot-path operation.
-    pub fn scan_by_session_id(&self, session_id: &[u8; 16]) -> Vec<Order> {
+    pub fn scan_by_session_id(&self, session_id: &me_core::SessionId) -> Vec<Order> {
         self.order_index
             .values()
             .filter_map(|loc| {

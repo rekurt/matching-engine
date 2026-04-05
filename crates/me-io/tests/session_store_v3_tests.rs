@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use me_io::session_store::{ReplayResult, SessionStore};
+use me_io::session_store::{ReplayResult, SessionId, SessionStore};
 
 // ─── Gap detection ───────────────────────────────────────────────────────────
 
@@ -99,7 +99,7 @@ fn test_resume_gap_boundary_exact_evicted_seq() {
 #[test]
 fn test_resume_session_not_found() {
     let store = SessionStore::new(1024, Duration::from_secs(60));
-    let fake = [0xFFu8; 16];
+    let fake = SessionId::from_bytes([0xFFu8; 16]);
     assert_eq!(store.resume(&fake, 0), ReplayResult::SessionNotFound);
 }
 

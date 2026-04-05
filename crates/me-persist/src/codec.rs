@@ -148,7 +148,7 @@ fn encode_order(order: &Order, buf: &mut Vec<u8>) {
     buf.push(order.order_type as u8);
     buf.push(order.tif as u8);
     buf.push(order.status as u8);
-    buf.extend_from_slice(&order.client_session_id);
+    buf.extend_from_slice(order.client_session_id.as_bytes());
 }
 
 fn decode_order(data: &[u8]) -> Result<Order, String> {
@@ -198,8 +198,9 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
         5 => OrderStatus::Triggered,
         v => return Err(format!("Invalid status: {v}")),
     };
-    let mut client_session_id = [0u8; 16];
-    client_session_id.copy_from_slice(&data[70..86]);
+    let mut session_bytes = [0u8; 16];
+    session_bytes.copy_from_slice(&data[70..86]);
+    let client_session_id = me_core::SessionId::from_bytes(session_bytes);
 
     Ok(Order {
         id,

@@ -147,7 +147,7 @@ fn test_decode_handshake() {
 #[test]
 fn test_handshake_ack_encode() {
     let mut buf = BytesMut::new();
-    let session_id = [0u8; 16];
+    let session_id = me_io::session_store::SessionId::NONE;
     let caps = 0u64;
     let hb_ms = 5_000u32;
     encode_handshake_ack(0, session_id, caps, hb_ms, &mut buf);

@@ -30,10 +30,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use rand::Rng;
 use rustc_hash::FxHashMap;
 
-pub type SessionId = [u8; 16];
+// Re-export from me-core so existing me-io callers keep working.
+pub use me_core::SessionId;
 
 /// Number of lock shards. Must be a power of 2 so we can use bit-masking for
 /// shard selection. 64 shards gives us good contention reduction without
@@ -323,14 +323,14 @@ impl SessionStore {
     /// Since session_id is random, this gives uniform distribution.
     #[inline]
     fn shard_for(&self, id: &SessionId) -> &Shard {
-        let idx = (id[0] as usize) & SHARD_MASK;
+        let idx = (id.as_bytes()[0] as usize) & SHARD_MASK;
         &self.shards[idx]
     }
 
     /// Compute the shard index for a session ID (for diagnostics).
     #[inline]
     fn shard_idx(id: &SessionId) -> usize {
-        (id[0] as usize) & SHARD_MASK
+        (id.as_bytes()[0] as usize) & SHARD_MASK
     }
 
     /// Lock a shard, recovering from poisoning with a loud log. A poisoned
@@ -346,7 +346,7 @@ impl SessionStore {
         shard.lock().unwrap_or_else(|poisoned| {
             tracing::error!(
                 shard_idx = Self::shard_idx(id),
-                session_id_prefix = ?&id[..4],
+                session_id = %id.log_prefix(),
                 operation = op,
                 "SESSION STORE SHARD POISONED — recovering inner state"
             );
@@ -373,9 +373,7 @@ impl SessionStore {
 
     /// Create and register a new session. Returns the new session ID.
     pub fn create(&self) -> SessionId {
-        let mut id = [0u8; 16];
-        rand::rng().fill(&mut id);
-
+        let id = SessionId::random();
         let entry = SessionEntry::new(self.buffer_min, self.buffer_max, self.dedup_max, self.ttl);
         let shard = self.shard_for(&id);
         let mut map = Self::lock_shard(shard, &id, "create");
@@ -431,7 +429,7 @@ impl SessionStore {
             // will still transmit but they cannot be replayed on reconnect.
             // Log at WARN so operators can correlate with replay gaps.
             tracing::warn!(
-                session_id_prefix = ?&id[..4],
+                session_id = %id.log_prefix(),
                 "push to missing/expired session — frames will not be replayable"
             );
             return 0;

@@ -36,7 +36,7 @@ fn next_outbound_seq_starts_at_1_on_fresh_session() {
 fn next_outbound_seq_returns_1_for_missing_session() {
     let store = SessionStore::new(1024, Duration::from_secs(60));
     // sid was never created
-    let fake_sid = [0xFFu8; 16];
+    let fake_sid = me_io::session_store::SessionId::from_bytes([0xFFu8; 16]);
     assert_eq!(
         store.next_outbound_seq(&fake_sid),
         1,

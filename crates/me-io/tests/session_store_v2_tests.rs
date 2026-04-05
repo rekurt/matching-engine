@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use me_io::session_store::{ReplayResult, SessionStore};
+use me_io::session_store::{ReplayResult, SessionId, SessionStore};
 
 /// Extract Ok frames from a ReplayResult, panicking on Gap or SessionNotFound.
 fn expect_ok(r: ReplayResult) -> Vec<Bytes> {
@@ -126,7 +126,7 @@ fn test_dedup_reinsert_same_key_no_eviction() {
 #[test]
 fn test_dedup_lookup_on_nonexistent_session() {
     let store = SessionStore::new(1024, Duration::from_secs(60));
-    let fake_sid = [0xDEu8; 16];
+    let fake_sid = SessionId::from_bytes([0xDEu8; 16]);
     assert_eq!(store.dedup_lookup(&fake_sid, 42), None);
 }
 
@@ -229,7 +229,7 @@ fn test_apply_ack_does_not_regress() {
 #[test]
 fn test_apply_ack_on_nonexistent_session() {
     let store = SessionStore::new(1024, Duration::from_secs(60));
-    let fake_sid = [0xFFu8; 16];
+    let fake_sid = SessionId::from_bytes([0xFFu8; 16]);
     let purged = store.apply_ack(&fake_sid, 100);
     assert_eq!(purged, 0, "ACK on missing session returns 0");
 }
@@ -385,14 +385,14 @@ fn test_gc_removes_expired_sessions() {
 #[test]
 fn test_buffer_len_on_nonexistent_session() {
     let store = SessionStore::new(1024, Duration::from_secs(60));
-    let fake = [0u8; 16];
+    let fake = SessionId::NONE;
     assert_eq!(store.buffer_len(&fake), 0);
 }
 
 #[test]
 fn test_dedup_len_on_nonexistent_session() {
     let store = SessionStore::new(1024, Duration::from_secs(60));
-    let fake = [0u8; 16];
+    let fake = SessionId::NONE;
     assert_eq!(store.dedup_len(&fake), 0);
 }
 
