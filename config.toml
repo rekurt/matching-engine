@@ -3,9 +3,9 @@
 
 [server]
 # TCP listen address / Адрес TCP сервера
-tcp_addr = "0.0.0.0:9090"
+tcp_addr = "0.0.0.0:2090"
 # Metrics/Admin HTTP listen address / Адрес HTTP метрик и админки
-metrics_addr = "0.0.0.0:9091"
+metrics_addr = "0.0.0.0:2091"
 # Number of engine shards (0 = auto, uses available_parallelism)
 # Количество шардов (0 = авто, по числу ядер)
 shards = 0
@@ -25,6 +25,13 @@ drain_timeout_secs = 30
 # Trading pair definitions / Определения торговых пар
 # Each [[symbols]] entry registers a trading pair.
 # Каждая запись [[symbols]] регистрирует торговую пару.
+#
+# Optional per-symbol `invariant_policy` controls how the matching
+# engine reacts to internal data-structure corruption:
+#   "strict"      — panic immediately (default; use in dev/staging)
+#   "halt_symbol" — log + halt the affected symbol only (prod recommended)
+#   "continue"    — log + keep processing (only for emergency recovery)
+# Any violation also increments `me_invariant_violations_total{kind,symbol}`.
 
 [[symbols]]
 id = 0
@@ -36,6 +43,7 @@ min_qty = "0.00001"
 max_qty = "10000.0"
 qty_step = "0.00001"
 price_step = "0.01"
+invariant_policy = "halt_symbol"
 
 [[symbols]]
 id = 1

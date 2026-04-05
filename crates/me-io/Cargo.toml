@@ -10,10 +10,12 @@ tls = ["dep:tokio-rustls", "dep:rustls-pemfile"]
 me-core = { workspace = true }
 me-engine = { workspace = true }
 me-metrics = { workspace = true }
+me-clock = { workspace = true }
 tokio = { workspace = true }
 bytes = { workspace = true }
 tracing = { workspace = true }
 rand = { workspace = true }
+rustc-hash = { workspace = true }
 
 # Optional TLS support
 tokio-rustls = { workspace = true, optional = true }

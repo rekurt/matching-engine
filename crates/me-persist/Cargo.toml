@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 me-core = { workspace = true }
-me-engine = { workspace = true }
 me-book = { workspace = true }
 bincode = { workspace = true }
 crc32fast = { workspace = true }

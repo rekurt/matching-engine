@@ -121,8 +121,8 @@ pub fn decode_wal_command(data: &[u8]) -> Result<WalCommand, String> {
     }
 }
 
-/// Size of encoded order in bytes.
-pub const ORDER_ENCODED_SIZE: usize = 70;
+/// Size of encoded order in bytes (v2: +16 bytes for client_session_id).
+pub const ORDER_ENCODED_SIZE: usize = 86;
 
 /// Encode an order into a buffer (public, used by snapshot).
 pub fn encode_order_to(order: &Order, buf: &mut Vec<u8>) {
@@ -148,6 +148,7 @@ fn encode_order(order: &Order, buf: &mut Vec<u8>) {
     buf.push(order.order_type as u8);
     buf.push(order.tif as u8);
     buf.push(order.status as u8);
+    buf.extend_from_slice(&order.client_session_id);
 }
 
 fn decode_order(data: &[u8]) -> Result<Order, String> {
@@ -197,6 +198,8 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
         5 => OrderStatus::Triggered,
         v => return Err(format!("Invalid status: {v}")),
     };
+    let mut client_session_id = [0u8; 16];
+    client_session_id.copy_from_slice(&data[70..86]);
 
     Ok(Order {
         id,
@@ -214,6 +217,7 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
         status,
         flags: 0,
         _pad: 0,
+        client_session_id,
     })
 }
 

@@ -51,8 +51,15 @@ pub enum OrderStatus {
 
 // ─── Order ───────────────────────────────────────────────────────────────────
 
-/// Core order struct. 72 bytes, cache-line friendly.
-/// Fields ordered to minimize padding.
+/// Core order struct. 88 bytes (72 + 16 client_session_id).
+///
+/// ## Layout rationale
+/// Fields ordered to minimize padding. First 72 bytes match the matching
+/// engine's hot-path access pattern (price/qty/status) and fit in the first
+/// cache line on x86_64 (64 bytes) plus a small tail. The 16-byte
+/// `client_session_id` lives at the end — it's only touched at submission
+/// time (codec decode) and at snapshot time (OpenOrders scan), NEVER in the
+/// matching fast path. Placing it last keeps the critical fields cache-hot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(C)]
 pub struct Order {
@@ -72,7 +79,19 @@ pub struct Order {
     /// Execution flags bit-mask (ORDER_FLAG_POST_ONLY, etc.). Former _pad[0].
     pub flags: u8,
     pub _pad: u8,
+    /// Client session that submitted this order. Used for per-client
+    /// OpenOrders snapshot queries (protocol v2 GetOpenOrders handler).
+    /// All-zero bytes indicate "no session" (internal tests, fixtures).
+    pub client_session_id: [u8; 16],
 }
+
+/// Compile-time size guard: if someone adds a field that changes Order layout,
+/// the docs at line 54 say "88 bytes" — this fails the build loudly instead of
+/// silently drifting. Update both this assert and the docstring together.
+const _: () = assert!(
+    std::mem::size_of::<Order>() == 88,
+    "Order struct size changed — update docstring at line 54 and this assert"
+);
 
 impl Order {
     /// Create a new limit order.
@@ -101,6 +120,7 @@ impl Order {
             status: OrderStatus::New,
             flags: 0,
             _pad: 0,
+            client_session_id: [0u8; 16],
         }
     }
 
@@ -129,6 +149,7 @@ impl Order {
             status: OrderStatus::New,
             flags: 0,
             _pad: 0,
+            client_session_id: [0u8; 16],
         }
     }
 
@@ -160,6 +181,7 @@ impl Order {
             status: OrderStatus::New,
             flags: 0,
             _pad: 0,
+            client_session_id: [0u8; 16],
         }
     }
 
@@ -189,7 +211,18 @@ impl Order {
             status: OrderStatus::New,
             flags: 0,
             _pad: 0,
+            client_session_id: [0u8; 16],
         }
+    }
+
+    /// Builder: associate this order with a client session for later lookup
+    /// by OpenOrders snapshot. Returns self for chaining.
+    ///
+    /// Used by the codec when decoding client-submitted orders.
+    #[inline]
+    pub fn with_session_id(mut self, session_id: [u8; 16]) -> Self {
+        self.client_session_id = session_id;
+        self
     }
 
     /// Whether this order is a stop order (not yet triggered).

@@ -1,18 +1,19 @@
 // Wire protocol message types for the binary API transport.
 //
-// Frame format (length-prefixed, versioned):
-// ┌──────────┬──────────┬──────────┬──────────┬─────────────────┐
-// │ len: u32 │ ver: u8  │ type: u8 │ seq: u64 │ payload: [u8]   │
-// │ 4 bytes  │ 1 byte   │ 1 byte   │ 8 bytes  │ variable        │
-// └──────────┴──────────┴──────────┴──────────┴─────────────────┘
+// Frame format v2 (length-prefixed, versioned, with request_id for dedup):
+// ┌──────────┬──────────┬──────────┬──────────┬──────────────┬─────────────────┐
+// │ len: u32 │ ver: u8  │ type: u8 │ seq: u64 │ req_id: u64  │ payload: [u8]   │
+// │ 4 bytes  │ 1 byte   │ 1 byte   │ 8 bytes  │ 8 bytes      │ variable        │
+// └──────────┴──────────┴──────────┴──────────┴──────────────┴─────────────────┘
 //
 // `len` covers only the payload bytes (not the header).
-// `ver` is the protocol version (currently 1).
+// `ver` is the protocol version (currently 2).
 // `type` is one of the MessageType variants.
-// `seq` is a monotonically increasing sequence number per connection.
+// `seq` is a monotonically increasing sequence number per connection direction.
+// `req_id` is a client-generated idempotency key (client→server; 0 for server→client).
 
 /// Current wire protocol version.
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +32,14 @@ pub enum MessageType {
     /// Query the current state of a resting order.
     /// Payload: order_id(8) + symbol_id(2) = 10 bytes
     GetOrderStatus = 0x07,
+    /// Cumulative ACK: client confirms it has processed all server frames up to
+    /// `last_processed_server_seq`. Server can purge replay buffer up to this seq.
+    /// Payload: last_processed_server_seq(8) = 8 bytes
+    Acknowledge = 0x08,
+    /// Request snapshot of all open orders for this session.
+    /// Used after ReplayGap to resync client state.
+    /// Payload: empty (0 bytes)
+    GetOpenOrders = 0x09,
     /// Place multiple orders in a single frame (max 20).
     /// Payload: count(1) + [PlaceOrder payload(37-38 bytes) × count]
     BatchPlaceOrder = 0x0B,
@@ -61,6 +70,21 @@ pub enum MessageType {
     /// Response to GetOrderStatus — order not found in book.
     /// Payload: order_id(8) = 8 bytes
     OrderNotFound = 0x1E,
+    /// Start of open orders snapshot response to GetOpenOrders.
+    /// Payload: count(4) + snapshot_seq(8) = 12 bytes
+    OpenOrdersBegin = 0x1F,
+    /// Replay gap detected — requested seq was evicted from buffer.
+    /// Client must send GetOpenOrders to resync state.
+    /// Payload: missing_from(8) + missing_to(8) = 16 bytes
+    ReplayGap = 0x20,
+    /// Single order record inside an OpenOrders snapshot.
+    /// Payload: full Order serialization (see codec).
+    OpenOrder = 0x21,
+    /// End of open orders snapshot. Payload: snapshot_seq(8) = 8 bytes
+    OpenOrdersEnd = 0x22,
+    /// Flow control warning — client is a slow consumer.
+    /// Payload: buffer_used_pct(1) + is_hard_limit(1) = 2 bytes
+    FlowControlWarning = 0x23,
 }
 
 impl MessageType {
@@ -73,6 +97,8 @@ impl MessageType {
             0x05 => Some(Self::Handshake),
             0x06 => Some(Self::ResumeSession),
             0x07 => Some(Self::GetOrderStatus),
+            0x08 => Some(Self::Acknowledge),
+            0x09 => Some(Self::GetOpenOrders),
             0x0B => Some(Self::BatchPlaceOrder),
             0x0C => Some(Self::BatchCancelOrder),
             0x10 => Some(Self::OrderAccepted),
@@ -89,12 +115,17 @@ impl MessageType {
             0x1B => Some(Self::SessionResumed),
             0x1D => Some(Self::OrderStatus),
             0x1E => Some(Self::OrderNotFound),
+            0x1F => Some(Self::OpenOrdersBegin),
+            0x20 => Some(Self::ReplayGap),
+            0x21 => Some(Self::OpenOrder),
+            0x22 => Some(Self::OpenOrdersEnd),
+            0x23 => Some(Self::FlowControlWarning),
             _ => None,
         }
     }
 
     /// Whether this message type is an inbound command (client → engine) that
-    /// requires an active session.
+    /// requires an active session. These commands are subject to dedup by request_id.
     pub fn is_inbound_command(&self) -> bool {
         matches!(
             self,
@@ -106,16 +137,27 @@ impl MessageType {
                 | Self::BatchCancelOrder
         )
     }
+
+    /// Whether this message type requires a non-zero request_id.
+    /// Session control messages (Handshake, ResumeSession, Acknowledge, Ping)
+    /// don't need it. Commands and queries DO — for dedup and response
+    /// correlation.
+    pub fn requires_request_id(&self) -> bool {
+        self.is_inbound_command() || matches!(self, Self::GetOpenOrders)
+    }
 }
 
-/// Header size in bytes: len(4) + ver(1) + type(1) + seq(8) = 14
-pub const FRAME_HEADER_SIZE: usize = 14;
+/// Header size in bytes (v2): len(4) + ver(1) + type(1) + seq(8) + req_id(8) = 22
+pub const FRAME_HEADER_SIZE: usize = 22;
 
 /// Maximum payload size for regular frames (prevent memory exhaustion).
 pub const MAX_PAYLOAD_SIZE: u32 = 1024;
 
 /// Maximum payload size for batch order frames.
 pub const MAX_PAYLOAD_SIZE_BATCH: u32 = 4096;
+
+/// Maximum payload size for open orders snapshot frames (up to 10k orders × small size).
+pub const MAX_PAYLOAD_SIZE_SNAPSHOT: u32 = 8192;
 
 /// Maximum write buffer size for backpressure (256 KB).
 pub const MAX_WRITE_BUFFER_SIZE: usize = 256 * 1024;
@@ -143,10 +185,20 @@ pub const CAP_BATCH_ORDERS: u64 = 1 << 2;
 pub const CAP_ORDER_FLAGS: u64 = 1 << 3;
 pub const CAP_ORDER_QUERY: u64 = 1 << 4;
 pub const CAP_TLS: u64 = 1 << 5;
+/// Server supports exactly-once delivery (dedup via request_id).
+pub const CAP_EXACTLY_ONCE: u64 = 1 << 6;
+/// Server supports OpenOrders snapshot for state resync.
+pub const CAP_SNAPSHOT: u64 = 1 << 7;
 
 /// Protocol-level error codes sent in Error (0x19) frames.
+///
+/// **Wire contract**: All codes here are part of the public protocol ABI.
+/// Even codes the server does not currently emit are reserved and MUST NOT
+/// be reused for a different meaning — clients across multiple versions
+/// rely on stable decoding.
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // some variants are client-side-only or future-use; see below.
 pub enum ErrorCode {
     /// Client sent an unknown or unsupported protocol version.
     UnsupportedVersion = 1,
@@ -162,8 +214,23 @@ pub enum ErrorCode {
     Backpressure = 6,
     /// Client did not send Ping within the expected heartbeat window.
     HeartbeatTimeout = 7,
-    /// TLS handshake failed (only sent when TLS feature is enabled).
+    /// TLS handshake failed. Reserved for the `tls` feature — not emitted
+    /// by the plain TCP/UDS paths. Kept in the wire ABI so a client can
+    /// distinguish TLS failures when connecting to a TLS-enabled server.
     TlsError = 8,
+    /// Client command missing request_id (required for PlaceOrder/Cancel/Amend in v2).
+    InvalidRequestId = 9,
+    /// Session ID is unknown or has expired. Currently the server issues a
+    /// fresh HandshakeAck instead of this error (graceful re-session). This
+    /// code is reserved for a future strict-mode where clients want to know
+    /// their prior state was lost rather than being silently re-created.
+    SessionExpired = 10,
+    /// Replay buffer has been exhausted for this slow consumer — session
+    /// forcibly closed. Reserved for the slow-consumer throttle path
+    /// (Phase 3+): when `slow_consumer=true` persists beyond a threshold,
+    /// the server will emit this and disconnect. Today the server emits
+    /// FlowControlWarning instead and keeps the connection.
+    BufferExhausted = 11,
 }
 
 /// Connection state machine.

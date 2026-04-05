@@ -11,7 +11,8 @@ use axum::{
 };
 use clap::Parser;
 use config::{default_config, load_config, Config};
-use me_engine::router::ShardedRouterV2;
+use me_audit::async_logger::{AsyncAuditLogger, AuditFormat};
+use me_engine::router::Router;
 use me_io::session_store::SessionStore;
 use me_io::tcp_server::TcpServer;
 use me_io::uds_server::UdsServer;
@@ -51,7 +52,7 @@ struct Cli {
 #[derive(Clone)]
 struct AppState {
     metrics: Arc<EngineMetrics>,
-    router: Arc<ShardedRouterV2>,
+    router: Arc<Router>,
     admin_api_key: Option<String>,
 }
 
@@ -196,12 +197,50 @@ async fn main() {
         cfg.server.shards
     };
 
-    info!(shards = num_shards, "Starting matching engine");
+    // Create high-performance clock from config
+    let clock = me_clock::create_clock(&cfg.server.clock);
+    info!(clock = %cfg.server.clock, shards = num_shards, "Starting matching engine");
 
     let registry = Registry::new();
     let metrics = Arc::new(EngineMetrics::new(&registry));
 
-    let mut router = ShardedRouterV2::new(num_shards);
+    // Create async audit logger (zero-alloc hot path, serializes on separate thread)
+    let audit = Arc::new(AsyncAuditLogger::new(65536, AuditFormat::Json));
+
+    // Build router with optional WAL
+    let wal_config = if cfg.wal.enabled {
+        use me_engine::router::{WalConfig as EngineWalConfig, WalMode};
+        let mode = match cfg.wal.mode.as_str() {
+            "post" => WalMode::Post,
+            "disabled" => WalMode::Disabled,
+            _ => WalMode::Pre,
+        };
+        info!(mode = %cfg.wal.mode, path = %cfg.wal.path, "WAL enabled");
+        Some(EngineWalConfig {
+            mode,
+            path: cfg.wal.path.clone(),
+            sync_interval: cfg.wal.sync_interval,
+        })
+    } else {
+        None
+    };
+
+    // Thread affinity config
+    let affinity = me_engine::router::AffinityConfig {
+        pin_threads: cfg.server.pin_threads,
+        realtime_priority: cfg.server.realtime_priority,
+    };
+    if cfg.server.pin_threads {
+        info!("Thread pinning enabled (NUMA-aware)");
+    }
+
+    let mut router = Router::new_with_affinity(
+        num_shards,
+        Some(Arc::clone(&metrics)),
+        Some(Arc::clone(&audit)),
+        wal_config,
+        affinity,
+    );
 
     if cfg.symbols.is_empty() {
         error!("No symbols configured");
@@ -211,7 +250,12 @@ async fn main() {
     for sym_entry in &cfg.symbols {
         match sym_entry.to_symbol_config() {
             Ok(sym) => {
-                info!(base = sym.base, quote = sym.quote, id = sym.id.0, "Registering symbol");
+                info!(
+                    base = sym.base,
+                    quote = sym.quote,
+                    id = sym.id.0,
+                    "Registering symbol"
+                );
                 router.add_symbol(sym);
             }
             Err(e) => {
@@ -253,10 +297,20 @@ async fn main() {
         }
         #[cfg(not(unix))]
         {
-            ctrl_c.await.ok();
+            if let Err(e) = ctrl_c.await {
+                tracing::error!(
+                    error = ?e,
+                    "ctrl-c signal registration failed — graceful shutdown may not work"
+                );
+            }
         }
-        warn!(drain_timeout_secs = drain_timeout, "Received shutdown signal, draining connections");
-        let _ = shutdown_tx.send(true);
+        warn!(
+            drain_timeout_secs = drain_timeout,
+            "Received shutdown signal, draining connections"
+        );
+        if let Err(e) = shutdown_tx.send(true) {
+            tracing::warn!(error = ?e, "shutdown_tx.send failed: all receivers dropped");
+        }
     });
 
     // Spawn HTTP metrics + admin server
@@ -288,9 +342,7 @@ async fn main() {
 
         let app = public_routes.merge(admin_routes);
 
-        let listener = tokio::net::TcpListener::bind(&metrics_addr)
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind(&metrics_addr).await.unwrap();
         info!(addr = %metrics_addr, "Metrics HTTP server listening");
         axum::serve(listener, app).await.unwrap();
     });
@@ -325,6 +377,7 @@ async fn main() {
             Arc::clone(&session_store),
             hb_interval_ms,
             hb_timeout_ms,
+            Arc::clone(&clock),
         );
         let path = uds_path.clone();
         let uds_shutdown = shutdown_rx.clone();
@@ -344,6 +397,7 @@ async fn main() {
         Arc::clone(&session_store),
         hb_interval_ms,
         hb_timeout_ms,
+        Arc::clone(&clock),
     );
 
     #[cfg(feature = "tls")]
@@ -353,7 +407,11 @@ async fn main() {
         if let (Some(cert_path), Some(key_path)) =
             (&cfg.server.tls.cert_path, &cfg.server.tls.key_path)
         {
-            match load_tls_config(cert_path, key_path, cfg.server.tls.client_ca_path.as_deref()) {
+            match load_tls_config(
+                cert_path,
+                key_path,
+                cfg.server.tls.client_ca_path.as_deref(),
+            ) {
                 Ok(rustls_cfg) => {
                     let acceptor = TlsAcceptor::from(Arc::new(rustls_cfg));
                     tcp_server = tcp_server.with_tls(acceptor);
@@ -412,8 +470,7 @@ fn load_tls_config(
         let verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
             .build()
             .map_err(|e| format!("verifier: {e}"))?;
-        rustls::ServerConfig::builder()
-            .with_client_cert_verifier(verifier)
+        rustls::ServerConfig::builder().with_client_cert_verifier(verifier)
     } else {
         rustls::ServerConfig::builder().with_no_client_auth()
     };

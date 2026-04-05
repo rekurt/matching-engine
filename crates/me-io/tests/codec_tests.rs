@@ -11,15 +11,39 @@ use me_io::protocol::{
     ConnectionState, ErrorCode, FRAME_HEADER_SIZE, MAX_PAYLOAD_SIZE, PROTOCOL_VERSION,
 };
 
-// ─── Frame builder helpers ───────────────────────────────────────────────────
+/// System clock for tests.
+static SYS_CLK: me_clock::SystemClock = me_clock::SystemClock;
+
+// ─── Frame builder helpers (v2: 22-byte header with request_id) ─────────────
+
+/// Returns default request_id for a given message type:
+/// - Commands (PlaceOrder, CancelOrder, AmendOrder, GetOrderStatus, GetOpenOrders,
+///   BatchPlaceOrder, BatchCancelOrder): 1 (non-zero, required by v2 dedup)
+/// - Session/control messages: 0
+fn default_request_id(msg_type: u8) -> u64 {
+    match msg_type {
+        0x01 | 0x02 | 0x03 | 0x07 | 0x09 | 0x0B | 0x0C => 1,
+        _ => 0,
+    }
+}
 
 fn make_frame(msg_type: u8, seq: u64, payload: &[u8]) -> Vec<u8> {
+    make_frame_with_req_id(msg_type, seq, default_request_id(msg_type), payload)
+}
+
+fn make_frame_with_req_id(
+    msg_type: u8,
+    seq: u64,
+    request_id: u64,
+    payload: &[u8],
+) -> Vec<u8> {
     let len = payload.len() as u32;
     let mut buf = Vec::with_capacity(FRAME_HEADER_SIZE + payload.len());
     buf.extend_from_slice(&len.to_le_bytes());
     buf.push(PROTOCOL_VERSION);
     buf.push(msg_type);
     buf.extend_from_slice(&seq.to_le_bytes());
+    buf.extend_from_slice(&request_id.to_le_bytes());
     buf.extend_from_slice(payload);
     buf
 }
@@ -31,6 +55,7 @@ fn make_frame_with_version(msg_type: u8, seq: u64, version: u8, payload: &[u8]) 
     buf.push(version);
     buf.push(msg_type);
     buf.extend_from_slice(&seq.to_le_bytes());
+    buf.extend_from_slice(&default_request_id(msg_type).to_le_bytes());
     buf.extend_from_slice(payload);
     buf
 }
@@ -96,7 +121,7 @@ fn amend_order_payload(
 fn active_conn() -> ConnectionCodecState {
     let mut conn = ConnectionCodecState::new();
     let handshake = make_frame(0x05, 1, &[PROTOCOL_VERSION]);
-    let (frame, _) = decode_frame(&handshake, &mut conn).expect("handshake must succeed");
+    let (frame, _) = decode_frame(&handshake, &mut conn, &SYS_CLK).expect("handshake must succeed");
     assert!(matches!(frame, DecodedFrame::Handshake { .. }));
     conn.state = ConnectionState::Active;
     conn
@@ -108,7 +133,7 @@ fn active_conn() -> ConnectionCodecState {
 fn test_decode_handshake() {
     let mut conn = ConnectionCodecState::new();
     let frame = make_frame(0x05, 0, &[PROTOCOL_VERSION]);
-    let (decoded, consumed) = decode_frame(&frame, &mut conn).expect("handshake");
+    let (decoded, consumed) = decode_frame(&frame, &mut conn, &SYS_CLK).expect("handshake");
     assert_eq!(consumed, frame.len());
     assert!(matches!(
         decoded,
@@ -127,9 +152,9 @@ fn test_handshake_ack_encode() {
     let hb_ms = 5_000u32;
     encode_handshake_ack(0, session_id, caps, hb_ms, &mut buf);
     // Header (14) + payload: version(1) + cap_tlv(12) + sid_tlv(20) + hb_tlv(8) = 41
-    assert_eq!(buf.len(), 14 + 41);
+    assert_eq!(buf.len(), FRAME_HEADER_SIZE + 41);
     // Verify version byte in payload
-    assert_eq!(buf[14], PROTOCOL_VERSION);
+    assert_eq!(buf[FRAME_HEADER_SIZE], PROTOCOL_VERSION);
 }
 
 // ─── PlaceOrder roundtrip ────────────────────────────────────────────────────
@@ -141,20 +166,19 @@ fn test_decode_place_order_limit() {
     let price_raw = FixedPrice::from_f64(30_000.0).raw();
     let qty_raw = FixedQty::from_f64(0.5).raw();
     let payload = place_order_payload(
-        42,   // order_id
-        1,    // symbol
-        0,    // side = Buy
-        0,    // order_type = Limit
-        0,    // tif = GTC
-        price_raw,
-        0,    // stop_price (unused for Limit)
+        42, // order_id
+        1,  // symbol
+        0,  // side = Buy
+        0,  // order_type = Limit
+        0,  // tif = GTC
+        price_raw, 0, // stop_price (unused for Limit)
         qty_raw,
     );
     let frame = make_frame(0x01, 2, &payload);
-    let (decoded, consumed) = decode_frame(&frame, &mut conn).expect("place_order limit");
+    let (decoded, consumed) = decode_frame(&frame, &mut conn, &SYS_CLK).expect("place_order limit");
     assert_eq!(consumed, frame.len());
     match decoded {
-        DecodedFrame::Command(Command::PlaceOrder(order), seq) => {
+        DecodedFrame::Command(Command::PlaceOrder(order), seq, _) => {
             assert_eq!(seq, 2);
             assert_eq!(order.id, 42);
             assert_eq!(order.symbol, SymbolId(1));
@@ -172,19 +196,19 @@ fn test_decode_place_order_market() {
     // Market sell: price=0, stop_price=0 are OK for market orders
     let qty_raw = FixedQty::from_f64(1.0).raw();
     let payload = place_order_payload(
-        100,  // order_id
-        2,    // symbol
-        1,    // side = Sell
-        1,    // order_type = Market
-        1,    // tif = IOC
-        0,    // price (irrelevant for market)
-        0,    // stop_price
+        100, // order_id
+        2,   // symbol
+        1,   // side = Sell
+        1,   // order_type = Market
+        1,   // tif = IOC
+        0,   // price (irrelevant for market)
+        0,   // stop_price
         qty_raw,
     );
     let frame = make_frame(0x01, 2, &payload);
-    let (decoded, _) = decode_frame(&frame, &mut conn).expect("place_order market");
+    let (decoded, _) = decode_frame(&frame, &mut conn, &SYS_CLK).expect("place_order market");
     match decoded {
-        DecodedFrame::Command(Command::PlaceOrder(order), _) => {
+        DecodedFrame::Command(Command::PlaceOrder(order), _, _) => {
             assert_eq!(order.id, 100);
             assert_eq!(order.side, Side::Sell);
             assert_eq!(order.qty, FixedQty::from_f64(1.0));
@@ -200,19 +224,19 @@ fn test_decode_place_order_stop_limit() {
     let stop_price_raw = FixedPrice::from_f64(29_500.0).raw();
     let qty_raw = FixedQty::from_f64(0.1).raw();
     let payload = place_order_payload(
-        200,          // order_id
-        1,            // symbol
-        1,            // side = Sell
-        2,            // order_type = StopLimit
-        0,            // tif = GTC
+        200, // order_id
+        1,   // symbol
+        1,   // side = Sell
+        2,   // order_type = StopLimit
+        0,   // tif = GTC
         price_raw,
         stop_price_raw,
         qty_raw,
     );
     let frame = make_frame(0x01, 2, &payload);
-    let (decoded, _) = decode_frame(&frame, &mut conn).expect("stop_limit");
+    let (decoded, _) = decode_frame(&frame, &mut conn, &SYS_CLK).expect("stop_limit");
     match decoded {
-        DecodedFrame::Command(Command::PlaceOrder(order), _) => {
+        DecodedFrame::Command(Command::PlaceOrder(order), _, _) => {
             assert_eq!(order.id, 200);
             assert_eq!(order.price, FixedPrice::from_f64(29_000.0));
             assert_eq!(order.stop_price, FixedPrice::from_f64(29_500.0));
@@ -227,19 +251,19 @@ fn test_decode_place_order_stop_market() {
     let stop_price_raw = FixedPrice::from_f64(28_000.0).raw();
     let qty_raw = FixedQty::from_f64(0.25).raw();
     let payload = place_order_payload(
-        300,          // order_id
-        1,            // symbol
-        1,            // side = Sell
-        3,            // order_type = StopMarket
-        1,            // tif = IOC
-        0,            // price (irrelevant)
+        300, // order_id
+        1,   // symbol
+        1,   // side = Sell
+        3,   // order_type = StopMarket
+        1,   // tif = IOC
+        0,   // price (irrelevant)
         stop_price_raw,
         qty_raw,
     );
     let frame = make_frame(0x01, 2, &payload);
-    let (decoded, _) = decode_frame(&frame, &mut conn).expect("stop_market");
+    let (decoded, _) = decode_frame(&frame, &mut conn, &SYS_CLK).expect("stop_market");
     match decoded {
-        DecodedFrame::Command(Command::PlaceOrder(order), _) => {
+        DecodedFrame::Command(Command::PlaceOrder(order), _, _) => {
             assert_eq!(order.id, 300);
             assert_eq!(order.stop_price, FixedPrice::from_f64(28_000.0));
         }
@@ -254,10 +278,16 @@ fn test_decode_cancel_order() {
     let mut conn = active_conn();
     let payload = cancel_order_payload(999, 5);
     let frame = make_frame(0x02, 2, &payload);
-    let (decoded, consumed) = decode_frame(&frame, &mut conn).expect("cancel_order");
+    let (decoded, consumed) = decode_frame(&frame, &mut conn, &SYS_CLK).expect("cancel_order");
     assert_eq!(consumed, frame.len());
     match decoded {
-        DecodedFrame::Command(Command::CancelOrder { order_id, symbol, .. }, seq) => {
+        DecodedFrame::Command(
+            Command::CancelOrder {
+                order_id, symbol, ..
+            },
+            seq,
+            _,
+        ) => {
             assert_eq!(seq, 2);
             assert_eq!(order_id, 999);
             assert_eq!(symbol, SymbolId(5));
@@ -274,9 +304,18 @@ fn test_decode_amend_order_price_only() {
     let new_price = FixedPrice::from_f64(31_000.0).raw();
     let payload = amend_order_payload(42, 1, Some(new_price), None);
     let frame = make_frame(0x03, 2, &payload);
-    let (decoded, _) = decode_frame(&frame, &mut conn).expect("amend price");
+    let (decoded, _) = decode_frame(&frame, &mut conn, &SYS_CLK).expect("amend price");
     match decoded {
-        DecodedFrame::Command(Command::AmendOrder { order_id, new_price, new_qty, .. }, _) => {
+        DecodedFrame::Command(
+            Command::AmendOrder {
+                order_id,
+                new_price,
+                new_qty,
+                ..
+            },
+            _,
+            _,
+        ) => {
             assert_eq!(order_id, 42);
             assert_eq!(new_price, Some(FixedPrice::from_f64(31_000.0)));
             assert_eq!(new_qty, None);
@@ -291,9 +330,15 @@ fn test_decode_amend_order_qty_only() {
     let new_qty = FixedQty::from_f64(2.0).raw();
     let payload = amend_order_payload(42, 1, None, Some(new_qty));
     let frame = make_frame(0x03, 2, &payload);
-    let (decoded, _) = decode_frame(&frame, &mut conn).expect("amend qty");
+    let (decoded, _) = decode_frame(&frame, &mut conn, &SYS_CLK).expect("amend qty");
     match decoded {
-        DecodedFrame::Command(Command::AmendOrder { new_price, new_qty, .. }, _) => {
+        DecodedFrame::Command(
+            Command::AmendOrder {
+                new_price, new_qty, ..
+            },
+            _,
+            _,
+        ) => {
             assert_eq!(new_price, None);
             assert_eq!(new_qty, Some(FixedQty::from_f64(2.0)));
         }
@@ -308,9 +353,15 @@ fn test_decode_amend_order_both() {
     let new_qty = FixedQty::from_f64(0.75).raw();
     let payload = amend_order_payload(42, 1, Some(new_price), Some(new_qty));
     let frame = make_frame(0x03, 2, &payload);
-    let (decoded, _) = decode_frame(&frame, &mut conn).expect("amend both");
+    let (decoded, _) = decode_frame(&frame, &mut conn, &SYS_CLK).expect("amend both");
     match decoded {
-        DecodedFrame::Command(Command::AmendOrder { new_price, new_qty, .. }, _) => {
+        DecodedFrame::Command(
+            Command::AmendOrder {
+                new_price, new_qty, ..
+            },
+            _,
+            _,
+        ) => {
             assert_eq!(new_price, Some(FixedPrice::from_f64(32_000.0)));
             assert_eq!(new_qty, Some(FixedQty::from_f64(0.75)));
         }
@@ -327,14 +378,14 @@ fn test_encode_order_accepted() {
         timestamp: 12345678,
     };
     let mut buf = BytesMut::new();
-    encode_events(&[event], 1, &mut buf);
-    // Header (14) + payload (16): order_id(8) + timestamp(8)
-    assert_eq!(buf.len(), 30);
+    encode_events(&[event], 1, 0, &mut buf);
+    // Header (22) + payload (16): order_id(8) + timestamp(8)
+    assert_eq!(buf.len(), 38);
     // Payload len = 16 in LE
     let payload_len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
     assert_eq!(payload_len, 16);
     // order_id in payload
-    let order_id = u64::from_le_bytes(buf[14..22].try_into().unwrap());
+    let order_id = u64::from_le_bytes(buf[22..30].try_into().unwrap());
     assert_eq!(order_id, 77);
 }
 
@@ -353,28 +404,28 @@ fn test_encode_trade() {
     };
     let event = MatchEvent::Trade(trade);
     let mut buf = BytesMut::new();
-    encode_events(&[event], 1, &mut buf);
+    encode_events(&[event], 1, 0, &mut buf);
     // Header (14) + payload (59): trade_id(8) + symbol(2) + price(8) + qty(8) + maker_order_id(8) + taker_order_id(8) + maker_side(1) + timestamp(8) + sequence(8)
-    assert_eq!(buf.len(), 73);
+    assert_eq!(buf.len(), 81);
     let payload_len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
     assert_eq!(payload_len, 59);
     // Verify field values at known offsets (payload starts at byte 14)
-    let trade_id = u64::from_le_bytes(buf[14..22].try_into().unwrap());
+    let trade_id = u64::from_le_bytes(buf[22..30].try_into().unwrap());
     assert_eq!(trade_id, 1);
-    let symbol = u16::from_le_bytes(buf[22..24].try_into().unwrap());
+    let symbol = u16::from_le_bytes(buf[30..32].try_into().unwrap());
     assert_eq!(symbol, 1);
-    let price = i64::from_le_bytes(buf[24..32].try_into().unwrap());
+    let price = i64::from_le_bytes(buf[32..40].try_into().unwrap());
     assert_eq!(price, FixedPrice::from_f64(30_000.0).raw());
-    let qty = u64::from_le_bytes(buf[32..40].try_into().unwrap());
+    let qty = u64::from_le_bytes(buf[40..48].try_into().unwrap());
     assert_eq!(qty, FixedQty::from_f64(0.5).raw());
-    let maker_order_id = u64::from_le_bytes(buf[40..48].try_into().unwrap());
+    let maker_order_id = u64::from_le_bytes(buf[48..56].try_into().unwrap());
     assert_eq!(maker_order_id, 10);
-    let taker_order_id = u64::from_le_bytes(buf[48..56].try_into().unwrap());
+    let taker_order_id = u64::from_le_bytes(buf[56..64].try_into().unwrap());
     assert_eq!(taker_order_id, 20);
-    assert_eq!(buf[56], Side::Buy as u8);
-    let timestamp = u64::from_le_bytes(buf[57..65].try_into().unwrap());
+    assert_eq!(buf[64], Side::Buy as u8);
+    let timestamp = u64::from_le_bytes(buf[65..73].try_into().unwrap());
     assert_eq!(timestamp, 99999);
-    let sequence = u64::from_le_bytes(buf[65..73].try_into().unwrap());
+    let sequence = u64::from_le_bytes(buf[73..81].try_into().unwrap());
     assert_eq!(sequence, 1);
 }
 
@@ -387,16 +438,16 @@ fn test_encode_order_filled() {
         timestamp: 11111,
     };
     let mut buf = BytesMut::new();
-    encode_events(&[event], 1, &mut buf);
-    // Header (14) + payload (32): order_id(8) + filled_qty(8) + price(8) + timestamp(8)
-    assert_eq!(buf.len(), 46);
-    let order_id = u64::from_le_bytes(buf[14..22].try_into().unwrap());
+    encode_events(&[event], 1, 0, &mut buf);
+    // Header (22) + payload (32): order_id(8) + filled_qty(8) + price(8) + timestamp(8)
+    assert_eq!(buf.len(), 54);
+    let order_id = u64::from_le_bytes(buf[22..30].try_into().unwrap());
     assert_eq!(order_id, 55);
-    let filled_qty = u64::from_le_bytes(buf[22..30].try_into().unwrap());
+    let filled_qty = u64::from_le_bytes(buf[30..38].try_into().unwrap());
     assert_eq!(filled_qty, FixedQty::from_f64(1.0).raw());
-    let price = i64::from_le_bytes(buf[30..38].try_into().unwrap());
+    let price = i64::from_le_bytes(buf[38..46].try_into().unwrap());
     assert_eq!(price, FixedPrice::from_f64(30_000.0).raw());
-    let timestamp = u64::from_le_bytes(buf[38..46].try_into().unwrap());
+    let timestamp = u64::from_le_bytes(buf[46..54].try_into().unwrap());
     assert_eq!(timestamp, 11111);
 }
 
@@ -408,21 +459,24 @@ fn test_encode_stop_triggered() {
         timestamp: 22222,
     };
     let mut buf = BytesMut::new();
-    encode_events(&[event], 1, &mut buf);
+    encode_events(&[event], 1, 0, &mut buf);
     // Header (14) + payload (24): order_id(8) + trigger_price(8) + timestamp(8)
-    assert_eq!(buf.len(), 38);
-    let order_id = u64::from_le_bytes(buf[14..22].try_into().unwrap());
+    assert_eq!(buf.len(), 46);
+    let order_id = u64::from_le_bytes(buf[22..30].try_into().unwrap());
     assert_eq!(order_id, 88);
-    let trigger_price = i64::from_le_bytes(buf[22..30].try_into().unwrap());
+    let trigger_price = i64::from_le_bytes(buf[30..38].try_into().unwrap());
     assert_eq!(trigger_price, FixedPrice::from_f64(28_500.0).raw());
-    let timestamp = u64::from_le_bytes(buf[30..38].try_into().unwrap());
+    let timestamp = u64::from_le_bytes(buf[38..46].try_into().unwrap());
     assert_eq!(timestamp, 22222);
 }
 
 #[test]
 fn test_encode_multiple_events() {
     let events = vec![
-        MatchEvent::OrderAccepted { order_id: 1, timestamp: 100 },
+        MatchEvent::OrderAccepted {
+            order_id: 1,
+            timestamp: 100,
+        },
         MatchEvent::OrderFilled {
             order_id: 1,
             filled_qty: FixedQty::from_f64(1.0),
@@ -431,9 +485,9 @@ fn test_encode_multiple_events() {
         },
     ];
     let mut buf = BytesMut::new();
-    encode_events(&events, 1, &mut buf);
+    encode_events(&events, 1, 0, &mut buf);
     // OrderAccepted: 14 + 16 = 30; OrderFilled: 14 + 32 = 46
-    assert_eq!(buf.len(), 76);
+    assert_eq!(buf.len(), 92);
 }
 
 #[test]
@@ -444,15 +498,15 @@ fn test_encode_order_rejected() {
         timestamp: 55555,
     };
     let mut buf = BytesMut::new();
-    encode_events(&[event], 1, &mut buf);
+    encode_events(&[event], 1, 0, &mut buf);
     // Header (14) + payload (17): order_id(8) + reason(1) + timestamp(8)
-    assert_eq!(buf.len(), 31);
+    assert_eq!(buf.len(), 39);
     let payload_len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
     assert_eq!(payload_len, 17);
-    let order_id = u64::from_le_bytes(buf[14..22].try_into().unwrap());
+    let order_id = u64::from_le_bytes(buf[22..30].try_into().unwrap());
     assert_eq!(order_id, 42);
-    assert_eq!(buf[22], 0); // NoLiquidity = 0
-    let timestamp = u64::from_le_bytes(buf[23..31].try_into().unwrap());
+    assert_eq!(buf[30], 0); // NoLiquidity = 0
+    let timestamp = u64::from_le_bytes(buf[31..39].try_into().unwrap());
     assert_eq!(timestamp, 55555);
 }
 
@@ -466,20 +520,20 @@ fn test_encode_order_partially_filled() {
         timestamp: 77777,
     };
     let mut buf = BytesMut::new();
-    encode_events(&[event], 1, &mut buf);
+    encode_events(&[event], 1, 0, &mut buf);
     // Header (14) + payload (40): order_id(8) + filled_qty(8) + remaining_qty(8) + price(8) + timestamp(8)
-    assert_eq!(buf.len(), 54);
+    assert_eq!(buf.len(), 62);
     let payload_len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
     assert_eq!(payload_len, 40);
-    let order_id = u64::from_le_bytes(buf[14..22].try_into().unwrap());
+    let order_id = u64::from_le_bytes(buf[22..30].try_into().unwrap());
     assert_eq!(order_id, 33);
-    let filled_qty = u64::from_le_bytes(buf[22..30].try_into().unwrap());
+    let filled_qty = u64::from_le_bytes(buf[30..38].try_into().unwrap());
     assert_eq!(filled_qty, FixedQty::from_f64(0.5).raw());
-    let remaining_qty = u64::from_le_bytes(buf[30..38].try_into().unwrap());
+    let remaining_qty = u64::from_le_bytes(buf[38..46].try_into().unwrap());
     assert_eq!(remaining_qty, FixedQty::from_f64(0.5).raw());
-    let price = i64::from_le_bytes(buf[38..46].try_into().unwrap());
+    let price = i64::from_le_bytes(buf[46..54].try_into().unwrap());
     assert_eq!(price, FixedPrice::from_f64(50_000.0).raw());
-    let timestamp = u64::from_le_bytes(buf[46..54].try_into().unwrap());
+    let timestamp = u64::from_le_bytes(buf[54..62].try_into().unwrap());
     assert_eq!(timestamp, 77777);
 }
 
@@ -491,16 +545,16 @@ fn test_encode_order_cancelled() {
         timestamp: 33333,
     };
     let mut buf = BytesMut::new();
-    encode_events(&[event], 1, &mut buf);
+    encode_events(&[event], 1, 0, &mut buf);
     // Header (14) + payload (24): order_id(8) + remaining_qty(8) + timestamp(8)
-    assert_eq!(buf.len(), 38);
+    assert_eq!(buf.len(), 46);
     let payload_len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
     assert_eq!(payload_len, 24);
-    let order_id = u64::from_le_bytes(buf[14..22].try_into().unwrap());
+    let order_id = u64::from_le_bytes(buf[22..30].try_into().unwrap());
     assert_eq!(order_id, 99);
-    let remaining_qty = u64::from_le_bytes(buf[22..30].try_into().unwrap());
+    let remaining_qty = u64::from_le_bytes(buf[30..38].try_into().unwrap());
     assert_eq!(remaining_qty, FixedQty::from_f64(2.0).raw());
-    let timestamp = u64::from_le_bytes(buf[30..38].try_into().unwrap());
+    let timestamp = u64::from_le_bytes(buf[38..46].try_into().unwrap());
     assert_eq!(timestamp, 33333);
 }
 
@@ -513,18 +567,18 @@ fn test_encode_order_amended() {
         timestamp: 44444,
     };
     let mut buf = BytesMut::new();
-    encode_events(&[event], 1, &mut buf);
-    // Header (14) + payload (32): order_id(8) + new_price(8) + new_qty(8) + timestamp(8)
-    assert_eq!(buf.len(), 46);
+    encode_events(&[event], 1, 0, &mut buf);
+    // Header (22) + payload (32): order_id(8) + new_price(8) + new_qty(8) + timestamp(8)
+    assert_eq!(buf.len(), 54);
     let payload_len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
     assert_eq!(payload_len, 32);
-    let order_id = u64::from_le_bytes(buf[14..22].try_into().unwrap());
+    let order_id = u64::from_le_bytes(buf[22..30].try_into().unwrap());
     assert_eq!(order_id, 11);
-    let new_price = i64::from_le_bytes(buf[22..30].try_into().unwrap());
+    let new_price = i64::from_le_bytes(buf[30..38].try_into().unwrap());
     assert_eq!(new_price, FixedPrice::from_f64(45_000.0).raw());
-    let new_qty = u64::from_le_bytes(buf[30..38].try_into().unwrap());
+    let new_qty = u64::from_le_bytes(buf[38..46].try_into().unwrap());
     assert_eq!(new_qty, FixedQty::from_f64(0.25).raw());
-    let timestamp = u64::from_le_bytes(buf[38..46].try_into().unwrap());
+    let timestamp = u64::from_le_bytes(buf[46..54].try_into().unwrap());
     assert_eq!(timestamp, 44444);
 }
 
@@ -533,18 +587,23 @@ fn test_encode_order_amended() {
 #[test]
 fn test_encode_error_normal() {
     let mut buf = BytesMut::new();
-    encode_error(3, ErrorCode::SequenceOutOfOrder, "seq out of order", &mut buf);
+    encode_error(
+        3,
+        ErrorCode::SequenceOutOfOrder,
+        "seq out of order",
+        &mut buf,
+    );
     // Header (14) + payload: code(2) + msg_len(2) + msg(16) = 20
-    assert_eq!(buf.len(), 34);
+    assert_eq!(buf.len(), 42);
     let payload_len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
     assert_eq!(payload_len, 20);
     let seq = u64::from_le_bytes(buf[6..14].try_into().unwrap());
     assert_eq!(seq, 3);
-    let code = u16::from_le_bytes(buf[14..16].try_into().unwrap());
+    let code = u16::from_le_bytes(buf[22..24].try_into().unwrap());
     assert_eq!(code, ErrorCode::SequenceOutOfOrder as u16);
-    let msg_len = u16::from_le_bytes(buf[16..18].try_into().unwrap());
+    let msg_len = u16::from_le_bytes(buf[24..26].try_into().unwrap());
     assert_eq!(msg_len, 16);
-    assert_eq!(&buf[18..34], b"seq out of order");
+    assert_eq!(&buf[26..42], b"seq out of order");
 }
 
 #[test]
@@ -552,8 +611,8 @@ fn test_encode_error_empty_message() {
     let mut buf = BytesMut::new();
     encode_error(0, ErrorCode::HandshakeRequired, "", &mut buf);
     // Header (14) + payload: code(2) + msg_len(2) = 4
-    assert_eq!(buf.len(), 18);
-    let msg_len = u16::from_le_bytes(buf[16..18].try_into().unwrap());
+    assert_eq!(buf.len(), 26);
+    let msg_len = u16::from_le_bytes(buf[24..26].try_into().unwrap());
     assert_eq!(msg_len, 0);
 }
 
@@ -563,10 +622,10 @@ fn test_encode_error_long_message_truncated() {
     let mut buf = BytesMut::new();
     encode_error(0, ErrorCode::InvalidPayload, &long_msg, &mut buf);
     // Message must be truncated to 255 bytes
-    let msg_len = u16::from_le_bytes(buf[16..18].try_into().unwrap());
+    let msg_len = u16::from_le_bytes(buf[24..26].try_into().unwrap());
     assert_eq!(msg_len, 255);
     // Total: header(14) + code(2) + msg_len(2) + 255 = 273
-    assert_eq!(buf.len(), 273);
+    assert_eq!(buf.len(), 281);
 }
 
 // ─── Pong encoding ───────────────────────────────────────────────────────────
@@ -574,13 +633,17 @@ fn test_encode_error_long_message_truncated() {
 #[test]
 fn test_encode_pong() {
     let mut buf = BytesMut::new();
-    encode_pong(5, &mut buf);
-    // Header only, payload len = 0
-    assert_eq!(buf.len(), 14);
+    // v2: Pong carries last_processed_client_seq as piggyback ACK.
+    encode_pong(5, 42, &mut buf);
+    // Header (22) + payload (8) = 30
+    assert_eq!(buf.len(), 30);
     let payload_len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
-    assert_eq!(payload_len, 0);
+    assert_eq!(payload_len, 8);
     let seq = u64::from_le_bytes(buf[6..14].try_into().unwrap());
     assert_eq!(seq, 5);
+    // Piggyback ACK value in payload
+    let ack = u64::from_le_bytes(buf[22..30].try_into().unwrap());
+    assert_eq!(ack, 42);
 }
 
 // ─── Boundary cases ──────────────────────────────────────────────────────────
@@ -588,7 +651,7 @@ fn test_encode_pong() {
 #[test]
 fn test_decode_empty_buffer() {
     let mut conn = ConnectionCodecState::new();
-    let result = decode_frame(&[], &mut conn);
+    let result = decode_frame(&[], &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::Incomplete)));
 }
 
@@ -597,7 +660,7 @@ fn test_decode_partial_header() {
     let mut conn = ConnectionCodecState::new();
     // Only 5 bytes — less than FRAME_HEADER_SIZE (14)
     let partial = vec![0u8; 5];
-    let result = decode_frame(&partial, &mut conn);
+    let result = decode_frame(&partial, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::Incomplete)));
 }
 
@@ -607,9 +670,9 @@ fn test_decode_incomplete_payload() {
     // Header says payload is 37 bytes but we only have 10
     let mut frame = make_frame(0x01, 1, &[0u8; 37]);
     frame.truncate(14 + 10); // cut payload short
-    // Also update the len field to still claim 37 bytes
+                             // Also update the len field to still claim 37 bytes
     frame[0..4].copy_from_slice(&37u32.to_le_bytes());
-    let result = decode_frame(&frame, &mut conn);
+    let result = decode_frame(&frame, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::Incomplete)));
 }
 
@@ -622,7 +685,7 @@ fn test_decode_payload_too_large() {
     buf[0..4].copy_from_slice(&too_large.to_le_bytes());
     buf[4] = PROTOCOL_VERSION;
     buf[5] = 0x01; // PlaceOrder
-    let result = decode_frame(&buf, &mut conn);
+    let result = decode_frame(&buf, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::PayloadTooLarge(_))));
 }
 
@@ -631,7 +694,7 @@ fn test_decode_invalid_message_type() {
     let mut conn = ConnectionCodecState::new();
     // Use unknown message type 0xFF
     let frame = make_frame(0xFF, 0, &[]);
-    let result = decode_frame(&frame, &mut conn);
+    let result = decode_frame(&frame, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::InvalidMessageType(0xFF))));
 }
 
@@ -645,7 +708,7 @@ fn test_command_without_handshake() {
     let qty_raw = FixedQty::from_f64(1.0).raw();
     let payload = place_order_payload(1, 1, 0, 0, 0, price_raw, 0, qty_raw);
     let frame = make_frame(0x01, 1, &payload);
-    let result = decode_frame(&frame, &mut conn);
+    let result = decode_frame(&frame, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::HandshakeRequired)));
 }
 
@@ -653,7 +716,7 @@ fn test_command_without_handshake() {
 fn test_wrong_protocol_version() {
     let mut conn = ConnectionCodecState::new();
     let frame = make_frame_with_version(0x05, 0, 99, &[99]);
-    let result = decode_frame(&frame, &mut conn);
+    let result = decode_frame(&frame, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::UnsupportedVersion(99))));
 }
 
@@ -662,7 +725,7 @@ fn test_outbound_type_sent_by_client_is_rejected() {
     let mut conn = active_conn();
     // Client sends 0x10 (OrderAccepted) — outbound-only type
     let frame = make_frame(0x10, 2, &[0u8; 16]);
-    let result = decode_frame(&frame, &mut conn);
+    let result = decode_frame(&frame, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::InvalidPayload(_))));
 }
 
@@ -677,7 +740,7 @@ fn test_sequence_strictly_increasing() {
     for seq in 2u64..=5 {
         let payload = place_order_payload(seq, 1, 0, 0, 0, price_raw, 0, qty_raw);
         let frame = make_frame(0x01, seq, &payload);
-        decode_frame(&frame, &mut conn).expect("sequential seqs must succeed");
+        decode_frame(&frame, &mut conn, &SYS_CLK).expect("sequential seqs must succeed");
     }
 }
 
@@ -690,15 +753,18 @@ fn test_sequence_out_of_order_rejected() {
     // First command seq=5
     let payload = place_order_payload(1, 1, 0, 0, 0, price_raw, 0, qty_raw);
     let frame = make_frame(0x01, 5, &payload);
-    decode_frame(&frame, &mut conn).expect("seq 5 ok");
+    decode_frame(&frame, &mut conn, &SYS_CLK).expect("seq 5 ok");
 
     // Replay with seq=3 (out of order)
     let payload2 = place_order_payload(2, 1, 0, 0, 0, price_raw, 0, qty_raw);
     let frame2 = make_frame(0x01, 3, &payload2);
-    let result = decode_frame(&frame2, &mut conn);
+    let result = decode_frame(&frame2, &mut conn, &SYS_CLK);
     assert!(matches!(
         result,
-        Err(DecodeError::SequenceOutOfOrder { expected_min: 6, got: 3 })
+        Err(DecodeError::SequenceOutOfOrder {
+            expected_min: 6,
+            got: 3
+        })
     ));
 }
 
@@ -710,13 +776,16 @@ fn test_sequence_duplicate_rejected() {
 
     let payload = place_order_payload(1, 1, 0, 0, 0, price_raw, 0, qty_raw);
     let frame = make_frame(0x01, 2, &payload);
-    decode_frame(&frame, &mut conn).expect("first ok");
+    decode_frame(&frame, &mut conn, &SYS_CLK).expect("first ok");
 
     // Same seq again = out of order
     let payload2 = place_order_payload(2, 1, 0, 0, 0, price_raw, 0, qty_raw);
     let frame2 = make_frame(0x01, 2, &payload2);
-    let result = decode_frame(&frame2, &mut conn);
-    assert!(matches!(result, Err(DecodeError::SequenceOutOfOrder { .. })));
+    let result = decode_frame(&frame2, &mut conn, &SYS_CLK);
+    assert!(matches!(
+        result,
+        Err(DecodeError::SequenceOutOfOrder { .. })
+    ));
 }
 
 // ─── Payload validation ──────────────────────────────────────────────────────
@@ -728,7 +797,7 @@ fn test_place_order_zero_id_rejected() {
     let qty_raw = FixedQty::from_f64(1.0).raw();
     let payload = place_order_payload(0, 1, 0, 0, 0, price_raw, 0, qty_raw); // order_id=0
     let frame = make_frame(0x01, 2, &payload);
-    let result = decode_frame(&frame, &mut conn);
+    let result = decode_frame(&frame, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::InvalidPayload(_))));
 }
 
@@ -738,7 +807,7 @@ fn test_place_order_zero_qty_rejected() {
     let price_raw = FixedPrice::from_f64(100.0).raw();
     let payload = place_order_payload(1, 1, 0, 0, 0, price_raw, 0, 0); // qty=0
     let frame = make_frame(0x01, 2, &payload);
-    let result = decode_frame(&frame, &mut conn);
+    let result = decode_frame(&frame, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::InvalidPayload(_))));
 }
 
@@ -748,7 +817,7 @@ fn test_place_order_limit_zero_price_rejected() {
     let qty_raw = FixedQty::from_f64(1.0).raw();
     let payload = place_order_payload(1, 1, 0, 0, 0, 0, 0, qty_raw); // price=0 for limit
     let frame = make_frame(0x01, 2, &payload);
-    let result = decode_frame(&frame, &mut conn);
+    let result = decode_frame(&frame, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::InvalidPayload(_))));
 }
 
@@ -759,7 +828,7 @@ fn test_place_order_invalid_side_rejected() {
     let qty_raw = FixedQty::from_f64(1.0).raw();
     let payload = place_order_payload(1, 1, 99, 0, 0, price_raw, 0, qty_raw); // side=99
     let frame = make_frame(0x01, 2, &payload);
-    let result = decode_frame(&frame, &mut conn);
+    let result = decode_frame(&frame, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::InvalidPayload(_))));
 }
 
@@ -770,7 +839,7 @@ fn test_place_order_invalid_order_type_rejected() {
     let qty_raw = FixedQty::from_f64(1.0).raw();
     let payload = place_order_payload(1, 1, 0, 99, 0, price_raw, 0, qty_raw); // type=99
     let frame = make_frame(0x01, 2, &payload);
-    let result = decode_frame(&frame, &mut conn);
+    let result = decode_frame(&frame, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::InvalidPayload(_))));
 }
 
@@ -779,7 +848,7 @@ fn test_cancel_order_zero_id_rejected() {
     let mut conn = active_conn();
     let payload = cancel_order_payload(0, 1); // order_id=0
     let frame = make_frame(0x02, 2, &payload);
-    let result = decode_frame(&frame, &mut conn);
+    let result = decode_frame(&frame, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::InvalidPayload(_))));
 }
 
@@ -788,7 +857,7 @@ fn test_amend_order_no_fields_rejected() {
     let mut conn = active_conn();
     let payload = amend_order_payload(42, 1, None, None);
     let frame = make_frame(0x03, 2, &payload);
-    let result = decode_frame(&frame, &mut conn);
+    let result = decode_frame(&frame, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::InvalidPayload(_))));
 }
 
@@ -799,16 +868,16 @@ fn test_ping_before_handshake_allowed() {
     let mut conn = ConnectionCodecState::new();
     // Ping should be allowed even in HandshakePending state
     let frame = make_frame(0x04, 1, &[]);
-    let (decoded, _) = decode_frame(&frame, &mut conn).expect("ping allowed");
-    assert!(matches!(decoded, DecodedFrame::Ping(1)));
+    let (decoded, _) = decode_frame(&frame, &mut conn, &SYS_CLK).expect("ping allowed");
+    assert!(matches!(decoded, DecodedFrame::Ping { seq: 1, ack_seq: _ }));
 }
 
 #[test]
 fn test_ping_after_handshake_allowed() {
     let mut conn = active_conn();
     let frame = make_frame(0x04, 2, &[]);
-    let (decoded, _) = decode_frame(&frame, &mut conn).expect("ping after handshake");
-    assert!(matches!(decoded, DecodedFrame::Ping(2)));
+    let (decoded, _) = decode_frame(&frame, &mut conn, &SYS_CLK).expect("ping after handshake");
+    assert!(matches!(decoded, DecodedFrame::Ping { seq: 2, ack_seq: _ }));
 }
 
 // ─── Stop order validation ───────────────────────────────────────────────────
@@ -821,7 +890,7 @@ fn test_stop_limit_zero_stop_price_rejected() {
     // StopLimit with stop_price=0 should be rejected
     let payload = place_order_payload(1, 1, 0, 2, 0, price_raw, 0, qty_raw);
     let frame = make_frame(0x01, 2, &payload);
-    let result = decode_frame(&frame, &mut conn);
+    let result = decode_frame(&frame, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::InvalidPayload(_))));
 }
 
@@ -832,7 +901,7 @@ fn test_stop_market_zero_stop_price_rejected() {
     // StopMarket with stop_price=0 should be rejected
     let payload = place_order_payload(1, 1, 0, 3, 0, 0, 0, qty_raw);
     let frame = make_frame(0x01, 2, &payload);
-    let result = decode_frame(&frame, &mut conn);
+    let result = decode_frame(&frame, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::InvalidPayload(_))));
 }
 
@@ -849,7 +918,7 @@ fn test_consumed_bytes_exact() {
     // Append extra junk to simulate pipelined frames
     let mut buf = frame;
     buf.extend_from_slice(&[0xFF; 20]);
-    let (_, consumed) = decode_frame(&buf, &mut conn).expect("decode");
+    let (_, consumed) = decode_frame(&buf, &mut conn, &SYS_CLK).expect("decode");
     assert_eq!(consumed, frame_len);
     // Should NOT consume the trailing junk
     assert!(consumed < buf.len());

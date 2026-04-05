@@ -349,7 +349,7 @@ fn test_sequential_partial_fills() {
 fn test_multi_pair_isolation() {
     use me_engine::router::Router;
 
-    let mut router = Router::new();
+    let mut router = Router::new(1);
 
     let mut cfg0 = SymbolConfig::default_btc_usdt();
     cfg0.id = SymbolId(0);
@@ -380,33 +380,32 @@ fn test_multi_pair_isolation() {
         2000,
     );
 
-    router.process(Command::PlaceOrder(o1));
-    router.process(Command::PlaceOrder(o2));
+    let events1 = router.process(Command::PlaceOrder(o1));
+    let events2 = router.process(Command::PlaceOrder(o2));
 
-    // Orders should not cross (different symbols)
-    assert_eq!(
-        router.get_engine(SymbolId(0)).unwrap().book().order_count(),
-        1
-    );
-    assert_eq!(
-        router.get_engine(SymbolId(1)).unwrap().book().order_count(),
-        1
-    );
+    // Both should be accepted (different symbols, no crossing)
+    assert!(events1.iter().any(|e| matches!(e, MatchEvent::OrderAccepted { .. })));
+    assert!(events2.iter().any(|e| matches!(e, MatchEvent::OrderAccepted { .. })));
+
+    // Verify via query: both orders should exist
+    let q1 = router.query_order(1, SymbolId(0));
+    assert!(q1.iter().any(|e| matches!(e, MatchEvent::OrderStatus { .. })));
+    let q2 = router.query_order(2, SymbolId(1));
+    assert!(q2.iter().any(|e| matches!(e, MatchEvent::OrderStatus { .. })));
 
     // Cancel on symbol 0 should not affect symbol 1
-    router.process(Command::CancelOrder {
+    let cancel_events = router.process(Command::CancelOrder {
         order_id: 1,
         symbol: SymbolId(0),
         timestamp: 3000,
     });
-    assert_eq!(
-        router.get_engine(SymbolId(0)).unwrap().book().order_count(),
-        0
-    );
-    assert_eq!(
-        router.get_engine(SymbolId(1)).unwrap().book().order_count(),
-        1
-    );
+    assert!(cancel_events.iter().any(|e| matches!(e, MatchEvent::OrderCancelled { .. })));
+
+    // Order 1 should be gone, order 2 should still exist
+    let q1_after = router.query_order(1, SymbolId(0));
+    assert!(q1_after.iter().any(|e| matches!(e, MatchEvent::OrderNotFound { .. })));
+    let q2_after = router.query_order(2, SymbolId(1));
+    assert!(q2_after.iter().any(|e| matches!(e, MatchEvent::OrderStatus { .. })));
 }
 
 /// Scenario: Stress test — 10000 random-like operations.

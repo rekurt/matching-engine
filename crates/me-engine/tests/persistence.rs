@@ -634,10 +634,7 @@ fn test_corrupted_wal_entry() {
     let result = reader.read_all();
     // Either read_all itself returned Err, or first already failed.
     let had_error = first.is_err() || result.is_err();
-    assert!(
-        had_error,
-        "Expected at least one error from corrupted WAL"
-    );
+    assert!(had_error, "Expected at least one error from corrupted WAL");
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -653,14 +650,7 @@ fn test_wal_compaction() {
     // Write 10 commands to WAL.
     let mut engine = Engine::new(config());
     let all_cmds: Vec<Command> = (1..=10)
-        .map(|i| {
-            Command::PlaceOrder(limit_buy(
-                i,
-                100.0 - i as f64,
-                1.0,
-                i * 1000,
-            ))
-        })
+        .map(|i| Command::PlaceOrder(limit_buy(i, 100.0 - i as f64, 1.0, i * 1000)))
         .collect();
 
     {
@@ -866,8 +856,14 @@ fn test_recovery_preserves_price_time_priority() {
         }
     });
 
-    assert!(ref_trade.is_some(), "Reference engine should produce a trade");
-    assert!(rec_trade.is_some(), "Recovered engine should produce a trade");
+    assert!(
+        ref_trade.is_some(),
+        "Reference engine should produce a trade"
+    );
+    assert!(
+        rec_trade.is_some(),
+        "Recovered engine should produce a trade"
+    );
 
     // The maker (resting order) should be order#1 in both cases (FIFO).
     assert_eq!(

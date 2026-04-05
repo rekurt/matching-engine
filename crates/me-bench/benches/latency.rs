@@ -142,5 +142,9 @@ fn bench_two_sided_book_latency(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_single_order_latency, bench_two_sided_book_latency);
+criterion_group!(
+    benches,
+    bench_single_order_latency,
+    bench_two_sided_book_latency
+);
 criterion_main!(benches);

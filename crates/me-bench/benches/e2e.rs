@@ -728,7 +728,7 @@ fn bench_deep_book_match(c: &mut Criterion) {
 fn bench_multi_pair_routing(c: &mut Criterion) {
     c.bench_function("e2e_multi_pair_routing", |b| {
         b.iter_custom(|iters| {
-            let mut router = Router::new();
+            let mut router = Router::new(1);
 
             // Register 5 symbols
             for sym in 0..5u16 {

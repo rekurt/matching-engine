@@ -10,6 +10,8 @@ pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
     pub symbols: Vec<SymbolEntry>,
+    #[serde(default)]
+    pub wal: WalConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -21,6 +23,15 @@ pub struct ServerConfig {
     #[serde(default)]
     pub shards: usize,
     pub uds_path: Option<String>,
+    /// Clock implementation: "system", "coarse" (default), "rdtsc"
+    #[serde(default = "default_clock")]
+    pub clock: String,
+    /// Pin shard worker threads to CPU cores (NUMA awareness, Linux-only).
+    #[serde(default)]
+    pub pin_threads: bool,
+    /// Set real-time scheduling priority for shard workers (requires root, Linux-only).
+    #[serde(default)]
+    pub realtime_priority: bool,
     #[serde(default)]
     pub admin: AdminConfig,
     #[serde(default)]
@@ -97,8 +108,53 @@ pub struct SymbolEntry {
     pub qty_step: String,
     #[serde(default = "default_price_step")]
     pub price_step: String,
+    /// Invariant-violation policy for this symbol. One of
+    /// `"strict"` (default), `"halt_symbol"`, or `"continue"`.
+    /// See `me_core::invariant::InvariantPolicy` for semantics.
+    #[serde(default)]
+    pub invariant_policy: me_core::invariant::InvariantPolicy,
 }
 
+/// WAL (Write-Ahead Log) configuration.
+#[derive(Debug, Deserialize)]
+pub struct WalConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// WAL mode: "pre" (before matching), "post" (after matching)
+    #[serde(default = "default_wal_mode")]
+    pub mode: String,
+    /// Path to WAL directory
+    #[serde(default = "default_wal_path")]
+    pub path: String,
+    /// Flush WAL to disk every N commands (0 = every command)
+    #[serde(default = "default_wal_sync_interval")]
+    pub sync_interval: u64,
+}
+
+impl Default for WalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: default_wal_mode(),
+            path: default_wal_path(),
+            sync_interval: default_wal_sync_interval(),
+        }
+    }
+}
+
+fn default_wal_mode() -> String {
+    "pre".to_string()
+}
+fn default_wal_path() -> String {
+    "./data/wal".to_string()
+}
+fn default_wal_sync_interval() -> u64 {
+    100
+}
+
+fn default_clock() -> String {
+    "coarse".to_string()
+}
 fn default_tcp_addr() -> String {
     "0.0.0.0:9090".to_string()
 }
@@ -146,6 +202,9 @@ impl Default for ServerConfig {
             metrics_addr: default_metrics_addr(),
             shards: 0,
             uds_path: None,
+            clock: default_clock(),
+            pin_threads: false,
+            realtime_priority: false,
             admin: AdminConfig::default(),
             shutdown: ShutdownConfig::default(),
             heartbeat: HeartbeatConfig::default(),
@@ -227,8 +286,10 @@ impl SymbolEntry {
             ),
             price_step: FixedPrice::from_raw(
                 parse_decimal_to_raw(&self.price_step)
-                    .map_err(|e| format!("symbol {}: price_step: {e}", self.id))? as i64,
+                    .map_err(|e| format!("symbol {}: price_step: {e}", self.id))?
+                    as i64,
             ),
+            invariant_policy: self.invariant_policy,
         })
     }
 }
@@ -236,8 +297,8 @@ impl SymbolEntry {
 /// Load configuration from a TOML file. Returns default config on any error
 /// if `required` is false.
 pub fn load_config(path: &Path) -> Result<Config, String> {
-    let content =
-        std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     toml::from_str(&content).map_err(|e| format!("parse error in {}: {e}", path.display()))
 }
 
@@ -245,6 +306,7 @@ pub fn load_config(path: &Path) -> Result<Config, String> {
 pub fn default_config() -> Config {
     Config {
         server: ServerConfig::default(),
+        wal: WalConfig::default(),
         symbols: vec![
             SymbolEntry {
                 id: 0,
@@ -256,6 +318,7 @@ pub fn default_config() -> Config {
                 max_qty: "10000.0".into(),
                 qty_step: "0.00001".into(),
                 price_step: "0.01".into(),
+                invariant_policy: me_core::invariant::InvariantPolicy::default(),
             },
             SymbolEntry {
                 id: 1,
@@ -267,6 +330,7 @@ pub fn default_config() -> Config {
                 max_qty: "100000.0".into(),
                 qty_step: "0.0001".into(),
                 price_step: "0.01".into(),
+                invariant_policy: me_core::invariant::InvariantPolicy::default(),
             },
             SymbolEntry {
                 id: 2,
@@ -278,6 +342,7 @@ pub fn default_config() -> Config {
                 max_qty: "100000.0".into(),
                 qty_step: "0.001".into(),
                 price_step: "0.0001".into(),
+                invariant_policy: me_core::invariant::InvariantPolicy::default(),
             },
         ],
     }

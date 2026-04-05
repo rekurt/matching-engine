@@ -7,9 +7,16 @@ edition = "2021"
 me-core = { workspace = true }
 me-book = { workspace = true }
 me-metrics = { workspace = true }
+me-clock = { workspace = true }
+me-risk = { workspace = true }
+me-audit = { workspace = true }
+me-persist = { workspace = true }
 crossbeam-channel = { workspace = true }
 rustc-hash = { workspace = true }
 tracing = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 me-persist = { workspace = true }

@@ -1,15 +1,15 @@
 use std::time::Duration;
 
 use prometheus::{
-    Encoder, GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec,
-    IntGauge, IntGaugeVec, Opts, Registry, TextEncoder,
+    Encoder, GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, Opts, Registry, TextEncoder,
 };
 
 use me_book::book::OrderBook;
 use me_core::events::{MatchEvent, RejectReason};
 use me_core::order::OrderType;
-use me_core::types::{Side, SCALE};
 use me_core::order::TimeInForce;
+use me_core::types::{Side, SCALE};
 
 // ─── EngineMetrics ──────────────────────────────────────────────────────────
 
@@ -102,6 +102,12 @@ pub struct EngineMetrics {
     // ── Protocol Errors ────────────────────────────────────────────────
     /// Protocol errors by type (error_type).
     pub protocol_errors_total: IntCounterVec,
+
+    // ── Invariant Violations ───────────────────────────────────────────
+    /// Matching-engine invariant violations by kind and symbol.
+    /// Each sample indicates a data-structure corruption event and
+    /// should trigger an alert.
+    pub invariant_violations_total: IntCounterVec,
 
     // ── Matching Detail ────────────────────────────────────────────────
     /// Matching duration by command type (command_type: place_order/cancel/amend).
@@ -261,10 +267,7 @@ impl EngineMetrics {
             .expect("metric can be registered");
 
         let book_spread = GaugeVec::new(
-            Opts::new(
-                "me_book_spread",
-                "Current spread (best_ask - best_bid)",
-            ),
+            Opts::new("me_book_spread", "Current spread (best_ask - best_bid)"),
             &["symbol"],
         )
         .expect("metric can be created");
@@ -272,20 +275,16 @@ impl EngineMetrics {
             .register(Box::new(book_spread.clone()))
             .expect("metric can be registered");
 
-        let book_best_bid = GaugeVec::new(
-            Opts::new("me_book_best_bid", "Best bid price"),
-            &["symbol"],
-        )
-        .expect("metric can be created");
+        let book_best_bid =
+            GaugeVec::new(Opts::new("me_book_best_bid", "Best bid price"), &["symbol"])
+                .expect("metric can be created");
         registry
             .register(Box::new(book_best_bid.clone()))
             .expect("metric can be registered");
 
-        let book_best_ask = GaugeVec::new(
-            Opts::new("me_book_best_ask", "Best ask price"),
-            &["symbol"],
-        )
-        .expect("metric can be created");
+        let book_best_ask =
+            GaugeVec::new(Opts::new("me_book_best_ask", "Best ask price"), &["symbol"])
+                .expect("metric can be created");
         registry
             .register(Box::new(book_best_ask.clone()))
             .expect("metric can be registered");
@@ -381,9 +380,8 @@ impl EngineMetrics {
             .expect("metric can be registered");
 
         // ── WAL/Persistence ─────────────────────────────────────────────
-        let wal_writes_total =
-            IntCounter::new("me_wal_writes_total", "WAL write operations")
-                .expect("metric can be created");
+        let wal_writes_total = IntCounter::new("me_wal_writes_total", "WAL write operations")
+            .expect("metric can be created");
         registry
             .register(Box::new(wal_writes_total.clone()))
             .expect("metric can be registered");
@@ -395,9 +393,8 @@ impl EngineMetrics {
             .register(Box::new(wal_bytes_written_total.clone()))
             .expect("metric can be registered");
 
-        let snapshot_saves_total =
-            IntCounter::new("me_snapshot_saves_total", "Snapshot saves")
-                .expect("metric can be created");
+        let snapshot_saves_total = IntCounter::new("me_snapshot_saves_total", "Snapshot saves")
+            .expect("metric can be created");
         registry
             .register(Box::new(snapshot_saves_total.clone()))
             .expect("metric can be registered");
@@ -467,6 +464,19 @@ impl EngineMetrics {
             .register(Box::new(protocol_errors_total.clone()))
             .expect("metric can be registered");
 
+        // ── Invariant Violations ────────────────────────────────────────
+        let invariant_violations_total = IntCounterVec::new(
+            Opts::new(
+                "me_invariant_violations_total",
+                "Matching-engine invariant violations by kind and symbol",
+            ),
+            &["kind", "symbol"],
+        )
+        .expect("metric can be created");
+        registry
+            .register(Box::new(invariant_violations_total.clone()))
+            .expect("metric can be registered");
+
         // ── Matching Detail ─────────────────────────────────────────────
         let matching_duration_seconds = HistogramVec::new(
             HistogramOpts::new(
@@ -494,11 +504,8 @@ impl EngineMetrics {
             .expect("metric can be registered");
 
         let stop_cascade_depth = Histogram::with_opts(
-            HistogramOpts::new(
-                "me_stop_cascade_depth",
-                "Depth of cascading stop triggers",
-            )
-            .buckets(vec![1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 50.0, 100.0]),
+            HistogramOpts::new("me_stop_cascade_depth", "Depth of cascading stop triggers")
+                .buckets(vec![1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 50.0, 100.0]),
         )
         .expect("metric can be created");
         registry
@@ -550,11 +557,8 @@ impl EngineMetrics {
 
         // ── WAL Detail ──────────────────────────────────────────────────
         let wal_flush_duration_seconds = Histogram::with_opts(
-            HistogramOpts::new(
-                "me_wal_flush_duration_seconds",
-                "WAL flush duration",
-            )
-            .buckets(vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]),
+            HistogramOpts::new("me_wal_flush_duration_seconds", "WAL flush duration")
+                .buckets(vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]),
         )
         .expect("metric can be created");
         registry
@@ -562,20 +566,16 @@ impl EngineMetrics {
             .expect("metric can be registered");
 
         let snapshot_duration_seconds = Histogram::with_opts(
-            HistogramOpts::new(
-                "me_snapshot_duration_seconds",
-                "Snapshot duration",
-            )
-            .buckets(vec![0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0]),
+            HistogramOpts::new("me_snapshot_duration_seconds", "Snapshot duration")
+                .buckets(vec![0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0]),
         )
         .expect("metric can be created");
         registry
             .register(Box::new(snapshot_duration_seconds.clone()))
             .expect("metric can be registered");
 
-        let snapshot_size_bytes =
-            IntGauge::new("me_snapshot_size_bytes", "Snapshot size in bytes")
-                .expect("metric can be created");
+        let snapshot_size_bytes = IntGauge::new("me_snapshot_size_bytes", "Snapshot size in bytes")
+            .expect("metric can be created");
         registry
             .register(Box::new(snapshot_size_bytes.clone()))
             .expect("metric can be registered");
@@ -616,6 +616,7 @@ impl EngineMetrics {
             connection_frames_in_total,
             connection_frames_out_total,
             protocol_errors_total,
+            invariant_violations_total,
             matching_duration_seconds,
             stop_cascade_depth,
             stop_cascade_duration_seconds,
@@ -633,9 +634,7 @@ impl EngineMetrics {
     /// Record an incoming command by type string.
     /// `command_type` should be "place_order", "cancel_order", or "amend_order".
     pub fn record_command_type(&self, command_type: &str) {
-        self.commands_total
-            .with_label_values(&[command_type])
-            .inc();
+        self.commands_total.with_label_values(&[command_type]).inc();
     }
 
     /// Record an incoming place order with full details.
@@ -691,9 +690,7 @@ impl EngineMetrics {
                         .inc();
                 }
                 MatchEvent::Trade(trade) => {
-                    self.events_total
-                        .with_label_values(&["trade"])
-                        .inc();
+                    self.events_total.with_label_values(&["trade"]).inc();
                     self.trades_total.with_label_values(&[symbol]).inc();
                     let volume = fixed_to_f64(trade.qty.raw() as i64);
                     self.trades_volume_total
@@ -706,14 +703,10 @@ impl EngineMetrics {
                     self.events_total
                         .with_label_values(&["order_partially_filled"])
                         .inc();
-                    self.fills_total
-                        .with_label_values(&["partial"])
-                        .inc();
+                    self.fills_total.with_label_values(&["partial"]).inc();
                 }
                 MatchEvent::OrderFilled { .. } => {
-                    self.events_total
-                        .with_label_values(&["order_filled"])
-                        .inc();
+                    self.events_total.with_label_values(&["order_filled"]).inc();
                     self.fills_total.with_label_values(&["full"]).inc();
                 }
                 MatchEvent::OrderCancelled { .. } => {
@@ -743,14 +736,10 @@ impl EngineMetrics {
                     self.events_total
                         .with_label_values(&["stop_triggered"])
                         .inc();
-                    self.stop_triggers_total
-                        .with_label_values(&[symbol])
-                        .inc();
+                    self.stop_triggers_total.with_label_values(&[symbol]).inc();
                 }
                 MatchEvent::OrderStatus { .. } => {
-                    self.events_total
-                        .with_label_values(&["order_status"])
-                        .inc();
+                    self.events_total.with_label_values(&["order_status"]).inc();
                 }
                 MatchEvent::OrderNotFound { .. } => {
                     self.events_total
@@ -791,9 +780,7 @@ impl EngineMetrics {
 
     /// Record a failed cancellation (order not found).
     pub fn record_cancel_failed(&self, symbol: &str) {
-        self.cancels_failed_total
-            .with_label_values(&[symbol])
-            .inc();
+        self.cancels_failed_total.with_label_values(&[symbol]).inc();
     }
 
     /// Snapshot the current order book state into Prometheus gauges.
@@ -951,6 +938,15 @@ impl EngineMetrics {
             .inc();
     }
 
+    /// Record an invariant violation. `kind` is the stable string from
+    /// `InvariantKind::as_str()`; `symbol` identifies the affected book.
+    /// Operators should page on any non-zero rate for this metric.
+    pub fn record_invariant_violation(&self, kind: &str, symbol: &str) {
+        self.invariant_violations_total
+            .with_label_values(&[kind, symbol])
+            .inc();
+    }
+
     /// Record matching duration for a command type.
     pub fn record_matching_duration(&self, command_type: &str, duration: Duration) {
         self.matching_duration_seconds
@@ -1062,6 +1058,7 @@ fn reject_reason_label(reason: RejectReason) -> &'static str {
         RejectReason::TradingHalted => "trading_halted",
         RejectReason::RiskCheckFailed => "risk_check_failed",
         RejectReason::WouldTakeMarket => "would_take_market",
+        RejectReason::InternalError => "internal_error",
     }
 }
 

@@ -1,11 +1,11 @@
-.PHONY: build build-release build-tls test test-all bench bench-latency bench-throughput bench-e2e bench-stress lint fmt fmt-check doc clean run run-release docker docker-push help
+.PHONY: build build-release build-tls test test-all bench bench-latency bench-throughput bench-e2e bench-stress fuzz-codec fuzz-codec-install lint fmt fmt-check doc clean run run-release docker docker-push help
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 BINARY        := me-server
 DOCKER_IMAGE  ?= matching-engine
 DOCKER_TAG    ?= latest
-TCP_ADDR      ?= 0.0.0.0:9090
+TCP_ADDR      ?= 0.0.0.0:2090
 CONFIG        ?= config.toml
 
 # ─── Build ────────────────────────────────────────────────────────────────────
@@ -55,6 +55,20 @@ bench-e2e:
 
 bench-stress:
 	cargo bench -p me-bench --bench stress
+
+# ─── Fuzzing (requires nightly + cargo-fuzz) ──────────────────────────────────
+# One-time: `make fuzz-codec-install` then `make fuzz-codec` (runs until Ctrl+C).
+# Crashes are saved to crates/me-io/fuzz/artifacts/.
+
+fuzz-codec-install:
+	rustup toolchain install nightly
+	cargo +nightly install cargo-fuzz --locked
+
+fuzz-codec:
+	cd crates/me-io/fuzz && cargo +nightly fuzz run decode_frame -- -max_total_time=60
+
+fuzz-codec-handshaked:
+	cd crates/me-io/fuzz && cargo +nightly fuzz run decode_frame_handshaked -- -max_total_time=60
 
 # ─── Code quality ─────────────────────────────────────────────────────────────
 

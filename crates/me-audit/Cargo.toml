@@ -8,3 +8,4 @@ me-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+crossbeam-channel = { workspace = true }

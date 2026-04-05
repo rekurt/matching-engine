@@ -785,6 +785,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 name = "me-audit"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "me-core",
  "serde",
  "serde_json",
@@ -796,9 +797,15 @@ name = "me-bench"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "me-audit",
  "me-book",
+ "me-clock",
  "me-core",
  "me-engine",
+ "me-persist",
+ "me-risk",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -808,13 +815,19 @@ dependencies = [
  "me-core",
  "proptest",
  "rustc-hash",
+ "tracing",
 ]
+
+[[package]]
+name = "me-clock"
+version = "0.1.0"
 
 [[package]]
 name = "me-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -832,10 +845,14 @@ name = "me-engine"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "libc",
+ "me-audit",
  "me-book",
+ "me-clock",
  "me-core",
  "me-metrics",
  "me-persist",
+ "me-risk",
  "proptest",
  "rustc-hash",
  "tracing",
@@ -846,10 +863,12 @@ name = "me-io"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "me-clock",
  "me-core",
  "me-engine",
  "me-metrics",
  "rand",
+ "rustc-hash",
  "rustls-pemfile",
  "tokio",
  "tokio-rustls",
@@ -873,7 +892,6 @@ dependencies = [
  "crc32fast",
  "me-book",
  "me-core",
- "me-engine",
  "proptest",
  "serde",
 ]
@@ -894,6 +912,8 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
+ "me-audit",
+ "me-clock",
  "me-core",
  "me-engine",
  "me-io",

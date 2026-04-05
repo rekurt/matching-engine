@@ -1,0 +1,30 @@
+[package]
+name = "me-io-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+me-io = { path = ".." }
+me-clock = { path = "../../me-clock" }
+
+[[bin]]
+name = "decode_frame"
+path = "fuzz_targets/decode_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_frame_handshaked"
+path = "fuzz_targets/decode_frame_handshaked.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1
