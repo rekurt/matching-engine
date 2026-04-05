@@ -424,14 +424,44 @@ impl SessionStore {
         })
     }
 
-    /// Create and register a new session. Returns the new session ID.
+    /// Create and register a new session with a random id. Returns the id.
+    ///
+    /// Collision-safe: retries until an unused id is drawn. Collision
+    /// probability is 2^-128 per attempt, but over a long server lifetime
+    /// with billions of sessions the expected overhead is negligible while
+    /// the safety benefit (no silent session overwrite) is absolute.
     pub fn create(&self) -> SessionId {
-        let id = SessionId::random();
-        let entry = SessionEntry::new(self.buffer_min, self.buffer_max, self.dedup_max, self.ttl);
-        let shard = self.shard_for(&id);
-        let mut map = Self::lock_shard(shard, &id, "create");
-        map.insert(id, entry);
-        id
+        self.create_with_id_source(SessionId::random)
+    }
+
+    /// Create and register a new session, using the caller-supplied closure
+    /// to generate candidate ids. If the drawn id collides with an existing
+    /// session, logs a WARN and calls the closure again.
+    ///
+    /// Primarily exists for deterministic collision-retry tests; production
+    /// code should use `create()`.
+    pub fn create_with_id_source<F>(&self, mut id_source: F) -> SessionId
+    where
+        F: FnMut() -> SessionId,
+    {
+        loop {
+            let id = id_source();
+            let entry =
+                SessionEntry::new(self.buffer_min, self.buffer_max, self.dedup_max, self.ttl);
+            let shard = self.shard_for(&id);
+            let mut map = Self::lock_shard(shard, &id, "create");
+            if map.contains_key(&id) {
+                // Astronomical collision — log loudly and retry. If this
+                // EVER fires in production, something is wrong with the RNG.
+                tracing::warn!(
+                    session_id = %id.log_prefix(),
+                    "SessionId collision on create — retrying with fresh id"
+                );
+                continue;
+            }
+            map.insert(id, entry);
+            return id;
+        }
     }
 
     /// Push an outbound frame to the session's ring buffer.
