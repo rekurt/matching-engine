@@ -7,9 +7,15 @@ edition = "2021"
 me-core = { workspace = true }
 me-book = { workspace = true }
 me-engine = { workspace = true }
+me-risk = { workspace = true }
+me-audit = { workspace = true }
+me-clock = { workspace = true }
+me-persist = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [[bench]]
 name = "throughput"
@@ -25,4 +31,8 @@ harness = false
 
 [[bench]]
 name = "stress"
+harness = false
+
+[[bench]]
+name = "realistic"
 harness = false

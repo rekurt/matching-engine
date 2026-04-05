@@ -23,7 +23,9 @@
 
 pub mod errors;
 pub mod events;
+pub mod invariant;
 pub mod order;
+pub mod session;
 pub mod symbol;
 pub mod trade;
 pub mod types;
@@ -31,7 +33,9 @@ pub mod types;
 // Re-export commonly used types at crate root.
 pub use errors::EngineError;
 pub use events::{EventBuffer, MatchEvent, RejectReason};
+pub use invariant::{InvariantKind, InvariantPolicy};
 pub use order::{Order, OrderStatus, OrderType, TimeInForce};
+pub use session::SessionId;
 pub use symbol::SymbolConfig;
 pub use trade::Trade;
 pub use types::{FixedPrice, FixedQty, OrderId, SequenceId, Side, SymbolId, TradeId};

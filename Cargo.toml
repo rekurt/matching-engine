@@ -12,8 +12,9 @@ members = [
     "crates/me-metrics",
     "crates/me-risk",
     "crates/me-audit",
+    "crates/me-clock",
 ]
-exclude = ["examples/rust"]
+exclude = ["examples/rust", "crates/me-io/fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -31,13 +32,16 @@ me-persist = { path = "crates/me-persist" }
 me-io = { path = "crates/me-io" }
 me-risk = { path = "crates/me-risk" }
 me-audit = { path = "crates/me-audit" }
+me-clock = { path = "crates/me-clock" }
 clap = { version = "4", features = ["derive"] }
 rand = "0.9"
 rustc-hash = "2.1"
 crossbeam-channel = "0.5"
 bincode = "2.0.0-rc.3"
 crc32fast = "1.4"
-tokio = { version = "1", features = ["net", "rt-multi-thread", "io-util", "macros", "sync", "signal"] }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "io-util", "macros", "sync", "signal", "time"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
 bytes = "1"
 prometheus = "0.13"
 tracing = "0.1"

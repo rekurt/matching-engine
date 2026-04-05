@@ -54,7 +54,10 @@ fn stop_limit(id: OrderId, side: Side, stop: f64, lim: f64, qty: f64) -> Order {
 
 /// Count events of a specific variant.
 fn count_trades(events: &[MatchEvent]) -> usize {
-    events.iter().filter(|e| matches!(e, MatchEvent::Trade(_))).count()
+    events
+        .iter()
+        .filter(|e| matches!(e, MatchEvent::Trade(_)))
+        .count()
 }
 
 fn has_accepted(events: &[MatchEvent], id: OrderId) -> bool {
@@ -98,11 +101,19 @@ fn test_fok_limit_insufficient_liquidity_full_reject() {
     let mut events = EventBuffer::default();
 
     // Resting ask: 1.0 at 100.0
-    process_order(&mut book, limit(1, Side::Sell, 100.0, 1.0, TimeInForce::GTC), &mut events);
+    process_order(
+        &mut book,
+        limit(1, Side::Sell, 100.0, 1.0, TimeInForce::GTC),
+        &mut events,
+    );
     events.clear();
 
     // FOK buy for 2.0 at 100.0 — only 1.0 available, must be fully rejected
-    process_order(&mut book, limit(2, Side::Buy, 100.0, 2.0, TimeInForce::FOK), &mut events);
+    process_order(
+        &mut book,
+        limit(2, Side::Buy, 100.0, 2.0, TimeInForce::FOK),
+        &mut events,
+    );
 
     let evts = events.events();
     // Engine emits Accepted before checking FOK liquidity, then Rejected
@@ -114,7 +125,11 @@ fn test_fok_limit_insufficient_liquidity_full_reject() {
     // No trades should have occurred
     assert_eq!(count_trades(evts), 0, "FOK reject must produce no trades");
     // Resting ask must still be in the book
-    assert_eq!(book.order_count(), 1, "resting ask must survive FOK rejection");
+    assert_eq!(
+        book.order_count(),
+        1,
+        "resting ask must survive FOK rejection"
+    );
     assert!(!book.asks_empty(), "ask side must remain non-empty");
 }
 
@@ -124,7 +139,11 @@ fn test_fok_market_insufficient_liquidity() {
     let mut book = new_book();
     let mut events = EventBuffer::default();
 
-    process_order(&mut book, limit(1, Side::Sell, 100.0, 1.0, TimeInForce::GTC), &mut events);
+    process_order(
+        &mut book,
+        limit(1, Side::Sell, 100.0, 1.0, TimeInForce::GTC),
+        &mut events,
+    );
     events.clear();
 
     let fok_buy = Order::new_market(
@@ -153,11 +172,19 @@ fn test_ioc_partial_fill_remainder_cancelled() {
     let mut events = EventBuffer::default();
 
     // Resting sell: 1.0 at 100.0
-    process_order(&mut book, limit(1, Side::Sell, 100.0, 1.0, TimeInForce::GTC), &mut events);
+    process_order(
+        &mut book,
+        limit(1, Side::Sell, 100.0, 1.0, TimeInForce::GTC),
+        &mut events,
+    );
     events.clear();
 
     // IOC buy for 3.0 — only 1.0 available
-    process_order(&mut book, limit(2, Side::Buy, 100.0, 3.0, TimeInForce::IOC), &mut events);
+    process_order(
+        &mut book,
+        limit(2, Side::Buy, 100.0, 3.0, TimeInForce::IOC),
+        &mut events,
+    );
 
     let evts = events.events();
     assert!(has_accepted(evts, 2), "IOC order accepted");
@@ -176,11 +203,19 @@ fn test_ioc_sell_partial_fill() {
     let mut events = EventBuffer::default();
 
     // Resting bid: 2.0 at 99.0
-    process_order(&mut book, limit(1, Side::Buy, 99.0, 2.0, TimeInForce::GTC), &mut events);
+    process_order(
+        &mut book,
+        limit(1, Side::Buy, 99.0, 2.0, TimeInForce::GTC),
+        &mut events,
+    );
     events.clear();
 
     // IOC sell for 5.0 — only 2.0 matched
-    process_order(&mut book, limit(2, Side::Sell, 99.0, 5.0, TimeInForce::IOC), &mut events);
+    process_order(
+        &mut book,
+        limit(2, Side::Sell, 99.0, 5.0, TimeInForce::IOC),
+        &mut events,
+    );
 
     let evts = events.events();
     assert!(has_accepted(evts, 2));
@@ -204,7 +239,10 @@ fn test_market_buy_empty_book_cancelled() {
     let evts = events.events();
     assert!(has_accepted(evts, 1), "market order accepted");
     assert_eq!(count_trades(evts), 0, "no trades on empty book");
-    assert!(has_cancelled(evts, 1), "market order cancelled — no resting");
+    assert!(
+        has_cancelled(evts, 1),
+        "market order cancelled — no resting"
+    );
     assert_eq!(book.order_count(), 0);
 }
 
@@ -223,14 +261,23 @@ fn test_market_sell_empty_book_cancelled() {
 
     // Confirm remaining_qty in the cancel event is 2.0
     let cancel = evts.iter().find_map(|e| {
-        if let MatchEvent::OrderCancelled { order_id, remaining_qty, .. } = e {
+        if let MatchEvent::OrderCancelled {
+            order_id,
+            remaining_qty,
+            ..
+        } = e
+        {
             if *order_id == 1 {
                 return Some(*remaining_qty);
             }
         }
         None
     });
-    assert_eq!(cancel, Some(FixedQty::from_f64(2.0)), "full qty should be remaining");
+    assert_eq!(
+        cancel,
+        Some(FixedQty::from_f64(2.0)),
+        "full qty should be remaining"
+    );
 }
 
 // ─── Sweep across multiple price levels ───────────────────────────────────────
@@ -242,8 +289,16 @@ fn test_market_buy_sweeps_multiple_price_levels() {
     let mut events = EventBuffer::default();
 
     // Two ask levels: 1.0 at 100.0 and 2.0 at 101.0
-    process_order(&mut book, limit(1, Side::Sell, 100.0, 1.0, TimeInForce::GTC), &mut events);
-    process_order(&mut book, limit(2, Side::Sell, 101.0, 2.0, TimeInForce::GTC), &mut events);
+    process_order(
+        &mut book,
+        limit(1, Side::Sell, 100.0, 1.0, TimeInForce::GTC),
+        &mut events,
+    );
+    process_order(
+        &mut book,
+        limit(2, Side::Sell, 101.0, 2.0, TimeInForce::GTC),
+        &mut events,
+    );
     events.clear();
 
     // Market buy for 3.0 — should sweep both levels
@@ -264,9 +319,17 @@ fn test_market_buy_sweeps_multiple_price_levels() {
             }
         })
         .collect();
-    assert_eq!(trades[0].price, FixedPrice::from_f64(100.0), "first fill at best ask");
+    assert_eq!(
+        trades[0].price,
+        FixedPrice::from_f64(100.0),
+        "first fill at best ask"
+    );
     assert_eq!(trades[0].qty, FixedQty::from_f64(1.0));
-    assert_eq!(trades[1].price, FixedPrice::from_f64(101.0), "second fill at next level");
+    assert_eq!(
+        trades[1].price,
+        FixedPrice::from_f64(101.0),
+        "second fill at next level"
+    );
     assert_eq!(trades[1].qty, FixedQty::from_f64(2.0));
 
     // Both makers fully filled
@@ -285,19 +348,37 @@ fn test_limit_sell_sweeps_bid_levels() {
     let mut events = EventBuffer::default();
 
     // Two bid levels: 1.0 at 101.0 (best) and 2.0 at 100.0
-    process_order(&mut book, limit(1, Side::Buy, 101.0, 1.0, TimeInForce::GTC), &mut events);
-    process_order(&mut book, limit(2, Side::Buy, 100.0, 2.0, TimeInForce::GTC), &mut events);
+    process_order(
+        &mut book,
+        limit(1, Side::Buy, 101.0, 1.0, TimeInForce::GTC),
+        &mut events,
+    );
+    process_order(
+        &mut book,
+        limit(2, Side::Buy, 100.0, 2.0, TimeInForce::GTC),
+        &mut events,
+    );
     events.clear();
 
     // Limit sell for 3.0 at 100.0 — crosses both bids
-    process_order(&mut book, limit(3, Side::Sell, 100.0, 3.0, TimeInForce::GTC), &mut events);
+    process_order(
+        &mut book,
+        limit(3, Side::Sell, 100.0, 3.0, TimeInForce::GTC),
+        &mut events,
+    );
 
     let evts = events.events();
     assert_eq!(count_trades(evts), 2);
 
     let trades: Vec<_> = evts
         .iter()
-        .filter_map(|e| if let MatchEvent::Trade(t) = e { Some(t) } else { None })
+        .filter_map(|e| {
+            if let MatchEvent::Trade(t) = e {
+                Some(t)
+            } else {
+                None
+            }
+        })
         .collect();
     // Best bid first: 101.0
     assert_eq!(trades[0].price, FixedPrice::from_f64(101.0));
@@ -319,15 +400,27 @@ fn test_self_trade_fills_normally() {
     let mut events = EventBuffer::default();
 
     // "Client A" places a buy GTC
-    process_order(&mut book, limit(1, Side::Buy, 100.0, 1.0, TimeInForce::GTC), &mut events);
+    process_order(
+        &mut book,
+        limit(1, Side::Buy, 100.0, 1.0, TimeInForce::GTC),
+        &mut events,
+    );
     events.clear();
 
     // Same "Client A" places a matching sell — engine has no self-trade prevention
-    process_order(&mut book, limit(2, Side::Sell, 100.0, 1.0, TimeInForce::GTC), &mut events);
+    process_order(
+        &mut book,
+        limit(2, Side::Sell, 100.0, 1.0, TimeInForce::GTC),
+        &mut events,
+    );
 
     let evts = events.events();
     assert!(has_accepted(evts, 2));
-    assert_eq!(count_trades(evts), 1, "self-trade fills like any other match");
+    assert_eq!(
+        count_trades(evts),
+        1,
+        "self-trade fills like any other match"
+    );
     assert!(has_filled(evts, 1), "resting buy fully filled");
     assert!(has_filled(evts, 2), "incoming sell fully filled");
     assert_eq!(book.order_count(), 0, "book is empty after self-trade");
@@ -349,7 +442,10 @@ fn test_stop_limit_buy_not_triggered_before_stop_price() {
 
     // Trade at 99.0 — below stop_price, should not trigger
     let triggered = stop_book.check_triggers(FixedPrice::from_f64(99.0), 2000, &mut events);
-    assert!(triggered.is_empty(), "stop must not trigger below stop_price");
+    assert!(
+        triggered.is_empty(),
+        "stop must not trigger below stop_price"
+    );
     assert_eq!(stop_book.len(), 1, "stop order must remain pending");
 }
 
@@ -367,14 +463,23 @@ fn test_stop_limit_buy_triggers_at_stop_price() {
     let triggered = stop_book.check_triggers(FixedPrice::from_f64(100.0), 3000, &mut events);
     assert_eq!(triggered.len(), 1, "stop must trigger at stop_price");
     assert_eq!(triggered[0].id, 1);
-    assert_eq!(triggered[0].order_type, OrderType::Limit, "stop-limit converts to limit");
-    assert_eq!(triggered[0].price, FixedPrice::from_f64(101.0), "limit price preserved");
+    assert_eq!(
+        triggered[0].order_type,
+        OrderType::Limit,
+        "stop-limit converts to limit"
+    );
+    assert_eq!(
+        triggered[0].price,
+        FixedPrice::from_f64(101.0),
+        "limit price preserved"
+    );
     assert_eq!(stop_book.len(), 0, "stop order removed from stop book");
 
     // StopTriggered event emitted
-    let has_triggered_event = events.events().iter().any(|e| {
-        matches!(e, MatchEvent::StopTriggered { order_id, .. } if *order_id == 1)
-    });
+    let has_triggered_event = events
+        .events()
+        .iter()
+        .any(|e| matches!(e, MatchEvent::StopTriggered { order_id, .. } if *order_id == 1));
     assert!(has_triggered_event, "StopTriggered event must be emitted");
 }
 
@@ -389,8 +494,8 @@ fn test_stop_limit_sell_triggers_at_or_below_stop_price() {
         SymbolId(0),
         Side::Sell,
         TimeInForce::GTC,
-        FixedPrice::from_f64(95.0),  // limit price
-        FixedPrice::from_f64(97.0),  // stop price
+        FixedPrice::from_f64(95.0), // limit price
+        FixedPrice::from_f64(97.0), // stop price
         FixedQty::from_f64(1.0),
         2000,
     );
@@ -399,7 +504,10 @@ fn test_stop_limit_sell_triggers_at_or_below_stop_price() {
 
     // Price at 98.0 — above stop_price 97.0, no trigger
     let triggered = stop_book.check_triggers(FixedPrice::from_f64(98.0), 3000, &mut events);
-    assert!(triggered.is_empty(), "sell stop must not trigger above stop_price");
+    assert!(
+        triggered.is_empty(),
+        "sell stop must not trigger above stop_price"
+    );
 
     // Price drops to 97.0 — triggers
     let triggered = stop_book.check_triggers(FixedPrice::from_f64(97.0), 4000, &mut events);
@@ -416,7 +524,11 @@ fn test_stop_limit_triggered_and_matched() {
     let mut events = EventBuffer::default();
 
     // Place a resting ask at 101.0
-    process_order(&mut book, limit(1, Side::Sell, 101.0, 1.0, TimeInForce::GTC), &mut events);
+    process_order(
+        &mut book,
+        limit(1, Side::Sell, 101.0, 1.0, TimeInForce::GTC),
+        &mut events,
+    );
     events.clear();
 
     // Place stop-limit buy: triggers at 100.0, limit 101.0
@@ -449,11 +561,19 @@ fn test_duplicate_order_id_rejected() {
     let mut book = new_book();
     let mut events = EventBuffer::default();
 
-    process_order(&mut book, limit(1, Side::Buy, 100.0, 1.0, TimeInForce::GTC), &mut events);
+    process_order(
+        &mut book,
+        limit(1, Side::Buy, 100.0, 1.0, TimeInForce::GTC),
+        &mut events,
+    );
     events.clear();
 
     // Same ID again
-    process_order(&mut book, limit(1, Side::Buy, 99.0, 1.0, TimeInForce::GTC), &mut events);
+    process_order(
+        &mut book,
+        limit(1, Side::Buy, 99.0, 1.0, TimeInForce::GTC),
+        &mut events,
+    );
     let evts = events.events();
     assert!(has_rejected(evts, 1, RejectReason::DuplicateOrderId));
 }
@@ -464,7 +584,11 @@ fn test_cancel_resting_order() {
     let mut book = new_book();
     let mut events = EventBuffer::default();
 
-    process_order(&mut book, limit(1, Side::Buy, 100.0, 1.0, TimeInForce::GTC), &mut events);
+    process_order(
+        &mut book,
+        limit(1, Side::Buy, 100.0, 1.0, TimeInForce::GTC),
+        &mut events,
+    );
     events.clear();
 
     cancel_order(&mut book, 1, 9999, &mut events);
@@ -479,5 +603,9 @@ fn test_cancel_nonexistent_order() {
     let mut events = EventBuffer::default();
 
     cancel_order(&mut book, 999, 1000, &mut events);
-    assert!(has_rejected(events.events(), 999, RejectReason::OrderNotFound));
+    assert!(has_rejected(
+        events.events(),
+        999,
+        RejectReason::OrderNotFound
+    ));
 }

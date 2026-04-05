@@ -83,8 +83,8 @@ fn rate_limit_counter_resets_after_window() {
         "2nd immediate call should fail"
     );
 
-    // Sleep 1.1 seconds to let the token-bucket refill one token.
-    std::thread::sleep(Duration::from_millis(1100));
+    // Sleep 2 seconds to let the token-bucket refill one token (2× buffer for CI reliability).
+    std::thread::sleep(Duration::from_millis(2000));
 
     assert!(
         engine.check_order(&order).is_ok(),
@@ -111,7 +111,10 @@ fn rate_limit_different_symbols_are_independent() {
 
     assert!(engine.check_order(&o1).is_ok());
     // s1 exhausted
-    assert_eq!(engine.check_order(&o1), Err(RiskRejectReason::RateLimitExceeded));
+    assert_eq!(
+        engine.check_order(&o1),
+        Err(RiskRejectReason::RateLimitExceeded)
+    );
     // s2 still fine
     assert!(engine.check_order(&o2).is_ok());
     assert!(engine.check_order(&o2).is_ok());

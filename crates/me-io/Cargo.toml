@@ -3,10 +3,20 @@ name = "me-io"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+tls = ["dep:tokio-rustls", "dep:rustls-pemfile"]
+
 [dependencies]
 me-core = { workspace = true }
 me-engine = { workspace = true }
 me-metrics = { workspace = true }
+me-clock = { workspace = true }
 tokio = { workspace = true }
 bytes = { workspace = true }
 tracing = { workspace = true }
+rand = { workspace = true }
+rustc-hash = { workspace = true }
+
+# Optional TLS support
+tokio-rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }

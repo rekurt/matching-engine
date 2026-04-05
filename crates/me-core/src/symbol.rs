@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::invariant::InvariantPolicy;
 use crate::types::{FixedPrice, FixedQty, SymbolId};
 
 /// Configuration for a trading pair.
@@ -23,6 +24,11 @@ pub struct SymbolConfig {
     pub qty_step: FixedQty,
     /// Tick size — price must be a multiple of this.
     pub price_step: FixedPrice,
+    /// How the matching engine reacts to internal invariant violations
+    /// for this symbol. See [`InvariantPolicy`] for the full rationale.
+    /// Defaults to `Strict` so that tests and dev builds panic loudly.
+    #[serde(default)]
+    pub invariant_policy: InvariantPolicy,
 }
 
 impl SymbolConfig {
@@ -38,6 +44,7 @@ impl SymbolConfig {
             max_qty: FixedQty::from_raw(1_000_000_000_000), // 10000.0
             qty_step: FixedQty::from_raw(1_000), // 0.00001
             price_step: FixedPrice::from_raw(1_000_000), // 0.01
+            invariant_policy: InvariantPolicy::default(),
         }
     }
 

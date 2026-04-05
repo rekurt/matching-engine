@@ -2,7 +2,7 @@ use rustc_hash::FxHashMap;
 use tracing::{debug, warn};
 
 use me_core::order::{Order, OrderType};
-use me_core::types::{FixedPrice, SymbolId};
+use me_core::types::{FixedPrice, SymbolId, SCALE_U64};
 
 use crate::config::RiskConfig;
 use crate::limits::{RateLimiter, RiskRejectReason};
@@ -92,9 +92,7 @@ impl RiskEngine {
 
     /// Check if trading is enabled for a symbol.
     pub fn is_trading_enabled(&self, symbol: SymbolId) -> bool {
-        self.configs
-            .get(&symbol)
-            .is_some_and(|c| c.trading_enabled)
+        self.configs.get(&symbol).is_some_and(|c| c.trading_enabled)
     }
 
     /// Perform all pre-trade risk checks on an order.
@@ -125,8 +123,8 @@ impl RiskEngine {
 
         // 4. Max notional value (price * qty)
         if matches!(order.order_type, OrderType::Limit | OrderType::StopLimit) {
-            let notional =
-                (order.price.raw() as u128) * (order.qty.raw() as u128) / 100_000_000;
+            let notional = (order.price.raw().unsigned_abs() as u128) * (order.qty.raw() as u128)
+                / SCALE_U64 as u128;
             if notional > config.max_order_notional as u128 {
                 return Err(RiskRejectReason::ExceedsMaxNotional);
             }
@@ -234,7 +232,7 @@ mod tests {
     fn test_price_band_violation() {
         let mut engine = RiskEngine::new();
         engine.add_symbol(risk_config()); // ref=50000, band=5%
-        // Price at 60000 = 20% above reference, should fail
+                                          // Price at 60000 = 20% above reference, should fail
         let order = limit_buy(60000.0, 1.0);
         assert_eq!(
             engine.check_order(&order),
@@ -246,7 +244,7 @@ mod tests {
     fn test_price_within_band() {
         let mut engine = RiskEngine::new();
         engine.add_symbol(risk_config()); // ref=50000, band=5%
-        // Price at 52000 = 4% above reference, should pass
+                                          // Price at 52000 = 4% above reference, should pass
         let order = limit_buy(52000.0, 1.0);
         assert!(engine.check_order(&order).is_ok());
     }

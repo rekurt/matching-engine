@@ -1,11 +1,25 @@
 use me_core::events::{EventBuffer, MatchEvent, RejectReason};
-use me_core::order::{Order, OrderStatus, OrderType, TimeInForce};
+use me_core::invariant::InvariantKind;
+use me_core::order::{Order, OrderStatus, OrderType, TimeInForce, ORDER_FLAG_POST_ONLY};
 use me_core::symbol::SymbolConfig;
 use me_core::trade::Trade;
 use me_core::types::{FixedPrice, FixedQty, OrderId, Side};
 
 use crate::book::OrderBook;
 use crate::price_level::PriceLevelIter;
+
+/// Emit an `InternalError` rejection for an order that cannot be processed
+/// due to a book-invariant violation. Used by hot-path matching helpers
+/// when they need to abort after calling `record_invariant_violation`.
+#[cold]
+#[inline(never)]
+fn emit_internal_error(events: &mut EventBuffer, order_id: OrderId, timestamp: u64) {
+    events.push(MatchEvent::OrderRejected {
+        order_id,
+        reason: RejectReason::InternalError,
+        timestamp,
+    });
+}
 
 // ─── Validation ──────────────────────────────────────────────────────────────
 
@@ -77,6 +91,22 @@ pub fn process_order(book: &mut OrderBook, mut order: Order, events: &mut EventB
     // Dispatch by order type
     match order.order_type {
         OrderType::Limit => {
+            // POST_ONLY: reject before accepting if the order would immediately
+            // cross the spread (i.e., it would act as a taker, not a maker).
+            if order.flags & ORDER_FLAG_POST_ONLY != 0 {
+                let would_cross = match order.side {
+                    Side::Buy => book.best_ask().is_some_and(|ask| ask <= order.price),
+                    Side::Sell => book.best_bid().is_some_and(|bid| bid >= order.price),
+                };
+                if would_cross {
+                    events.push(MatchEvent::OrderRejected {
+                        order_id: order.id,
+                        reason: RejectReason::WouldTakeMarket,
+                        timestamp: order.timestamp,
+                    });
+                    return;
+                }
+            }
             events.push(MatchEvent::OrderAccepted {
                 order_id: order.id,
                 timestamp: order.timestamp,
@@ -271,7 +301,19 @@ fn match_taker_against_ask_level(
 
         let mut iter = PriceLevelIter::new(level);
         while let Some(key) = iter.next_key(&book.order_slab) {
-            let maker = &book.order_slab.get(key).unwrap().order;
+            // Invariant: key just came from PriceLevelIter, which walks
+            // the level's intrusive list of slab keys.
+            let maker = match book.order_slab.get(key) {
+                Some(node) => &node.order,
+                None => {
+                    book.record_invariant_violation(
+                        InvariantKind::SlabKeyFromIteratorMissing,
+                        "match_taker_against_ask_level::collect_fills",
+                    );
+                    emit_internal_error(events, taker.id, taker.timestamp);
+                    return;
+                }
+            };
             let fill_qty = taker.remaining_qty.min(maker.remaining_qty);
 
             fills.push((maker.id, fill_qty, fill_qty >= maker.remaining_qty));
@@ -306,10 +348,32 @@ fn match_taker_against_ask_level(
         };
         events.push(MatchEvent::Trade(trade));
 
-        // Update maker in slab
-        let loc = book.get_order_location(maker_id).unwrap();
-        let slab_key = loc.slab_key;
-        let maker_order = book.get_order_mut_by_key(slab_key).unwrap();
+        // Update maker in slab.
+        // Invariant: maker_id comes from fills[] which we just built from
+        // the slab. Violation here means the slab/index were mutated
+        // concurrently (impossible — single-threaded) or corrupted.
+        let slab_key = match book.get_order_location(maker_id) {
+            Some(loc) => loc.slab_key,
+            None => {
+                book.record_invariant_violation(
+                    InvariantKind::OrderLocationMissing,
+                    "match_taker_against_ask_level::apply_fills",
+                );
+                emit_internal_error(events, taker.id, taker.timestamp);
+                return;
+            }
+        };
+        let maker_order = match book.get_order_mut_by_key(slab_key) {
+            Some(order) => order,
+            None => {
+                book.record_invariant_violation(
+                    InvariantKind::SlabKeyFromLocationMissing,
+                    "match_taker_against_ask_level::apply_fills",
+                );
+                emit_internal_error(events, taker.id, taker.timestamp);
+                return;
+            }
+        };
         maker_order.remaining_qty -= fill_qty;
         maker_order.cumulative_qty += fill_qty;
 
@@ -398,7 +462,17 @@ fn match_taker_against_bid_level(
 
         let mut iter = PriceLevelIter::new(level);
         while let Some(key) = iter.next_key(&book.order_slab) {
-            let maker = &book.order_slab.get(key).unwrap().order;
+            let maker = match book.order_slab.get(key) {
+                Some(node) => &node.order,
+                None => {
+                    book.record_invariant_violation(
+                        InvariantKind::SlabKeyFromIteratorMissing,
+                        "match_taker_against_bid_level::collect_fills",
+                    );
+                    emit_internal_error(events, taker.id, taker.timestamp);
+                    return;
+                }
+            };
             let fill_qty = taker.remaining_qty.min(maker.remaining_qty);
 
             fills.push((maker.id, fill_qty, fill_qty >= maker.remaining_qty));
@@ -431,9 +505,28 @@ fn match_taker_against_bid_level(
         };
         events.push(MatchEvent::Trade(trade));
 
-        let loc = book.get_order_location(maker_id).unwrap();
-        let slab_key = loc.slab_key;
-        let maker_order = book.get_order_mut_by_key(slab_key).unwrap();
+        let slab_key = match book.get_order_location(maker_id) {
+            Some(loc) => loc.slab_key,
+            None => {
+                book.record_invariant_violation(
+                    InvariantKind::OrderLocationMissing,
+                    "match_taker_against_bid_level::apply_fills",
+                );
+                emit_internal_error(events, taker.id, taker.timestamp);
+                return;
+            }
+        };
+        let maker_order = match book.get_order_mut_by_key(slab_key) {
+            Some(order) => order,
+            None => {
+                book.record_invariant_violation(
+                    InvariantKind::SlabKeyFromLocationMissing,
+                    "match_taker_against_bid_level::apply_fills",
+                );
+                emit_internal_error(events, taker.id, taker.timestamp);
+                return;
+            }
+        };
         maker_order.remaining_qty -= fill_qty;
         maker_order.cumulative_qty += fill_qty;
 
@@ -549,7 +642,20 @@ pub fn amend_order(
         }
     };
 
-    let current_order = book.get_order(order_id).copied().unwrap();
+    // Invariant: location was just verified to exist, so get_order must
+    // succeed. Diverging here means order_index and order_slab are
+    // out-of-sync — caught via the invariant policy.
+    let current_order = match book.get_order(order_id).copied() {
+        Some(o) => o,
+        None => {
+            book.record_invariant_violation(
+                InvariantKind::OrderLocationMissing,
+                "amend_order::current_order",
+            );
+            emit_internal_error(events, order_id, timestamp);
+            return;
+        }
+    };
     let final_price = new_price.unwrap_or(current_order.price);
     let final_qty = new_qty.unwrap_or(current_order.qty);
 
@@ -575,12 +681,23 @@ pub fn amend_order(
         }
     }
 
-    let price_changed = new_price.is_some() && new_price.unwrap() != current_order.price;
-    let qty_increased = new_qty.is_some() && new_qty.unwrap() > current_order.qty;
+    let price_changed = matches!(new_price, Some(p) if p != current_order.price);
+    let qty_increased = matches!(new_qty, Some(q) if q > current_order.qty);
 
     if price_changed || qty_increased {
-        // Cancel and re-insert — loses time priority
-        let mut order = book.remove_order(order_id).unwrap();
+        // Cancel and re-insert — loses time priority.
+        // Invariant: we just verified the order exists via get_order_location.
+        let mut order = match book.remove_order(order_id) {
+            Some(o) => o,
+            None => {
+                book.record_invariant_violation(
+                    InvariantKind::OrderRemovalAfterVerification,
+                    "amend_order::reinsert_path",
+                );
+                emit_internal_error(events, order_id, timestamp);
+                return;
+            }
+        };
         order.price = final_price;
         order.qty = final_qty;
         // Adjust remaining_qty proportionally
@@ -604,9 +721,21 @@ pub fn amend_order(
             process_order(book, order, events);
         }
     } else {
-        // In-place modification — retains time priority
+        // In-place modification — retains time priority.
+        // Invariant: loc came from get_order_location above; its slab_key
+        // must still be valid because this function is single-threaded.
         let slab_key = loc.slab_key;
-        let order = book.get_order_mut_by_key(slab_key).unwrap();
+        let order = match book.get_order_mut_by_key(slab_key) {
+            Some(o) => o,
+            None => {
+                book.record_invariant_violation(
+                    InvariantKind::SlabKeyFromLocationMissing,
+                    "amend_order::in_place",
+                );
+                emit_internal_error(events, order_id, timestamp);
+                return;
+            }
+        };
 
         let old_remaining = order.remaining_qty;
         let qty_delta = if final_qty < current_order.qty {

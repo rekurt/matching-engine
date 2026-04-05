@@ -95,9 +95,7 @@ fn command(id: OrderId) -> impl Strategy<Value = Command> {
 fn command_sequence(max_len: usize) -> impl Strategy<Value = Vec<Command>> {
     proptest::collection::vec(any::<u8>(), 1..=max_len).prop_flat_map(|dummy| {
         let len = dummy.len();
-        let strategies: Vec<_> = (1..=len)
-            .map(|i| command(i as OrderId).boxed())
-            .collect();
+        let strategies: Vec<_> = (1..=len).map(|i| command(i as OrderId).boxed()).collect();
         strategies
     })
 }

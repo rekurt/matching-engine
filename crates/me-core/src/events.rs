@@ -29,6 +29,11 @@ pub enum RejectReason {
     TradingHalted,
     /// Order rejected by risk check.
     RiskCheckFailed,
+    /// Post-only order would have taken liquidity (crossed the spread).
+    WouldTakeMarket,
+    /// Engine internal error (WAL write failure, shard dead, etc.).
+    /// Distinct from business-logic rejections — indicates server-side fault.
+    InternalError,
 }
 
 // ─── MatchEvent ──────────────────────────────────────────────────────────────
@@ -75,6 +80,20 @@ pub enum MatchEvent {
         order_id: OrderId,
         trigger_price: FixedPrice,
         timestamp: u64,
+    },
+    /// Response to GetOrderStatus — order is resting in the book.
+    /// `status` maps to `OrderStatus as u8`: 0=New, 1=PartiallyFilled.
+    OrderStatus {
+        order_id: OrderId,
+        status: u8,
+        filled_qty: FixedQty,
+        remaining_qty: FixedQty,
+        price: FixedPrice,
+        timestamp: u64,
+    },
+    /// Response to GetOrderStatus — order not found in the book.
+    OrderNotFound {
+        order_id: OrderId,
     },
 }
 

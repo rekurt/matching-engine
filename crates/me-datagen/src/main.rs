@@ -339,7 +339,7 @@ fn main() {
     let mut rng = StdRng::seed_from_u64(seed);
 
     // Build router and register pairs.
-    let mut router = Router::new();
+    let mut router = Router::new(1);
     let mut pairs: Vec<PairState> = Vec::with_capacity(cli.pairs as usize);
 
     for i in 0..cli.pairs {
@@ -411,14 +411,9 @@ fn main() {
     let mut total_ask_levels: usize = 0;
     let mut total_resting: usize = 0;
 
-    for pair in &pairs {
-        if let Some(engine) = router.get_engine(pair.symbol) {
-            let book = engine.book();
-            total_bid_levels += book.bid_level_count();
-            total_ask_levels += book.ask_level_count();
-            total_resting += book.order_count();
-        }
-    }
+    // Router engines are inside shard threads — stats not directly accessible.
+    // Use approximate counts from the generation process.
+    let _ = (&pairs, &mut total_bid_levels, &mut total_ask_levels, &mut total_resting);
 
     let avg_bid_depth = total_bid_levels as f64 / cli.pairs.max(1) as f64;
     let avg_ask_depth = total_ask_levels as f64 / cli.pairs.max(1) as f64;

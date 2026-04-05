@@ -302,8 +302,8 @@ TCP connect
 ```
 
 Правила:
-1. Первый кадр (кроме Ping) **ДОЛЖЕН** быть Handshake.
-2. Ping разрешён **в любом** состоянии.
+1. Первый кадр **ДОЛЖЕН** быть Handshake.
+2. Ping разрешён **в любом** состоянии (включая до Handshake), но требует `seq >= 1`.
 3. PlaceOrder / CancelOrder / AmendOrder — только после получения HandshakeAck.
 4. После перехода в Closing дальнейшие сообщения не обрабатываются.
 
@@ -315,14 +315,14 @@ TCP connect
 
 | Правило            | Описание                                                  |
 |--------------------|-----------------------------------------------------------|
-| Первый кадр        | `seq = 0` допустим                                        |
-| Последующие кадры  | `seq` должен строго возрастать: `seq > last_seq`          |
+| Первый Handshake   | `seq = 0` допустим только для первого Handshake           |
+| Все остальные кадры | `seq` должен строго возрастать: `seq > last_seq`         |
 | Нарушение          | Error с кодом `SequenceOutOfOrder` (2) и разрыв соединения |
 
 Пробелы в нумерации допустимы (seq 1 → 5 — OK). Повторное использование — нет.
 
 ```
-Client: seq=0 (Handshake)    → OK
+Client: seq=0 (Handshake)    → OK  (единственный случай seq=0)
 Client: seq=1 (PlaceOrder)   → OK
 Client: seq=2 (PlaceOrder)   → OK
 Client: seq=2 (CancelOrder)  → ERROR: SequenceOutOfOrder

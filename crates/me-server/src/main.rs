@@ -11,7 +11,9 @@ use axum::{
 };
 use clap::Parser;
 use config::{default_config, load_config, Config};
-use me_engine::router::ShardedRouterV2;
+use me_audit::async_logger::{AsyncAuditLogger, AuditFormat};
+use me_engine::router::Router;
+use me_io::session_store::SessionStore;
 use me_io::tcp_server::TcpServer;
 use me_io::uds_server::UdsServer;
 use me_metrics::EngineMetrics;
@@ -50,7 +52,7 @@ struct Cli {
 #[derive(Clone)]
 struct AppState {
     metrics: Arc<EngineMetrics>,
-    router: Arc<ShardedRouterV2>,
+    router: Arc<Router>,
     admin_api_key: Option<String>,
 }
 
@@ -195,12 +197,50 @@ async fn main() {
         cfg.server.shards
     };
 
-    info!(shards = num_shards, "Starting matching engine");
+    // Create high-performance clock from config
+    let clock = me_clock::create_clock(&cfg.server.clock);
+    info!(clock = %cfg.server.clock, shards = num_shards, "Starting matching engine");
 
     let registry = Registry::new();
     let metrics = Arc::new(EngineMetrics::new(&registry));
 
-    let mut router = ShardedRouterV2::new(num_shards);
+    // Create async audit logger (zero-alloc hot path, serializes on separate thread)
+    let audit = Arc::new(AsyncAuditLogger::new(65536, AuditFormat::Json));
+
+    // Build router with optional WAL
+    let wal_config = if cfg.wal.enabled {
+        use me_engine::router::{WalConfig as EngineWalConfig, WalMode};
+        let mode = match cfg.wal.mode.as_str() {
+            "post" => WalMode::Post,
+            "disabled" => WalMode::Disabled,
+            _ => WalMode::Pre,
+        };
+        info!(mode = %cfg.wal.mode, path = %cfg.wal.path, "WAL enabled");
+        Some(EngineWalConfig {
+            mode,
+            path: cfg.wal.path.clone(),
+            sync_interval: cfg.wal.sync_interval,
+        })
+    } else {
+        None
+    };
+
+    // Thread affinity config
+    let affinity = me_engine::router::AffinityConfig {
+        pin_threads: cfg.server.pin_threads,
+        realtime_priority: cfg.server.realtime_priority,
+    };
+    if cfg.server.pin_threads {
+        info!("Thread pinning enabled (NUMA-aware)");
+    }
+
+    let mut router = Router::new_with_affinity(
+        num_shards,
+        Some(Arc::clone(&metrics)),
+        Some(Arc::clone(&audit)),
+        wal_config,
+        affinity,
+    );
 
     if cfg.symbols.is_empty() {
         error!("No symbols configured");
@@ -210,7 +250,12 @@ async fn main() {
     for sym_entry in &cfg.symbols {
         match sym_entry.to_symbol_config() {
             Ok(sym) => {
-                info!(base = sym.base, quote = sym.quote, id = sym.id.0, "Registering symbol");
+                info!(
+                    base = sym.base,
+                    quote = sym.quote,
+                    id = sym.id.0,
+                    "Registering symbol"
+                );
                 router.add_symbol(sym);
             }
             Err(e) => {
@@ -252,10 +297,20 @@ async fn main() {
         }
         #[cfg(not(unix))]
         {
-            ctrl_c.await.ok();
+            if let Err(e) = ctrl_c.await {
+                tracing::error!(
+                    error = ?e,
+                    "ctrl-c signal registration failed — graceful shutdown may not work"
+                );
+            }
         }
-        warn!(drain_timeout_secs = drain_timeout, "Received shutdown signal, draining connections");
-        let _ = shutdown_tx.send(true);
+        warn!(
+            drain_timeout_secs = drain_timeout,
+            "Received shutdown signal, draining connections"
+        );
+        if let Err(e) = shutdown_tx.send(true) {
+            tracing::warn!(error = ?e, "shutdown_tx.send failed: all receivers dropped");
+        }
     });
 
     // Spawn HTTP metrics + admin server
@@ -287,17 +342,43 @@ async fn main() {
 
         let app = public_routes.merge(admin_routes);
 
-        let listener = tokio::net::TcpListener::bind(&metrics_addr)
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind(&metrics_addr).await.unwrap();
         info!(addr = %metrics_addr, "Metrics HTTP server listening");
         axum::serve(listener, app).await.unwrap();
     });
 
+    // Shared session store (TCP and UDS share the same store so reconnects across
+    // transports are also supported).
+    let session_store = Arc::new(SessionStore::new(
+        cfg.server.session.replay_buffer_size,
+        std::time::Duration::from_secs(cfg.server.session.ttl_secs),
+    ));
+
+    let hb_interval_ms = cfg.server.heartbeat.interval_ms as u32;
+    let hb_timeout_ms = cfg.server.heartbeat.timeout_ms;
+
+    // Background GC task: evict expired sessions every 30 s.
+    {
+        let gc_store = Arc::clone(&session_store);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                gc_store.gc();
+            }
+        });
+    }
+
     // Spawn optional UDS listener
     if let Some(ref uds_path) = cfg.server.uds_path {
-        let uds_server =
-            UdsServer::new_with_metrics(Arc::clone(&router), Some(Arc::clone(&metrics)));
+        let uds_server = UdsServer::new_with_config(
+            Arc::clone(&router),
+            Some(Arc::clone(&metrics)),
+            Arc::clone(&session_store),
+            hb_interval_ms,
+            hb_timeout_ms,
+            Arc::clone(&clock),
+        );
         let path = uds_path.clone();
         let uds_shutdown = shutdown_rx.clone();
         tokio::spawn(async move {
@@ -309,11 +390,92 @@ async fn main() {
     }
 
     // TCP listener (blocks until shutdown)
-    let tcp_server =
-        TcpServer::new_with_metrics(Arc::clone(&router), Some(Arc::clone(&metrics)));
+    #[allow(unused_mut)]
+    let mut tcp_server = TcpServer::new_with_config(
+        Arc::clone(&router),
+        Some(Arc::clone(&metrics)),
+        Arc::clone(&session_store),
+        hb_interval_ms,
+        hb_timeout_ms,
+        Arc::clone(&clock),
+    );
+
+    #[cfg(feature = "tls")]
+    {
+        use tokio_rustls::TlsAcceptor;
+
+        if let (Some(cert_path), Some(key_path)) =
+            (&cfg.server.tls.cert_path, &cfg.server.tls.key_path)
+        {
+            match load_tls_config(
+                cert_path,
+                key_path,
+                cfg.server.tls.client_ca_path.as_deref(),
+            ) {
+                Ok(rustls_cfg) => {
+                    let acceptor = TlsAcceptor::from(Arc::new(rustls_cfg));
+                    tcp_server = tcp_server.with_tls(acceptor);
+                    info!("TLS enabled");
+                }
+                Err(e) => {
+                    error!(error = %e, "Failed to load TLS certificates");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
     info!(addr = %cfg.server.tcp_addr, "TCP listening");
     if let Err(e) = tcp_server.listen(&cfg.server.tcp_addr, shutdown_rx).await {
         warn!(error = %e, "TCP server error");
         std::process::exit(1);
     }
+}
+
+// ─── TLS helpers (compiled only with `tls` feature) ──────────────────────────
+
+#[cfg(feature = "tls")]
+fn load_tls_config(
+    cert_path: &str,
+    key_path: &str,
+    client_ca_path: Option<&str>,
+) -> Result<tokio_rustls::rustls::ServerConfig, String> {
+    use rustls_pemfile::{certs, private_key};
+    use std::fs::File;
+    use std::io::BufReader;
+    use tokio_rustls::rustls;
+    use tokio_rustls::rustls::server::WebPkiClientVerifier;
+    use tokio_rustls::rustls::RootCertStore;
+
+    let cert_file = File::open(cert_path).map_err(|e| format!("cert: {e}"))?;
+    let cert_chain: Vec<_> = certs(&mut BufReader::new(cert_file))
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("cert parse: {e}"))?;
+
+    let key_file = File::open(key_path).map_err(|e| format!("key: {e}"))?;
+    let key = private_key(&mut BufReader::new(key_file))
+        .map_err(|e| format!("key parse: {e}"))?
+        .ok_or_else(|| "no private key found".to_string())?;
+
+    let builder = if let Some(ca_path) = client_ca_path {
+        // mTLS: require client certificate
+        let ca_file = File::open(ca_path).map_err(|e| format!("client CA: {e}"))?;
+        let ca_certs: Vec<_> = certs(&mut BufReader::new(ca_file))
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("CA parse: {e}"))?;
+        let mut root_store = RootCertStore::empty();
+        for cert in ca_certs {
+            root_store.add(cert).map_err(|e| format!("CA add: {e}"))?;
+        }
+        let verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
+            .build()
+            .map_err(|e| format!("verifier: {e}"))?;
+        rustls::ServerConfig::builder().with_client_cert_verifier(verifier)
+    } else {
+        rustls::ServerConfig::builder().with_no_client_auth()
+    };
+
+    builder
+        .with_single_cert(cert_chain, key)
+        .map_err(|e| format!("TLS config: {e}"))
 }

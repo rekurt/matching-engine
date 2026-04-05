@@ -272,13 +272,14 @@ The engine communicates via a custom binary protocol over TCP or Unix Domain Soc
 **Frame format / Формат фрейма:**
 
 ```
-+----------+----------+----------+-----------------+
-| len: u32 | type: u8 | seq: u64 | payload: [u8]   |
-| 4 bytes  | 1 byte   | 8 bytes  | variable        |
-+----------+----------+----------+-----------------+
++----------+---------+----------+----------+-----------------+
+| len: u32 | ver: u8 | type: u8 | seq: u64 | payload: [u8]   |
+| 4 bytes  | 1 byte  | 1 byte   | 8 bytes  | variable        |
++----------+---------+----------+----------+-----------------+
 ```
 
-- `len` -- payload length (does not include the 13-byte header) / длина payload (не включает 13-байтный заголовок)
+- `len` -- payload length (does not include the 14-byte header) / длина payload (не включает 14-байтный заголовок)
+- `ver` -- protocol version, must be `0x01` / версия протокола, должна быть `0x01`
 - `type` -- message type identifier / идентификатор типа сообщения
 - `seq` -- sequence number for request/response correlation / порядковый номер для корреляции запрос/ответ
 
