@@ -2,8 +2,15 @@
 
 ## Status
 
-Proposed — follow-up to `feat/protocol-v2-exactly-once` (commit `5862f0d`).
-Not urgent; implementation deferred until after protocol-v2 bake-in.
+**Implemented** on branch `feat/protocol-v2-exactly-once`:
+- Task A — `d697dc5` (SessionId in me-core, propagated across 18 files)
+- Task B — `b743f09` (ServerFrameSeq newtype wrapping u64)
+- Task C — `84e5ccc` (collision-safe SessionStore::create)
+
+447 tests passing, 0 clippy warnings after all 3 tasks landed.
+
+Original status: Proposed, follow-up to `feat/protocol-v2-exactly-once`
+(`5862f0d`).
 
 ## Overview
 
