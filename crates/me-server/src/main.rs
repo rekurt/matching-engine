@@ -64,13 +64,15 @@ async fn admin_auth(
     request: axum::extract::Request,
     next: Next,
 ) -> Result<axum::response::Response, StatusCode> {
-    if let Some(ref expected_key) = state.admin_api_key {
-        match headers.get("x-admin-key").and_then(|v| v.to_str().ok()) {
-            Some(key) if key == expected_key => {}
-            _ => return Err(StatusCode::UNAUTHORIZED),
-        }
+    let expected_key = state
+        .admin_api_key
+        .as_deref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    match headers.get("x-admin-key").and_then(|v| v.to_str().ok()) {
+        Some(key) if key == expected_key => Ok(next.run(request).await),
+        _ => Err(StatusCode::UNAUTHORIZED),
     }
-    Ok(next.run(request).await)
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
@@ -269,9 +271,9 @@ async fn main() {
 
     let router = Arc::new(router);
 
-    // Admin API key (None = no auth required)
+    // Admin API key (None = admin endpoints disabled).
     let admin_api_key = if cfg.server.admin.api_key.is_empty() {
-        warn!("Admin API key not set — admin endpoints are UNPROTECTED");
+        warn!("Admin API key not set — admin endpoints are DISABLED");
         None
     } else {
         info!("Admin API key configured — admin endpoints require X-Admin-Key header");
