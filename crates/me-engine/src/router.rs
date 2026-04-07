@@ -742,6 +742,7 @@ fn shard_worker_loop(
                 let mut collected = Vec::new();
                 for engine in engines.values() {
                     collected.extend(engine.book().scan_by_session_id(&session_id));
+                    collected.extend(engine.stop_book().scan_by_session_id(&session_id));
                 }
                 let collected_count = collected.len();
                 if reply.send(collected).is_err() {
@@ -886,6 +887,19 @@ mod dead_shard_tests {
         ))
     }
 
+    fn place_stop_order_cmd(id: u64, symbol: SymbolId) -> Command {
+        Command::PlaceOrder(Order::new_stop_limit(
+            id,
+            symbol,
+            Side::Buy,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(1.1),
+            FixedPrice::from_f64(1.05),
+            FixedQty::from_f64(0.02),
+            id * 1000,
+        ))
+    }
+
     #[test]
     fn process_on_dead_shard_returns_internal_error() {
         let mut router = Router::new(1);
@@ -994,5 +1008,29 @@ mod dead_shard_tests {
             }
             other => panic!("expected OrderRejected SymbolNotFound, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn get_open_orders_by_session_includes_pending_stop_orders() {
+        let mut router = Router::new(1);
+        router.add_symbol(btc_cfg());
+        let session = me_core::SessionId::from_bytes([0x55u8; 16]);
+
+        let mut limit_cmd = place_order_cmd(1, SymbolId(0));
+        if let Command::PlaceOrder(ref mut o) = limit_cmd {
+            o.client_session_id = session;
+        }
+        router.process(limit_cmd);
+
+        let mut stop_cmd = place_stop_order_cmd(2, SymbolId(0));
+        if let Command::PlaceOrder(ref mut o) = stop_cmd {
+            o.client_session_id = session;
+        }
+        router.process(stop_cmd);
+
+        let snapshot = router.get_open_orders_by_session(session);
+        assert_eq!(snapshot.len(), 2, "snapshot should include resting + stop orders");
+        assert!(snapshot.iter().any(|o| o.id == 1));
+        assert!(snapshot.iter().any(|o| o.id == 2 && o.is_stop()));
     }
 }
