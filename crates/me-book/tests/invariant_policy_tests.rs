@@ -27,10 +27,7 @@ fn halt_policy_isolates_one_symbol() {
     let halting = OrderBook::new(config_with(InvariantPolicy::HaltSymbol));
     let continuing = OrderBook::new(config_with(InvariantPolicy::Continue));
 
-    halting.record_invariant_violation(
-        InvariantKind::SlabKeyFromIteratorMissing,
-        "isolation_test",
-    );
+    halting.record_invariant_violation(InvariantKind::SlabKeyFromIteratorMissing, "isolation_test");
 
     assert!(halting.is_halted_by_invariant());
     assert!(!continuing.is_halted_by_invariant());
@@ -40,10 +37,7 @@ fn halt_policy_isolates_one_symbol() {
 fn violation_counter_monotonically_increases() {
     let book = OrderBook::new(config_with(InvariantPolicy::Continue));
     for _ in 0..5 {
-        book.record_invariant_violation(
-            InvariantKind::OrderLocationMissing,
-            "monotonic_test",
-        );
+        book.record_invariant_violation(InvariantKind::OrderLocationMissing, "monotonic_test");
     }
     assert_eq!(book.invariant_violations_total(), 5);
 }

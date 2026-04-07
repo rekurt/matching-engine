@@ -87,14 +87,21 @@ fn restore_yields_identical_snapshot() {
     // Compare set of order IDs (insertion order within Vec is not part
     // of the public contract).
     let mut orig_resting: Vec<u64> = snap.resting_orders.iter().map(|o| o.id).collect();
-    let mut rest_resting: Vec<u64> =
-        snap_after_restore.resting_orders.iter().map(|o| o.id).collect();
+    let mut rest_resting: Vec<u64> = snap_after_restore
+        .resting_orders
+        .iter()
+        .map(|o| o.id)
+        .collect();
     orig_resting.sort_unstable();
     rest_resting.sort_unstable();
     assert_eq!(orig_resting, rest_resting);
 
     let mut orig_stops: Vec<u64> = snap.stop_orders.iter().map(|o| o.id).collect();
-    let mut rest_stops: Vec<u64> = snap_after_restore.stop_orders.iter().map(|o| o.id).collect();
+    let mut rest_stops: Vec<u64> = snap_after_restore
+        .stop_orders
+        .iter()
+        .map(|o| o.id)
+        .collect();
     orig_stops.sort_unstable();
     rest_stops.sort_unstable();
     assert_eq!(orig_stops, rest_stops);

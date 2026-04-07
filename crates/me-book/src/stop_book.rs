@@ -5,8 +5,8 @@ use rustc_hash::FxHashMap;
 
 use me_core::events::{EventBuffer, MatchEvent};
 use me_core::order::Order;
-use me_core::SessionId;
 use me_core::types::{FixedPrice, OrderId, Side};
+use me_core::SessionId;
 
 /// Location of a stop order for O(1) cancel.
 #[derive(Clone, Copy, Debug)]
