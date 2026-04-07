@@ -71,6 +71,23 @@ fn default_equals_first() {
 }
 
 #[test]
+fn next_saturates_at_u64_max() {
+    let mut seq = ServerFrameSeq::FIRST;
+    seq.reset_to(u64::MAX);
+    // next() should return u64::MAX and saturate (not wrap to 0)
+    assert_eq!(seq.next(), u64::MAX);
+    assert_eq!(seq.peek(), u64::MAX, "counter must saturate, not wrap");
+}
+
+#[test]
+fn advance_by_saturates_at_u64_max() {
+    let mut seq = ServerFrameSeq::FIRST;
+    seq.advance_by(u64::MAX);
+    // Should saturate, not overflow
+    assert_eq!(seq.peek(), u64::MAX);
+}
+
+#[test]
 fn debug_format_shows_the_seq() {
     let mut seq = ServerFrameSeq::FIRST;
     seq.next();

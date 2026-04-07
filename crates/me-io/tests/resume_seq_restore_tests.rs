@@ -219,16 +219,42 @@ fn resume_after_gap_also_restores_seq() {
 }
 
 #[test]
-fn apply_ack_u64_max_is_sanitized_to_prevent_seq_wrap() {
+fn apply_ack_u64_max_is_clamped_to_highest_sent() {
     let store = SessionStore::new(1024, Duration::from_secs(60));
     let sid = store.create();
 
     store.push(&sid, 1, Bytes::from_static(b"x"));
     let _ = store.apply_ack(&sid, u64::MAX);
 
+    // ACK=u64::MAX is clamped to highest_sent (seq=1), so
+    // next_outbound_seq = 1 + 1 = 2 — not u64::MAX.
     assert_eq!(
         store.next_outbound_seq(&sid),
-        u64::MAX,
-        "ACK=u64::MAX must not make next_outbound_seq wrap to 0"
+        2,
+        "out-of-range ACK must be clamped to highest sent seq"
+    );
+}
+
+#[test]
+fn apply_ack_beyond_highest_sent_is_clamped() {
+    let store = SessionStore::new(1024, Duration::from_secs(60));
+    let sid = store.create();
+
+    store.push(&sid, 1, Bytes::from_static(b"a"));
+    store.push(&sid, 2, Bytes::from_static(b"b"));
+    store.push(&sid, 3, Bytes::from_static(b"c"));
+
+    // Legitimate ACK=2: should purge frames 1,2 and keep 3
+    let evicted = store.apply_ack(&sid, 2);
+    assert_eq!(evicted, 2);
+    assert_eq!(store.next_outbound_seq(&sid), 4);
+
+    // Malicious ACK=1000 (way beyond highest_sent=3): clamped to 3
+    let evicted = store.apply_ack(&sid, 1000);
+    assert_eq!(evicted, 1); // frame 3 evicted
+    assert_eq!(
+        store.next_outbound_seq(&sid),
+        4,
+        "clamped ACK must not inflate next_outbound_seq beyond highest+1"
     );
 }
