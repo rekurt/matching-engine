@@ -330,7 +330,7 @@ mod tests {
             timestamp_ns: 1000,
             order_id: 42,
             symbol_id: 0,
-            side: 0, // Buy
+            side: 0,       // Buy
             order_type: 0, // Limit
             price_raw: 5000000000000,
             qty_raw: 100000000,

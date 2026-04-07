@@ -88,10 +88,7 @@ fn test_resume_gap_boundary_exact_evicted_seq() {
     assert_eq!(store.buffer_len(&sid), 3);
 
     // Client says last_recv=1 (which is < highest_evicted=2) → gap
-    assert!(matches!(
-        store.resume(&sid, 1),
-        ReplayResult::Gap { .. }
-    ));
+    assert!(matches!(store.resume(&sid, 1), ReplayResult::Gap { .. }));
     // Client says last_recv=2 (equal to highest_evicted) → no gap, wants 3..=5
     assert!(matches!(store.resume(&sid, 2), ReplayResult::Ok(_)));
 }

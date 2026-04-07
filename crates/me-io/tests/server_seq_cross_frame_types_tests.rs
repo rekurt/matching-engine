@@ -29,8 +29,7 @@ fn iter_frames(buf: &[u8]) -> Vec<&[u8]> {
     let mut out = Vec::new();
     let mut off = 0;
     while off + FRAME_HEADER_SIZE <= buf.len() {
-        let payload_len =
-            u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+        let payload_len = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
         let total = FRAME_HEADER_SIZE + payload_len;
         if off + total > buf.len() {
             break;

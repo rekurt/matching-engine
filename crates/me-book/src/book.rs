@@ -551,10 +551,7 @@ mod tests {
     #[should_panic(expected = "BUG: matching invariant violated")]
     fn invariant_strict_policy_panics() {
         let book = OrderBook::new(make_config_with_policy(InvariantPolicy::Strict));
-        book.record_invariant_violation(
-            InvariantKind::SlabKeyFromIteratorMissing,
-            "test_strict",
-        );
+        book.record_invariant_violation(InvariantKind::SlabKeyFromIteratorMissing, "test_strict");
     }
 
     #[test]
@@ -563,19 +560,13 @@ mod tests {
         assert!(!book.is_halted_by_invariant());
         assert_eq!(book.invariant_violations_total(), 0);
 
-        book.record_invariant_violation(
-            InvariantKind::OrderLocationMissing,
-            "test_halt",
-        );
+        book.record_invariant_violation(InvariantKind::OrderLocationMissing, "test_halt");
 
         assert!(book.is_halted_by_invariant());
         assert_eq!(book.invariant_violations_total(), 1);
 
         // Subsequent violations keep counting but stay halted.
-        book.record_invariant_violation(
-            InvariantKind::SlabKeyFromLocationMissing,
-            "test_halt",
-        );
+        book.record_invariant_violation(InvariantKind::SlabKeyFromLocationMissing, "test_halt");
         assert!(book.is_halted_by_invariant());
         assert_eq!(book.invariant_violations_total(), 2);
     }
@@ -583,10 +574,7 @@ mod tests {
     #[test]
     fn invariant_continue_policy_counts_but_does_not_halt() {
         let book = OrderBook::new(make_config_with_policy(InvariantPolicy::Continue));
-        book.record_invariant_violation(
-            InvariantKind::SlabKeyFromIteratorMissing,
-            "test_continue",
-        );
+        book.record_invariant_violation(InvariantKind::SlabKeyFromIteratorMissing, "test_continue");
         assert!(!book.is_halted_by_invariant());
         assert_eq!(book.invariant_violations_total(), 1);
     }
