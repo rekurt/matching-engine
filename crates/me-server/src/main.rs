@@ -64,16 +64,15 @@ async fn admin_auth(
     request: axum::extract::Request,
     next: Next,
 ) -> Result<axum::response::Response, StatusCode> {
-    let expected_key = match state.admin_api_key.as_ref() {
-        Some(key) => key,
-        None => return Err(StatusCode::FORBIDDEN),
-    };
+    let expected_key = state
+        .admin_api_key
+        .as_deref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
     match headers.get("x-admin-key").and_then(|v| v.to_str().ok()) {
-        Some(key) if key == expected_key => {}
-        _ => return Err(StatusCode::UNAUTHORIZED),
+        Some(key) if key == expected_key => Ok(next.run(request).await),
+        _ => Err(StatusCode::UNAUTHORIZED),
     }
-    Ok(next.run(request).await)
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
