@@ -1,8 +1,10 @@
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rustc_hash::FxHashMap;
 
+use me_core::invariant::{InvariantKind, InvariantPolicy};
 use me_core::order::Order;
 use me_core::symbol::SymbolConfig;
 use me_core::types::{FixedPrice, FixedQty, OrderId, SequenceId, Side, SymbolId, TradeId};
@@ -40,6 +42,14 @@ pub struct OrderBook {
     pub sequence: SequenceId,
     /// Trade ID generator for this book.
     pub trade_id_gen: TradeId,
+    /// Running total of invariant violations observed on this book.
+    /// Surfaced to Prometheus via the engine layer. Atomic so the inner
+    /// handler can bump it while other fields are borrowed.
+    invariant_violations_total: AtomicU64,
+    /// Set to true when an invariant violation triggered a symbol halt
+    /// under `InvariantPolicy::HaltSymbol`. Once halted, the engine must
+    /// stop accepting commands for this symbol until operator intervention.
+    invariant_halted: AtomicBool,
 }
 
 impl OrderBook {
@@ -56,6 +66,79 @@ impl OrderBook {
             best_ask: None,
             sequence: 0,
             trade_id_gen: 0,
+            invariant_violations_total: AtomicU64::new(0),
+            invariant_halted: AtomicBool::new(false),
+        }
+    }
+
+    // ─── Invariant handling ─────────────────────────────────────────────
+
+    /// Current cumulative count of invariant violations observed on this
+    /// book since creation. Engine layer scrapes this into a Prometheus
+    /// counter.
+    #[inline]
+    pub fn invariant_violations_total(&self) -> u64 {
+        self.invariant_violations_total.load(Ordering::Relaxed)
+    }
+
+    /// Whether a prior invariant violation has halted this symbol under
+    /// `InvariantPolicy::HaltSymbol`. Engine layer MUST check this before
+    /// accepting commands and reject with `InternalError` if true.
+    #[inline]
+    pub fn is_halted_by_invariant(&self) -> bool {
+        self.invariant_halted.load(Ordering::Relaxed)
+    }
+
+    /// Record a matching-engine invariant violation and apply the symbol's
+    /// configured policy.
+    ///
+    /// Under `Strict`, panics with full diagnostic context — the caller
+    /// never returns from this function and the following emit-rejection
+    /// code becomes unreachable.
+    ///
+    /// Under `HaltSymbol`/`Continue`, logs and returns. The caller is
+    /// responsible for emitting an `OrderRejected{InternalError}` event
+    /// and unwinding its current operation cleanly.
+    ///
+    /// Marked `#[cold]` + `#[inline(never)]` because this path is
+    /// exercised only on bugs — keeping it out of the hot instruction
+    /// stream helps i-cache utilization.
+    #[cold]
+    #[inline(never)]
+    pub fn record_invariant_violation(&self, kind: InvariantKind, context: &'static str) {
+        self.invariant_violations_total
+            .fetch_add(1, Ordering::Relaxed);
+        let symbol = self.symbol;
+        match self.config.invariant_policy {
+            InvariantPolicy::Strict => {
+                // Panic message is structured for log scrapers.
+                panic!(
+                    "BUG: matching invariant violated: kind={} context={} symbol={:?}; \
+                     book state is corrupt, aborting",
+                    kind.as_str(),
+                    context,
+                    symbol
+                );
+            }
+            InvariantPolicy::HaltSymbol => {
+                self.invariant_halted.store(true, Ordering::Relaxed);
+                tracing::error!(
+                    target: "matching::invariant",
+                    kind = kind.as_str(),
+                    context = context,
+                    symbol = ?symbol,
+                    "invariant violated; halting symbol"
+                );
+            }
+            InvariantPolicy::Continue => {
+                tracing::error!(
+                    target: "matching::invariant",
+                    kind = kind.as_str(),
+                    context = context,
+                    symbol = ?symbol,
+                    "invariant violated; continuing"
+                );
+            }
         }
     }
 
@@ -99,6 +182,25 @@ impl OrderBook {
     pub fn get_order(&self, order_id: OrderId) -> Option<&Order> {
         let loc = self.order_index.get(&order_id)?;
         self.order_slab.get(loc.slab_key).map(|node| &node.order)
+    }
+
+    /// Collect all resting orders belonging to a given client session.
+    ///
+    /// Used by the OpenOrders snapshot handler (protocol v2 GetOpenOrders).
+    /// O(N) scan over all resting orders — intended for occasional resync,
+    /// NOT a hot-path operation.
+    pub fn scan_by_session_id(&self, session_id: &me_core::SessionId) -> Vec<Order> {
+        self.order_index
+            .values()
+            .filter_map(|loc| {
+                let order = &self.order_slab.get(loc.slab_key)?.order;
+                if order.client_session_id == *session_id {
+                    Some(*order)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Get a mutable reference to a resting order by its slab key.
@@ -435,5 +537,57 @@ mod tests {
         book.insert_order(make_limit(2, Side::Buy, 100.0, 2.0));
         assert_eq!(book.bid_level_count(), 1);
         assert_eq!(book.order_count(), 2);
+    }
+
+    // ─── Invariant policy tests ─────────────────────────────────────────
+
+    fn make_config_with_policy(policy: InvariantPolicy) -> SymbolConfig {
+        let mut cfg = make_config();
+        cfg.invariant_policy = policy;
+        cfg
+    }
+
+    #[test]
+    #[should_panic(expected = "BUG: matching invariant violated")]
+    fn invariant_strict_policy_panics() {
+        let book = OrderBook::new(make_config_with_policy(InvariantPolicy::Strict));
+        book.record_invariant_violation(
+            InvariantKind::SlabKeyFromIteratorMissing,
+            "test_strict",
+        );
+    }
+
+    #[test]
+    fn invariant_halt_symbol_policy_sets_flag_and_bumps_counter() {
+        let book = OrderBook::new(make_config_with_policy(InvariantPolicy::HaltSymbol));
+        assert!(!book.is_halted_by_invariant());
+        assert_eq!(book.invariant_violations_total(), 0);
+
+        book.record_invariant_violation(
+            InvariantKind::OrderLocationMissing,
+            "test_halt",
+        );
+
+        assert!(book.is_halted_by_invariant());
+        assert_eq!(book.invariant_violations_total(), 1);
+
+        // Subsequent violations keep counting but stay halted.
+        book.record_invariant_violation(
+            InvariantKind::SlabKeyFromLocationMissing,
+            "test_halt",
+        );
+        assert!(book.is_halted_by_invariant());
+        assert_eq!(book.invariant_violations_total(), 2);
+    }
+
+    #[test]
+    fn invariant_continue_policy_counts_but_does_not_halt() {
+        let book = OrderBook::new(make_config_with_policy(InvariantPolicy::Continue));
+        book.record_invariant_violation(
+            InvariantKind::SlabKeyFromIteratorMissing,
+            "test_continue",
+        );
+        assert!(!book.is_halted_by_invariant());
+        assert_eq!(book.invariant_violations_total(), 1);
     }
 }

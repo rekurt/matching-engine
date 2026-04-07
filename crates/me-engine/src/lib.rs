@@ -11,10 +11,9 @@
 //!
 //! ## Routing
 //!
-//! - [`router::Router`] — Single-threaded router for all symbols (simple, deterministic)
-//! - [`router::ShardedRouterV2`] — Multi-threaded router with crossbeam channels.
+//! - [`router::Router`] — Sharded multi-threaded router with integrated Risk + Audit.
 //!   Symbols are distributed across N worker threads using `symbol_id % num_shards`.
-//!   Each shard runs its own command loop with bounded channel (capacity 4096).
+//!   Each shard runs: Risk check → Matching → Async audit (SPSC send).
 //!
 //! ## Command Flow
 //!
@@ -22,6 +21,7 @@
 //! Client → Frame → Codec → Command → Router → Engine → MatchEvents → Codec → Frame → Client
 //! ```
 
+pub mod affinity;
 pub mod command;
 pub mod engine;
 pub mod router;

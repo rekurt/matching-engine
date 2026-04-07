@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use me_core::events::{EventBuffer, MatchEvent, RejectReason};
 use me_core::symbol::SymbolConfig;
 use me_core::types::FixedPrice;
@@ -5,6 +7,8 @@ use me_core::types::FixedPrice;
 use me_book::book::OrderBook;
 use me_book::matching;
 use me_book::stop_book::StopBook;
+use me_clock::Clock;
+use me_persist::snapshot::BookSnapshot;
 
 use crate::command::Command;
 
@@ -29,15 +33,22 @@ pub struct Engine {
     stop_book: StopBook,
     events: EventBuffer,
     trading_state: TradingState,
+    clock: Arc<dyn Clock>,
 }
 
 impl Engine {
     pub fn new(config: SymbolConfig) -> Self {
+        Self::with_clock(config, Arc::new(me_clock::SystemClock))
+    }
+
+    /// Create an engine with a custom clock (for production use CoarseClock/RdtscClock).
+    pub fn with_clock(config: SymbolConfig, clock: Arc<dyn Clock>) -> Self {
         Self {
             book: OrderBook::new(config),
             stop_book: StopBook::new(),
             events: EventBuffer::with_capacity(256),
             trading_state: TradingState::Active,
+            clock,
         }
     }
 
@@ -140,10 +151,7 @@ impl Engine {
                 break;
             }
 
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64;
+            let timestamp = self.clock.now_ns();
 
             let triggered =
                 self.stop_book
@@ -222,5 +230,77 @@ impl Engine {
     /// Get the symbol config.
     pub fn config(&self) -> &SymbolConfig {
         &self.book.config
+    }
+
+    // ─── Snapshot / Restore ──────────────────────────────────────────────
+    //
+    // These are the single source of truth for snapshotting engine state.
+    // Callers (recovery, tests, admin API) MUST use them rather than
+    // assembling a `BookSnapshot` by hand — that's how fields like
+    // `stop_orders` have been silently forgotten in the past.
+
+    /// Capture the full durable state of this engine into a `BookSnapshot`.
+    ///
+    /// Snapshot captures (at call time):
+    /// - symbol and sequence counter
+    /// - trade-id generator
+    /// - all resting orders on both sides of the order book
+    /// - all pending stop orders (both stop-buy and stop-sell)
+    ///
+    /// Transient/recoverable state is NOT captured:
+    /// - `trading_state` (halt/resume is an operator action, not durable)
+    /// - `events` buffer (per-command scratch space)
+    /// - invariant halt flag (re-derived from next violation)
+    pub fn snapshot(&self) -> BookSnapshot {
+        BookSnapshot {
+            symbol: self.book.config.id,
+            sequence: self.book.sequence,
+            trade_id_gen: self.book.trade_id_gen,
+            resting_orders: self.book.all_resting_orders(),
+            stop_orders: self.stop_book.all_stop_orders(),
+        }
+    }
+
+    /// Rebuild an engine from a previously captured `BookSnapshot`.
+    ///
+    /// The engine starts in `Active` trading state; callers that need to
+    /// restore halt state must do so explicitly via `halt_trading()`.
+    ///
+    /// Resting orders are reinserted into the book WITHOUT re-running the
+    /// matcher — we assume the snapshot was self-consistent (no crossed
+    /// book) at the moment it was captured.
+    pub fn restore_from_snapshot(config: SymbolConfig, snapshot: BookSnapshot) -> Self {
+        debug_assert_eq!(
+            config.id, snapshot.symbol,
+            "restore_from_snapshot: config.id does not match snapshot.symbol"
+        );
+        let mut engine = Self::new(config);
+        engine.apply_snapshot(snapshot);
+        engine
+    }
+
+    /// Apply snapshot state to an existing engine, overwriting its book
+    /// and stop book. Used during WAL replay where the engine is created
+    /// first and then rewound to a snapshot.
+    pub fn apply_snapshot(&mut self, snapshot: BookSnapshot) {
+        // Reset both books to empty, then re-insert.
+        let cfg = self.book.config.clone();
+        self.book = OrderBook::new(cfg);
+        self.stop_book = StopBook::new();
+
+        for order in snapshot.resting_orders {
+            self.book.insert_order(order);
+        }
+        let mut scratch = EventBuffer::default();
+        for order in snapshot.stop_orders {
+            self.stop_book.insert(order, &mut scratch);
+        }
+        // Discard the synthetic OrderAccepted events produced by
+        // stop_book.insert — they belong to the original insertion, not
+        // to the restore.
+        scratch.clear();
+
+        self.book.sequence = snapshot.sequence;
+        self.book.trade_id_gen = snapshot.trade_id_gen;
     }
 }

@@ -5,6 +5,7 @@ use rustc_hash::FxHashMap;
 
 use me_core::events::{EventBuffer, MatchEvent};
 use me_core::order::Order;
+use me_core::SessionId;
 use me_core::types::{FixedPrice, OrderId, Side};
 
 /// Location of a stop order for O(1) cancel.
@@ -235,6 +236,14 @@ impl StopBook {
         }
         orders
     }
+
+    /// Collect all pending stop orders belonging to a given client session.
+    pub fn scan_by_session_id(&self, session_id: &SessionId) -> Vec<Order> {
+        self.all_stop_orders()
+            .into_iter()
+            .filter(|order| order.client_session_id == *session_id)
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -357,5 +366,26 @@ mod tests {
         // Exact price — triggers
         let triggered = book.check_triggers(FixedPrice::from_f64(100.0), 2000, &mut events);
         assert_eq!(triggered.len(), 1);
+    }
+
+    #[test]
+    fn test_scan_by_session_id_filters_pending_stops() {
+        let mut book = StopBook::new();
+        let mut events = EventBuffer::default();
+
+        let session_a = SessionId::from_bytes([11; 16]);
+        let session_b = SessionId::from_bytes([22; 16]);
+
+        let mut order_a = make_stop_limit_buy(1, 100.0, 101.0, 1.0);
+        order_a.client_session_id = session_a;
+        let mut order_b = make_stop_market_sell(2, 95.0, 2.0);
+        order_b.client_session_id = session_b;
+
+        book.insert(order_a, &mut events);
+        book.insert(order_b, &mut events);
+
+        let session_a_orders = book.scan_by_session_id(&session_a);
+        assert_eq!(session_a_orders.len(), 1);
+        assert_eq!(session_a_orders[0].id, 1);
     }
 }

@@ -1,6 +1,10 @@
 use serde::Serialize;
 
 /// Audit event types for regulatory compliance.
+///
+/// All fields are zero-alloc: no `String`, no heap pointers.
+/// Enum discriminants (side, order_type, tif, reason) are stored as `u8`
+/// and serialized as human-readable strings via custom helpers.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "event_type")]
 pub enum AuditEvent {
@@ -9,11 +13,14 @@ pub enum AuditEvent {
         timestamp_ns: u64,
         order_id: u64,
         symbol_id: u16,
-        side: String,
-        order_type: String,
+        #[serde(serialize_with = "ser_side")]
+        side: u8,
+        #[serde(serialize_with = "ser_order_type")]
+        order_type: u8,
         price_raw: i64,
         qty_raw: u64,
-        tif: String,
+        #[serde(serialize_with = "ser_tif")]
+        tif: u8,
     },
     /// Order accepted by matching engine.
     OrderAccepted {
@@ -24,7 +31,8 @@ pub enum AuditEvent {
     OrderRejected {
         timestamp_ns: u64,
         order_id: u64,
-        reason: String,
+        #[serde(serialize_with = "ser_reject_reason")]
+        reason: u8,
     },
     /// Trade executed.
     TradeExecuted {
@@ -35,7 +43,8 @@ pub enum AuditEvent {
         qty_raw: u64,
         maker_order_id: u64,
         taker_order_id: u64,
-        maker_side: String,
+        #[serde(serialize_with = "ser_side")]
+        maker_side: u8,
     },
     /// Order filled (completely).
     OrderFilled {
@@ -75,11 +84,193 @@ pub enum AuditEvent {
     TradingHalted {
         timestamp_ns: u64,
         symbol_id: u16,
-        reason: String,
+        #[serde(serialize_with = "ser_halt_reason")]
+        reason: u8,
     },
     /// Trading resumed.
     TradingResumed {
         timestamp_ns: u64,
         symbol_id: u16,
     },
+}
+
+// ─── Fixed-size entry for SPSC ring buffer (zero-alloc hot path) ────────────
+
+/// Fixed-size audit entry for the async ring buffer.
+/// No heap, no pointers, `Copy`. Matching thread writes this, audit thread reads.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub struct AuditEntry {
+    pub timestamp_ns: u64,
+    pub event_type: u8,
+    pub order_id: u64,
+    pub symbol_id: u16,
+    pub side: u8,
+    pub order_type: u8,
+    pub tif: u8,
+    pub price_raw: i64,
+    pub qty_raw: u64,
+    pub aux_i64: i64,
+    pub aux_u64: u64,
+    pub maker_order_id: u64,
+    pub taker_order_id: u64,
+    pub reason: u8,
+}
+
+/// Event type discriminants for `AuditEntry.event_type`.
+pub mod event_type {
+    pub const ORDER_SUBMITTED: u8 = 1;
+    pub const ORDER_ACCEPTED: u8 = 2;
+    pub const ORDER_REJECTED: u8 = 3;
+    pub const TRADE_EXECUTED: u8 = 4;
+    pub const ORDER_FILLED: u8 = 5;
+    pub const ORDER_PARTIALLY_FILLED: u8 = 6;
+    pub const ORDER_CANCELLED: u8 = 7;
+    pub const ORDER_AMENDED: u8 = 8;
+    pub const STOP_TRIGGERED: u8 = 9;
+    pub const TRADING_HALTED: u8 = 10;
+    pub const TRADING_RESUMED: u8 = 11;
+}
+
+/// Halt reason discriminants.
+pub mod halt_reason {
+    pub const MANUAL: u8 = 0;
+    pub const CIRCUIT_BREAKER: u8 = 1;
+    pub const MAINTENANCE: u8 = 2;
+}
+
+impl AuditEntry {
+    /// Convert to a rich `AuditEvent` (for JSON serialization on the consumer thread).
+    pub fn to_audit_event(&self) -> AuditEvent {
+        match self.event_type {
+            event_type::ORDER_SUBMITTED => AuditEvent::OrderSubmitted {
+                timestamp_ns: self.timestamp_ns,
+                order_id: self.order_id,
+                symbol_id: self.symbol_id,
+                side: self.side,
+                order_type: self.order_type,
+                price_raw: self.price_raw,
+                qty_raw: self.qty_raw,
+                tif: self.tif,
+            },
+            event_type::ORDER_ACCEPTED => AuditEvent::OrderAccepted {
+                timestamp_ns: self.timestamp_ns,
+                order_id: self.order_id,
+            },
+            event_type::ORDER_REJECTED => AuditEvent::OrderRejected {
+                timestamp_ns: self.timestamp_ns,
+                order_id: self.order_id,
+                reason: self.reason,
+            },
+            event_type::TRADE_EXECUTED => AuditEvent::TradeExecuted {
+                timestamp_ns: self.timestamp_ns,
+                trade_id: self.aux_u64,
+                symbol_id: self.symbol_id,
+                price_raw: self.price_raw,
+                qty_raw: self.qty_raw,
+                maker_order_id: self.maker_order_id,
+                taker_order_id: self.taker_order_id,
+                maker_side: self.side,
+            },
+            event_type::ORDER_FILLED => AuditEvent::OrderFilled {
+                timestamp_ns: self.timestamp_ns,
+                order_id: self.order_id,
+                filled_qty_raw: self.qty_raw,
+                price_raw: self.price_raw,
+            },
+            event_type::ORDER_PARTIALLY_FILLED => AuditEvent::OrderPartiallyFilled {
+                timestamp_ns: self.timestamp_ns,
+                order_id: self.order_id,
+                filled_qty_raw: self.qty_raw,
+                remaining_qty_raw: self.aux_u64,
+                price_raw: self.price_raw,
+            },
+            event_type::ORDER_CANCELLED => AuditEvent::OrderCancelled {
+                timestamp_ns: self.timestamp_ns,
+                order_id: self.order_id,
+                remaining_qty_raw: self.qty_raw,
+            },
+            event_type::ORDER_AMENDED => AuditEvent::OrderAmended {
+                timestamp_ns: self.timestamp_ns,
+                order_id: self.order_id,
+                new_price_raw: self.price_raw,
+                new_qty_raw: self.qty_raw,
+            },
+            event_type::STOP_TRIGGERED => AuditEvent::StopTriggered {
+                timestamp_ns: self.timestamp_ns,
+                order_id: self.order_id,
+                trigger_price_raw: self.price_raw,
+            },
+            event_type::TRADING_HALTED => AuditEvent::TradingHalted {
+                timestamp_ns: self.timestamp_ns,
+                symbol_id: self.symbol_id,
+                reason: self.reason,
+            },
+            event_type::TRADING_RESUMED => AuditEvent::TradingResumed {
+                timestamp_ns: self.timestamp_ns,
+                symbol_id: self.symbol_id,
+            },
+            _ => AuditEvent::OrderAccepted {
+                timestamp_ns: self.timestamp_ns,
+                order_id: self.order_id,
+            },
+        }
+    }
+}
+
+// ─── Serde helpers: u8 → human-readable string in JSON ─────────────────────
+
+fn ser_side<S: serde::Serializer>(v: &u8, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(match v {
+        0 => "Buy",
+        1 => "Sell",
+        _ => "Unknown",
+    })
+}
+
+fn ser_order_type<S: serde::Serializer>(v: &u8, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(match v {
+        0 => "Limit",
+        1 => "Market",
+        2 => "StopLimit",
+        3 => "StopMarket",
+        _ => "Unknown",
+    })
+}
+
+fn ser_tif<S: serde::Serializer>(v: &u8, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(match v {
+        0 => "GTC",
+        1 => "IOC",
+        2 => "FOK",
+        _ => "Unknown",
+    })
+}
+
+fn ser_reject_reason<S: serde::Serializer>(v: &u8, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(match v {
+        0 => "NoLiquidity",
+        1 => "InsufficientLiquidity",
+        2 => "InvalidPrice",
+        3 => "InvalidQuantity",
+        4 => "InvalidLotSize",
+        5 => "InvalidTickSize",
+        6 => "OrderNotFound",
+        7 => "DuplicateOrderId",
+        8 => "SymbolNotFound",
+        9 => "TradingHalted",
+        10 => "RiskCheckFailed",
+        11 => "WouldTakeMarket",
+        12 => "InternalError",
+        _ => "Unknown",
+    })
+}
+
+fn ser_halt_reason<S: serde::Serializer>(v: &u8, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(match v {
+        0 => "Manual",
+        1 => "CircuitBreaker",
+        2 => "Maintenance",
+        _ => "Unknown",
+    })
 }

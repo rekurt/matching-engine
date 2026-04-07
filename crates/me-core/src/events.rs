@@ -31,6 +31,9 @@ pub enum RejectReason {
     RiskCheckFailed,
     /// Post-only order would have taken liquidity (crossed the spread).
     WouldTakeMarket,
+    /// Engine internal error (WAL write failure, shard dead, etc.).
+    /// Distinct from business-logic rejections — indicates server-side fault.
+    InternalError,
 }
 
 // ─── MatchEvent ──────────────────────────────────────────────────────────────

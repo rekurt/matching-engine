@@ -59,13 +59,16 @@ impl<T> Slab<T> {
         }
     }
 
-    /// Remove a value by key and return it.
-    /// Panics if the key is invalid or already vacant.
-    pub fn remove(&mut self, key: SlabKey) -> T {
+    /// Remove a value by key and return it, or `None` if the slot is
+    /// vacant or the key is out of bounds.
+    ///
+    /// This is the fallible variant — prefer it over [`Slab::remove`] in
+    /// any code path where a double-remove would be a caller bug rather
+    /// than a data-corruption signal.
+    pub fn try_remove(&mut self, key: SlabKey) -> Option<T> {
         let idx = key as usize;
-        // Check before mutating to give a clear panic message
-        match &self.entries[idx] {
-            Entry::Vacant { .. } => panic!("removing vacant slab entry at key {key}"),
+        match self.entries.get(idx)? {
+            Entry::Vacant { .. } => return None,
             Entry::Occupied(_) => {}
         }
         let entry = std::mem::replace(
@@ -77,8 +80,24 @@ impl<T> Slab<T> {
         self.free_head = Some(key);
         self.len -= 1;
         match entry {
-            Entry::Occupied(val) => val,
-            Entry::Vacant { .. } => unreachable!(),
+            Entry::Occupied(val) => Some(val),
+            // SAFETY: we just checked the entry was Occupied and then
+            // replaced it; the value we took out cannot be Vacant.
+            Entry::Vacant { .. } => unreachable!("entry verified Occupied above"),
+        }
+    }
+
+    /// Remove a value by key and return it.
+    ///
+    /// Panics if the key is invalid or the slot is already vacant. This
+    /// signals a caller bug (double-remove or stale key). Prefer
+    /// [`Slab::try_remove`] when the caller can handle the vacant case
+    /// gracefully.
+    #[inline]
+    pub fn remove(&mut self, key: SlabKey) -> T {
+        match self.try_remove(key) {
+            Some(val) => val,
+            None => panic!("removing vacant slab entry at key {key}"),
         }
     }
 
@@ -188,5 +207,29 @@ mod tests {
         let k = slab.insert(1);
         slab.remove(k);
         slab.remove(k); // should panic
+    }
+
+    #[test]
+    fn test_try_remove_returns_some_on_occupied() {
+        let mut slab = Slab::with_capacity(2);
+        let k = slab.insert("hello");
+        assert_eq!(slab.try_remove(k), Some("hello"));
+        assert_eq!(slab.len(), 0);
+    }
+
+    #[test]
+    fn test_try_remove_returns_none_on_vacant() {
+        let mut slab = Slab::with_capacity(2);
+        let k = slab.insert(42);
+        assert_eq!(slab.try_remove(k), Some(42));
+        // Second remove: slot is vacant, must not panic.
+        assert_eq!(slab.try_remove(k), None);
+        assert_eq!(slab.len(), 0);
+    }
+
+    #[test]
+    fn test_try_remove_returns_none_on_out_of_bounds() {
+        let mut slab: Slab<i32> = Slab::with_capacity(2);
+        assert_eq!(slab.try_remove(999), None);
     }
 }

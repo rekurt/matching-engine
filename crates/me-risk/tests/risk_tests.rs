@@ -111,7 +111,10 @@ fn rate_limit_different_symbols_are_independent() {
 
     assert!(engine.check_order(&o1).is_ok());
     // s1 exhausted
-    assert_eq!(engine.check_order(&o1), Err(RiskRejectReason::RateLimitExceeded));
+    assert_eq!(
+        engine.check_order(&o1),
+        Err(RiskRejectReason::RateLimitExceeded)
+    );
     // s2 still fine
     assert!(engine.check_order(&o2).is_ok());
     assert!(engine.check_order(&o2).is_ok());

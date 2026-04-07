@@ -38,14 +38,24 @@ fn engine_two_sided(n_levels: usize, orders_per_level: usize) -> (Engine, u64) {
         let bid_price = FixedPrice::from_raw(BASE_PRICE - (lvl as i64 + 1) * TICK);
         for _ in 0..orders_per_level {
             let ask = Order::new_limit(
-                id, SymbolId(0), Side::Sell, TimeInForce::GTC,
-                ask_price, FixedQty::from_raw(ONE_BTC), 0,
+                id,
+                SymbolId(0),
+                Side::Sell,
+                TimeInForce::GTC,
+                ask_price,
+                FixedQty::from_raw(ONE_BTC),
+                0,
             );
             engine.process(Command::PlaceOrder(ask));
             id += 1;
             let bid = Order::new_limit(
-                id, SymbolId(0), Side::Buy, TimeInForce::GTC,
-                bid_price, FixedQty::from_raw(ONE_BTC), 0,
+                id,
+                SymbolId(0),
+                Side::Buy,
+                TimeInForce::GTC,
+                bid_price,
+                FixedQty::from_raw(ONE_BTC),
+                0,
             );
             engine.process(Command::PlaceOrder(bid));
             id += 1;
@@ -73,12 +83,18 @@ fn bench_place_scaling(c: &mut Criterion) {
 
                     // Place non-crossing bids at a price BELOW all existing bids.
                     // Single price level — no BTreeMap growth during measurement.
-                    let far_price = FixedPrice::from_raw(BASE_PRICE - (n_levels as i64 + 100) * TICK);
+                    let far_price =
+                        FixedPrice::from_raw(BASE_PRICE - (n_levels as i64 + 100) * TICK);
                     let start = std::time::Instant::now();
                     for i in 0..iters {
                         let order = Order::new_limit(
-                            next_id + i, SymbolId(0), Side::Buy, TimeInForce::GTC,
-                            far_price, FixedQty::from_raw(ONE_BTC), 0,
+                            next_id + i,
+                            SymbolId(0),
+                            Side::Buy,
+                            TimeInForce::GTC,
+                            far_price,
+                            FixedQty::from_raw(ONE_BTC),
+                            0,
                         );
                         engine.process(Command::PlaceOrder(order));
                     }
@@ -108,11 +124,17 @@ fn bench_cancel_scaling(c: &mut Criterion) {
                     let (mut engine, next_id) = engine_two_sided(n_levels, 1);
 
                     // Insert `iters` extra orders at a mid-book price to cancel them.
-                    let cancel_price = FixedPrice::from_raw(BASE_PRICE - (n_levels as i64 / 2) * TICK);
+                    let cancel_price =
+                        FixedPrice::from_raw(BASE_PRICE - (n_levels as i64 / 2) * TICK);
                     for i in 0..iters {
                         let order = Order::new_limit(
-                            next_id + i, SymbolId(0), Side::Buy, TimeInForce::GTC,
-                            cancel_price, FixedQty::from_raw(ONE_BTC), 0,
+                            next_id + i,
+                            SymbolId(0),
+                            Side::Buy,
+                            TimeInForce::GTC,
+                            cancel_price,
+                            FixedQty::from_raw(ONE_BTC),
+                            0,
                         );
                         engine.process(Command::PlaceOrder(order));
                     }
@@ -155,9 +177,13 @@ fn bench_sweep_scaling(c: &mut Criterion) {
                     // Initial population
                     for lvl in 0..(n_levels as u64) {
                         let ask = Order::new_limit(
-                            id, SymbolId(0), Side::Sell, TimeInForce::GTC,
+                            id,
+                            SymbolId(0),
+                            Side::Sell,
+                            TimeInForce::GTC,
                             FixedPrice::from_raw(BASE_PRICE + (lvl as i64) * TICK),
-                            FixedQty::from_raw(ONE_BTC), 0,
+                            FixedQty::from_raw(ONE_BTC),
+                            0,
                         );
                         engine.process(Command::PlaceOrder(ask));
                         id += 1;
@@ -167,8 +193,12 @@ fn bench_sweep_scaling(c: &mut Criterion) {
                     for _ in 0..iters {
                         let t = std::time::Instant::now();
                         let sweep = Order::new_market(
-                            id, SymbolId(0), Side::Buy, TimeInForce::GTC,
-                            FixedQty::from_raw(ONE_BTC * n_levels as u64), 0,
+                            id,
+                            SymbolId(0),
+                            Side::Buy,
+                            TimeInForce::GTC,
+                            FixedQty::from_raw(ONE_BTC * n_levels as u64),
+                            0,
                         );
                         engine.process(Command::PlaceOrder(sweep));
                         total += t.elapsed();
@@ -177,9 +207,13 @@ fn bench_sweep_scaling(c: &mut Criterion) {
                         // Untimed: replenish
                         for lvl in 0..(n_levels as u64) {
                             let ask = Order::new_limit(
-                                id, SymbolId(0), Side::Sell, TimeInForce::GTC,
+                                id,
+                                SymbolId(0),
+                                Side::Sell,
+                                TimeInForce::GTC,
                                 FixedPrice::from_raw(BASE_PRICE + (lvl as i64) * TICK),
-                                FixedQty::from_raw(ONE_BTC), 0,
+                                FixedQty::from_raw(ONE_BTC),
+                                0,
                             );
                             engine.process(Command::PlaceOrder(ask));
                             id += 1;
@@ -214,9 +248,13 @@ fn bench_fifo_queue_scaling(c: &mut Criterion) {
                     // All orders at the same price
                     for _ in 0..depth {
                         let ask = Order::new_limit(
-                            id, SymbolId(0), Side::Sell, TimeInForce::GTC,
+                            id,
+                            SymbolId(0),
+                            Side::Sell,
+                            TimeInForce::GTC,
                             FixedPrice::from_raw(BASE_PRICE),
-                            FixedQty::from_raw(ONE_BTC), 0,
+                            FixedQty::from_raw(ONE_BTC),
+                            0,
                         );
                         engine.process(Command::PlaceOrder(ask));
                         id += 1;
@@ -226,8 +264,12 @@ fn bench_fifo_queue_scaling(c: &mut Criterion) {
                     for _ in 0..iters {
                         let t = std::time::Instant::now();
                         let sweep = Order::new_market(
-                            id, SymbolId(0), Side::Buy, TimeInForce::GTC,
-                            FixedQty::from_raw(ONE_BTC * depth as u64), 0,
+                            id,
+                            SymbolId(0),
+                            Side::Buy,
+                            TimeInForce::GTC,
+                            FixedQty::from_raw(ONE_BTC * depth as u64),
+                            0,
                         );
                         engine.process(Command::PlaceOrder(sweep));
                         total += t.elapsed();
@@ -236,9 +278,13 @@ fn bench_fifo_queue_scaling(c: &mut Criterion) {
                         // Untimed: replenish
                         for _ in 0..depth {
                             let ask = Order::new_limit(
-                                id, SymbolId(0), Side::Sell, TimeInForce::GTC,
+                                id,
+                                SymbolId(0),
+                                Side::Sell,
+                                TimeInForce::GTC,
                                 FixedPrice::from_raw(BASE_PRICE),
-                                FixedQty::from_raw(ONE_BTC), 0,
+                                FixedQty::from_raw(ONE_BTC),
+                                0,
                             );
                             engine.process(Command::PlaceOrder(ask));
                             id += 1;
@@ -314,8 +360,13 @@ fn bench_hft_large_book(c: &mut Criterion) {
                     let maker_price = FixedPrice::from_raw(BASE_PRICE - TICK);
                     let mut maker_id = next_id;
                     let maker = Order::new_limit(
-                        maker_id, SymbolId(0), Side::Buy, TimeInForce::GTC,
-                        maker_price, FixedQty::from_raw(ONE_BTC), 0,
+                        maker_id,
+                        SymbolId(0),
+                        Side::Buy,
+                        TimeInForce::GTC,
+                        maker_price,
+                        FixedQty::from_raw(ONE_BTC),
+                        0,
                     );
                     engine.process(Command::PlaceOrder(maker));
                     next_id += 1;
@@ -333,9 +384,13 @@ fn bench_hft_large_book(c: &mut Criterion) {
                         next_id += 1;
                         let price_jitter = (i % 5) as i64 + 1;
                         let new_bid = Order::new_limit(
-                            maker_id, SymbolId(0), Side::Buy, TimeInForce::GTC,
+                            maker_id,
+                            SymbolId(0),
+                            Side::Buy,
+                            TimeInForce::GTC,
                             FixedPrice::from_raw(BASE_PRICE - price_jitter * TICK),
-                            FixedQty::from_raw(ONE_BTC), 0,
+                            FixedQty::from_raw(ONE_BTC),
+                            0,
                         );
                         engine.process(Command::PlaceOrder(new_bid));
                     }
@@ -374,19 +429,27 @@ fn bench_stop_trigger_scaling(c: &mut Criterion) {
                             // Sell resting at limit_price (liquidity for triggered stop)
                             let limit_price = BASE_PRICE + (11 + j as i64) * TICK;
                             let sell = Order::new_limit(
-                                id, SymbolId(0), Side::Sell, TimeInForce::GTC,
+                                id,
+                                SymbolId(0),
+                                Side::Sell,
+                                TimeInForce::GTC,
                                 FixedPrice::from_raw(limit_price),
-                                FixedQty::from_raw(ONE_BTC), 0,
+                                FixedQty::from_raw(ONE_BTC),
+                                0,
                             );
                             engine.process(Command::PlaceOrder(sell));
                             id += 1;
 
                             // Stop-buy triggers at trigger_price
                             let stop = Order::new_stop_limit(
-                                id, SymbolId(0), Side::Buy, TimeInForce::GTC,
+                                id,
+                                SymbolId(0),
+                                Side::Buy,
+                                TimeInForce::GTC,
                                 FixedPrice::from_raw(limit_price),
                                 trigger_price,
-                                FixedQty::from_raw(ONE_BTC), 0,
+                                FixedQty::from_raw(ONE_BTC),
+                                0,
                             );
                             engine.process(Command::PlaceOrder(stop));
                             id += 1;
@@ -394,9 +457,13 @@ fn bench_stop_trigger_scaling(c: &mut Criterion) {
 
                         // Place a resting buy at trigger_price
                         let resting = Order::new_limit(
-                            id, SymbolId(0), Side::Buy, TimeInForce::GTC,
+                            id,
+                            SymbolId(0),
+                            Side::Buy,
+                            TimeInForce::GTC,
                             trigger_price,
-                            FixedQty::from_raw(ONE_BTC), 0,
+                            FixedQty::from_raw(ONE_BTC),
+                            0,
                         );
                         engine.process(Command::PlaceOrder(resting));
                         id += 1;
@@ -404,9 +471,13 @@ fn bench_stop_trigger_scaling(c: &mut Criterion) {
                         // TIMED: sell into the resting buy → trade → triggers all stops
                         let t = std::time::Instant::now();
                         let sell = Order::new_limit(
-                            id, SymbolId(0), Side::Sell, TimeInForce::GTC,
+                            id,
+                            SymbolId(0),
+                            Side::Sell,
+                            TimeInForce::GTC,
                             trigger_price,
-                            FixedQty::from_raw(ONE_BTC), 0,
+                            FixedQty::from_raw(ONE_BTC),
+                            0,
                         );
                         engine.process(Command::PlaceOrder(sell));
                         total += t.elapsed();
@@ -443,16 +514,24 @@ fn bench_book_build(c: &mut Criterion) {
                             // Alternate bid/ask, each at unique price
                             if i % 2 == 0 {
                                 let ask = Order::new_limit(
-                                    i + 1, SymbolId(0), Side::Sell, TimeInForce::GTC,
+                                    i + 1,
+                                    SymbolId(0),
+                                    Side::Sell,
+                                    TimeInForce::GTC,
                                     FixedPrice::from_raw(BASE_PRICE + (i as i64 / 2 + 1) * TICK),
-                                    FixedQty::from_raw(ONE_BTC), 0,
+                                    FixedQty::from_raw(ONE_BTC),
+                                    0,
                                 );
                                 engine.process(Command::PlaceOrder(ask));
                             } else {
                                 let bid = Order::new_limit(
-                                    i + 1, SymbolId(0), Side::Buy, TimeInForce::GTC,
+                                    i + 1,
+                                    SymbolId(0),
+                                    Side::Buy,
+                                    TimeInForce::GTC,
                                     FixedPrice::from_raw(BASE_PRICE - (i as i64 / 2 + 1) * TICK),
-                                    FixedQty::from_raw(ONE_BTC), 0,
+                                    FixedQty::from_raw(ONE_BTC),
+                                    0,
                                 );
                                 engine.process(Command::PlaceOrder(bid));
                             }

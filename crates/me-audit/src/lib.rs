@@ -9,5 +9,6 @@
 //! - Stop orders triggered
 //! - Trading halted/resumed
 
+pub mod async_logger;
 pub mod logger;
 pub mod types;
