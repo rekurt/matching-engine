@@ -248,7 +248,12 @@ fn emit_entry(entry: &AuditEntry, format: AuditFormat) {
                     std::mem::size_of::<AuditEntry>(),
                 )
             };
-            info!(target: "audit_binary", bytes_len = bytes.len(), event_type = entry.event_type);
+            info!(
+                target: "audit_binary",
+                bytes = ?bytes,
+                bytes_len = bytes.len(),
+                event_type = entry.event_type
+            );
         }
     }
 }
