@@ -28,11 +28,20 @@ impl SessionId {
     pub const NONE: Self = Self([0u8; 16]);
 
     /// Generate a cryptographically-random session id from the thread-local
-    /// RNG. Probability of returning `NONE` is 2^-128.
+    /// RNG.
+    ///
+    /// Never returns [`SessionId::NONE`]. Even though hitting all-zero bytes
+    /// is astronomically unlikely (2^-128), reserving `NONE` as a strict
+    /// sentinel keeps invariants crisp across logs, replay, and snapshots.
     pub fn random() -> Self {
-        let mut bytes = [0u8; 16];
-        rand::rng().fill(&mut bytes);
-        Self(bytes)
+        loop {
+            let mut bytes = [0u8; 16];
+            rand::rng().fill(&mut bytes);
+            let id = Self(bytes);
+            if !id.is_none() {
+                return id;
+            }
+        }
     }
 
     /// Construct from a raw 16-byte array (wire decode, test fixtures).
