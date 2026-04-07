@@ -504,6 +504,13 @@ fn shard_worker_loop(
             }
         }
     });
+    let wal_pre_open_failed = wal_mode == WalMode::Pre && wal.is_none();
+    if wal_pre_open_failed {
+        tracing::error!(
+            shard_id,
+            "WAL pre-mode configured but writer is unavailable; shard will reject all commands to preserve durability"
+        );
+    }
 
     while let Ok(msg) = rx.recv() {
         match msg {
@@ -566,6 +573,12 @@ fn shard_worker_loop(
                             );
                             wal_pre_write_failed = true;
                         }
+                    } else {
+                        tracing::error!(
+                            shard_id,
+                            "WAL PRE-WRITE SKIPPED — writer unavailable, rejecting order (durability violated)"
+                        );
+                        wal_pre_write_failed = true;
                     }
                 }
 
