@@ -18,6 +18,16 @@ use tracing::warn;
 pub fn pin_to_core(core_id: usize) {
     #[cfg(target_os = "linux")]
     {
+        let cpu_set_size = libc::CPU_SETSIZE as usize;
+        if core_id >= cpu_set_size {
+            warn!(
+                core_id,
+                cpu_set_size,
+                "skipping thread pinning: core_id exceeds cpu_set_t capacity"
+            );
+            return;
+        }
+
         unsafe {
             let mut cpuset: libc::cpu_set_t = std::mem::zeroed();
             libc::CPU_SET(core_id, &mut cpuset);
