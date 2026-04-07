@@ -58,14 +58,14 @@ impl ServerFrameSeq {
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> u64 {
         let s = self.0;
-        self.0 += 1;
+        self.0 = self.0.saturating_add(1);
         s
     }
 
     /// Advance the counter by `n` after a batch push of `n` frames.
     #[inline]
     pub fn advance_by(&mut self, n: u64) {
-        self.0 += n;
+        self.0 = self.0.saturating_add(n);
     }
 
     /// Peek at the next-to-assign seq without consuming it.
@@ -628,15 +628,23 @@ impl SessionStore {
         let Some(entry) = map.get_mut(id) else {
             return 0;
         };
-        // Defensive hardening: `next_outbound_seq()` computes `highest + 1`.
-        // If a malicious client sends ACK=u64::MAX and we stored it verbatim,
-        // that addition would overflow and could crash resume handling.
-        let sanitized_last_acked = if last_acked_server_seq == u64::MAX {
-            tracing::warn!(
-                session = ?id,
-                "ignoring impossible ACK=u64::MAX to preserve seq>=1 invariant"
-            );
-            u64::MAX - 1
+        // Defensive hardening: cap the ACK value to the highest seq the server
+        // has actually sent.  A malicious client could send an arbitrarily large
+        // ACK (e.g. u64::MAX) which, when stored as `last_acked_server_seq`,
+        // would cause `next_outbound_seq()` to return a near-overflow value and
+        // eventually panic or wrap on the next `ServerFrameSeq::next()` call.
+        let buf_highest = entry.frames.back().map(|(s, _)| *s).unwrap_or(0);
+        let highest_sent = buf_highest.max(entry.highest_evicted_seq);
+        let sanitized_last_acked = if last_acked_server_seq > highest_sent {
+            if last_acked_server_seq > highest_sent.saturating_add(1) {
+                tracing::warn!(
+                    session = ?id,
+                    ack = last_acked_server_seq,
+                    highest_sent,
+                    "clamping out-of-range ACK to highest sent seq"
+                );
+            }
+            highest_sent
         } else {
             last_acked_server_seq
         };
