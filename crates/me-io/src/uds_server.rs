@@ -398,40 +398,61 @@ async fn handle_uds_connection_inner(
                                                 // tokio executor thread is not stalled.
                                                 let router_for_snapshot = Arc::clone(&router);
                                                 let session_id_copy = conn.session_id;
-                                                let orders = tokio::task::spawn_blocking(move || {
+                                                let snapshot_result = tokio::task::spawn_blocking(move || {
                                                     router_for_snapshot.get_open_orders_by_session(session_id_copy)
                                                 })
-                                                .await
-                                                .unwrap_or_else(|e| {
-                                                    tracing::error!(
-                                                        error = ?e,
-                                                        "GetOpenOrders: spawn_blocking task panicked/cancelled — returning empty snapshot"
-                                                    );
-                                                    Vec::new()
-                                                });
-                                                let snapshot_seq = conn.server_frame_seq.peek();
-                                                codec::encode_open_orders_begin(
-                                                    seq,
-                                                    request_id,
-                                                    orders.len() as u32,
-                                                    snapshot_seq,
-                                                    &mut write_buf,
-                                                );
-                                                for ord in &orders {
-                                                    codec::encode_open_order(
+                                                .await;
+
+                                                let orders = match snapshot_result {
+                                                    Ok(Ok(orders)) => Some(orders),
+                                                    Ok(Err(shard_err)) => {
+                                                        tracing::error!(
+                                                            error = %shard_err,
+                                                            "GetOpenOrders: shard failure — returning InternalError"
+                                                        );
+                                                        None
+                                                    }
+                                                    Err(join_err) => {
+                                                        tracing::error!(
+                                                            error = ?join_err,
+                                                            "GetOpenOrders: spawn_blocking panicked/cancelled — returning InternalError"
+                                                        );
+                                                        None
+                                                    }
+                                                };
+
+                                                if let Some(orders) = orders {
+                                                    let snapshot_seq = conn.server_frame_seq.peek();
+                                                    codec::encode_open_orders_begin(
                                                         seq,
                                                         request_id,
-                                                        ord,
+                                                        orders.len() as u32,
+                                                        snapshot_seq,
+                                                        &mut write_buf,
+                                                    );
+                                                    for ord in &orders {
+                                                        codec::encode_open_order(
+                                                            seq,
+                                                            request_id,
+                                                            ord,
+                                                            &mut write_buf,
+                                                        );
+                                                    }
+                                                    codec::encode_open_orders_end(
+                                                        seq,
+                                                        request_id,
+                                                        snapshot_seq,
+                                                        &mut write_buf,
+                                                    );
+                                                    new_dedup_request_id = Some(request_id);
+                                                } else {
+                                                    codec::encode_error(
+                                                        seq,
+                                                        ErrorCode::InternalError,
+                                                        "GetOpenOrders failed: incomplete snapshot",
                                                         &mut write_buf,
                                                     );
                                                 }
-                                                codec::encode_open_orders_end(
-                                                    seq,
-                                                    request_id,
-                                                    snapshot_seq,
-                                                    &mut write_buf,
-                                                );
-                                                new_dedup_request_id = Some(request_id);
                                             }
                                         }
                                     }

@@ -158,7 +158,7 @@ fn e2e_place_order_retry_is_cached_and_not_reprocessed() {
     let first_response_bytes = write_buf.clone().freeze();
 
     // Snapshot the book state: exactly one resting order.
-    let orders_before = router.get_open_orders_by_session(session_id);
+    let orders_before = router.get_open_orders_by_session(session_id).unwrap();
     assert_eq!(
         orders_before.len(),
         1,
@@ -200,7 +200,7 @@ fn e2e_place_order_retry_is_cached_and_not_reprocessed() {
     );
 
     // Verify the book STILL has only 1 order — retry was NOT re-executed.
-    let orders_after = router.get_open_orders_by_session(session_id);
+    let orders_after = router.get_open_orders_by_session(session_id).unwrap();
     assert_eq!(
         orders_after.len(),
         1,
@@ -352,8 +352,8 @@ fn e2e_get_open_orders_snapshot_sees_session_orders_only() {
     handle_place_order(&mut router, &store, &mut conn_b, &mut seq_b, &wire, &mut wbuf);
 
     // Snapshot each session.
-    let snap_a = router.get_open_orders_by_session(session_a);
-    let snap_b = router.get_open_orders_by_session(session_b);
+    let snap_a = router.get_open_orders_by_session(session_a).unwrap();
+    let snap_b = router.get_open_orders_by_session(session_b).unwrap();
 
     assert_eq!(snap_a.len(), 3, "session A has 3 resting orders");
     assert_eq!(snap_b.len(), 1, "session B has 1 resting order");
@@ -394,7 +394,7 @@ fn e2e_cancel_order_after_place_with_dedup() {
         &mut wbuf,
     );
     assert_eq!(
-        router.get_open_orders_by_session(session_id).len(),
+        router.get_open_orders_by_session(session_id).unwrap().len(),
         1,
         "order placed"
     );
@@ -420,7 +420,7 @@ fn e2e_cancel_order_after_place_with_dedup() {
 
     // Snapshot should now be empty.
     assert_eq!(
-        router.get_open_orders_by_session(session_id).len(),
+        router.get_open_orders_by_session(session_id).unwrap().len(),
         0,
         "order cancelled"
     );
@@ -534,7 +534,7 @@ fn e2e_batch_place_order_retry_is_cached_and_not_reprocessed() {
     assert!(!cached1, "first batch call: cache miss");
     assert_eq!(router_calls, 3, "3 orders → 3 router.process() invocations");
 
-    let orders_after_first = router.get_open_orders_by_session(session_id);
+    let orders_after_first = router.get_open_orders_by_session(session_id).unwrap();
     assert_eq!(orders_after_first.len(), 3, "all 3 orders placed");
     let first_response = wbuf.clone().freeze();
 
@@ -556,7 +556,7 @@ fn e2e_batch_place_order_retry_is_cached_and_not_reprocessed() {
 
     // Book STILL has only 3 orders — retry was NOT re-executed.
     assert_eq!(
-        router.get_open_orders_by_session(session_id).len(),
+        router.get_open_orders_by_session(session_id).unwrap().len(),
         3,
         "dedup prevents double-placement of batch"
     );
