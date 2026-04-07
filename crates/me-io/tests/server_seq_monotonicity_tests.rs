@@ -75,10 +75,7 @@ fn test_multi_event_response_each_frame_has_distinct_server_seq() {
     assert_eq!(frames.len(), 3, "expected 3 wire frames");
 
     // Each frame should carry its own monotonic seq.
-    assert_eq!(
-        frames[0].1, 100,
-        "first frame should have seq=starting_seq"
-    );
+    assert_eq!(frames[0].1, 100, "first frame should have seq=starting_seq");
     assert_eq!(
         frames[1].1, 101,
         "second frame should have seq=starting_seq+1"

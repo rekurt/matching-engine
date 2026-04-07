@@ -23,7 +23,10 @@ pub enum DecodeError {
     InvalidPayload(String),
     PayloadTooLarge(u32),
     UnsupportedVersion(u8),
-    SequenceOutOfOrder { expected_min: u64, got: u64 },
+    SequenceOutOfOrder {
+        expected_min: u64,
+        got: u64,
+    },
     HandshakeRequired,
     /// Command frame had request_id = 0 (not allowed for dedup-tracked messages).
     InvalidRequestId,
@@ -44,7 +47,9 @@ impl std::fmt::Display for DecodeError {
                 )
             }
             Self::HandshakeRequired => write!(f, "Handshake required before sending commands"),
-            Self::InvalidRequestId => write!(f, "request_id must be non-zero for this message type"),
+            Self::InvalidRequestId => {
+                write!(f, "request_id must be non-zero for this message type")
+            }
         }
     }
 }
@@ -314,9 +319,7 @@ pub fn decode_frame(
             // Ping v2 payload: last_processed_server_seq(8) = piggyback ACK.
             // If payload is empty (v1 clients), treat ack_seq as 0.
             let ack_seq = if payload.len() >= 8 {
-                u64::from_le_bytes(
-                    payload[0..8].try_into().expect("Ping: ack_seq"),
-                )
+                u64::from_le_bytes(payload[0..8].try_into().expect("Ping: ack_seq"))
             } else {
                 0
             };
@@ -332,9 +335,8 @@ pub fn decode_frame(
                 return Err(DecodeError::InvalidPayload("Acknowledge too short".into()));
             }
             conn.last_client_seq = seq;
-            let last_processed_server_seq = u64::from_le_bytes(
-                payload[0..8].try_into().expect("Acknowledge: ack_seq"),
-            );
+            let last_processed_server_seq =
+                u64::from_le_bytes(payload[0..8].try_into().expect("Acknowledge: ack_seq"));
             return Ok((
                 DecodedFrame::Acknowledge {
                     last_processed_server_seq,
@@ -423,7 +425,10 @@ pub fn decode_frame(
                 }
                 // Each sub-payload is 37 or 38 bytes.
                 let sub_len = if payload.len() >= offset + 38 { 38 } else { 37 };
-                cmds.push(decode_place_order(&payload[offset..offset + sub_len], clock)?);
+                cmds.push(decode_place_order(
+                    &payload[offset..offset + sub_len],
+                    clock,
+                )?);
                 offset += sub_len;
             }
             DecodedFrame::Batch(cmds, seq, request_id)
@@ -564,7 +569,10 @@ fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Com
 }
 
 /// CancelOrder payload (10 bytes): OrderId(8) + SymbolId(2)
-fn decode_cancel_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Command, DecodeError> {
+fn decode_cancel_order(
+    payload: &[u8],
+    clock: &dyn me_clock::Clock,
+) -> Result<Command, DecodeError> {
     if payload.len() < 10 {
         return Err(DecodeError::InvalidPayload("CancelOrder too short".into()));
     }
@@ -747,7 +755,13 @@ fn encode_event(event: &MatchEvent, seq: u64, request_id: u64, buf: &mut BytesMu
             price,
             timestamp,
         } => {
-            write_header(buf, 40, MessageType::OrderPartiallyFilled as u8, seq, request_id);
+            write_header(
+                buf,
+                40,
+                MessageType::OrderPartiallyFilled as u8,
+                seq,
+                request_id,
+            );
             buf.put_u64_le(*order_id);
             buf.put_u64_le(filled_qty.raw());
             buf.put_u64_le(remaining_qty.raw());
@@ -894,12 +908,7 @@ pub fn encode_open_orders_begin(
 
 /// Encode an OpenOrdersEnd frame — marks end of snapshot response.
 /// Payload: snapshot_seq(8) = 8 bytes
-pub fn encode_open_orders_end(
-    seq: u64,
-    request_id: u64,
-    snapshot_seq: u64,
-    buf: &mut BytesMut,
-) {
+pub fn encode_open_orders_end(seq: u64, request_id: u64, snapshot_seq: u64, buf: &mut BytesMut) {
     write_header(buf, 8, MessageType::OpenOrdersEnd as u8, seq, request_id);
     buf.put_u64_le(snapshot_seq);
 }

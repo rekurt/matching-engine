@@ -242,9 +242,7 @@ impl SessionEntry {
         // with a last_recv_seq lower than last_acked_server_seq. We still
         // detect that gap defensively — frames that were ACKed-then-purged
         // are gone, and the client needs to resync via GetOpenOrders.
-        let gap_boundary = self
-            .highest_evicted_seq
-            .max(self.last_acked_server_seq);
+        let gap_boundary = self.highest_evicted_seq.max(self.last_acked_server_seq);
         if gap_boundary > 0 && last_received < gap_boundary {
             return ReplayResult::Gap {
                 missing_from: last_received + 1,
@@ -338,7 +336,12 @@ impl SessionStore {
     /// and grows adaptively up to `capacity`. Once `capacity` is reached,
     /// oldest frames are evicted to make room (slow-consumer behavior).
     pub fn new(capacity: usize, ttl: Duration) -> Self {
-        Self::new_adaptive(capacity.min(DEFAULT_BUFFER_MIN), capacity, DEFAULT_DEDUP_MAX, ttl)
+        Self::new_adaptive(
+            capacity.min(DEFAULT_BUFFER_MIN),
+            capacity,
+            DEFAULT_DEDUP_MAX,
+            ttl,
+        )
     }
 
     /// Create a new store with custom MAX capacity and dedup table size.
@@ -361,12 +364,8 @@ impl SessionStore {
         dedup_max: usize,
         ttl: Duration,
     ) -> Self {
-        assert!(
-            buffer_min <= buffer_max,
-            "buffer_min must be <= buffer_max"
-        );
-        let shards: [Shard; NUM_SHARDS] =
-            std::array::from_fn(|_| Mutex::new(FxHashMap::default()));
+        assert!(buffer_min <= buffer_max, "buffer_min must be <= buffer_max");
+        let shards: [Shard; NUM_SHARDS] = std::array::from_fn(|_| Mutex::new(FxHashMap::default()));
         Self {
             shards: Arc::new(shards),
             buffer_min,

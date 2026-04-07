@@ -23,10 +23,7 @@ pub enum AuditEvent {
         tif: u8,
     },
     /// Order accepted by matching engine.
-    OrderAccepted {
-        timestamp_ns: u64,
-        order_id: u64,
-    },
+    OrderAccepted { timestamp_ns: u64, order_id: u64 },
     /// Order rejected.
     OrderRejected {
         timestamp_ns: u64,
@@ -88,10 +85,7 @@ pub enum AuditEvent {
         reason: u8,
     },
     /// Trading resumed.
-    TradingResumed {
-        timestamp_ns: u64,
-        symbol_id: u16,
-    },
+    TradingResumed { timestamp_ns: u64, symbol_id: u16 },
 }
 
 // ─── Fixed-size entry for SPSC ring buffer (zero-alloc hot path) ────────────
