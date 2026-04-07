@@ -583,14 +583,18 @@ fn shard_worker_loop(
                 }
 
                 // 1. Pre-trade risk check (PlaceOrder only)
-                let risk_rejected = match &cmd {
-                    Command::PlaceOrder(order) => {
-                        if let Some(ref a) = audit {
-                            a.log_entry(order_to_entry(order));
+                let risk_rejected = if wal_pre_write_failed {
+                    false
+                } else {
+                    match &cmd {
+                        Command::PlaceOrder(order) => {
+                            if let Some(ref a) = audit {
+                                a.log_entry(order_to_entry(order));
+                            }
+                            risk.check_order(order).is_err()
                         }
-                        risk.check_order(order).is_err()
+                        _ => false,
                     }
-                    _ => false,
                 };
 
                 let events = if wal_pre_write_failed {

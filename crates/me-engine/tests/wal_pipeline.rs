@@ -3,6 +3,7 @@ use me_core::events::MatchEvent;
 use me_core::order::{Order, TimeInForce};
 use me_core::symbol::SymbolConfig;
 use me_core::types::*;
+use me_core::RejectReason;
 use me_engine::command::Command;
 use me_engine::router::{Router, WalConfig, WalMode};
 use me_persist::wal::{WalReader, WalCommand};
@@ -86,6 +87,46 @@ fn test_wal_pre_mode_writes_before_matching() {
         WalCommand::CancelOrder { order_id, .. } => assert_eq!(*order_id, 999),
         _ => panic!("Expected CancelOrder"),
     }
+}
+
+#[test]
+fn test_wal_pre_mode_open_failure_rejects_and_preserves_state() {
+    let base_dir = temp_wal_dir("pre_mode_open_failure");
+    let blocked_parent = std::path::Path::new(&base_dir).join("blocked_parent");
+    std::fs::write(&blocked_parent, b"not-a-directory").unwrap();
+
+    let wal_cfg = WalConfig {
+        mode: WalMode::Pre,
+        path: blocked_parent.to_string_lossy().into_owned(),
+        sync_interval: 1,
+    };
+
+    let mut router = Router::new_with_wal(1, None, None, wal_cfg);
+    router.add_symbol(btc_config());
+
+    let events = router.process(limit_buy(1, 100.0, 1.0));
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            MatchEvent::OrderRejected {
+                order_id: 1,
+                reason: RejectReason::InternalError,
+                ..
+            }
+        )),
+        "command must be rejected when pre-mode WAL writer is unavailable"
+    );
+
+    let order_status = router.query_order(1, SymbolId(0));
+    assert!(
+        order_status.iter().any(|e| matches!(
+            e,
+            MatchEvent::OrderNotFound { order_id: 1 }
+        )),
+        "rejected order must not be present in the order book"
+    );
+
+    router.shutdown();
 }
 
 #[test]
