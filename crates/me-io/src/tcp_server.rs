@@ -13,9 +13,8 @@ use me_metrics::EngineMetrics;
 
 use crate::codec::{self, ConnectionCodecState, DecodedFrame};
 use crate::protocol::{
-    ConnectionState, ErrorCode, CAP_BATCH_ORDERS, CAP_EXACTLY_ONCE, CAP_HEARTBEAT,
-    CAP_ORDER_FLAGS, CAP_ORDER_QUERY, CAP_SESSION_RECOVERY, CAP_SNAPSHOT, MAX_WRITE_BUFFER_SIZE,
-    PROTOCOL_VERSION,
+    ConnectionState, ErrorCode, CAP_BATCH_ORDERS, CAP_EXACTLY_ONCE, CAP_HEARTBEAT, CAP_ORDER_FLAGS,
+    CAP_ORDER_QUERY, CAP_SESSION_RECOVERY, CAP_SNAPSHOT, MAX_WRITE_BUFFER_SIZE, PROTOCOL_VERSION,
 };
 use crate::session_store::SessionStore;
 
@@ -52,10 +51,7 @@ impl TcpServer {
         )
     }
 
-    pub fn new_with_metrics(
-        router: Arc<Router>,
-        metrics: Option<Arc<EngineMetrics>>,
-    ) -> Self {
+    pub fn new_with_metrics(router: Arc<Router>, metrics: Option<Arc<EngineMetrics>>) -> Self {
         Self::new_with_config(
             router,
             metrics,

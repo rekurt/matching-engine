@@ -92,9 +92,13 @@ fn bench_risk_check(c: &mut Criterion) {
             let start = std::time::Instant::now();
             for i in 0..iters {
                 let order = Order::new_limit(
-                    i + 1, SymbolId(0), Side::Buy, TimeInForce::GTC,
+                    i + 1,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
                     FixedPrice::from_raw(BASE_PRICE - TICK),
-                    FixedQty::from_raw(ONE_BTC), i,
+                    FixedQty::from_raw(ONE_BTC),
+                    i,
                 );
                 let _ = risk.check_order(&order);
             }
@@ -114,9 +118,13 @@ fn bench_risk_check(c: &mut Criterion) {
             let start = std::time::Instant::now();
             for i in 0..iters {
                 let order = Order::new_limit(
-                    i + 1, SymbolId(0), Side::Buy, TimeInForce::GTC,
+                    i + 1,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
                     FixedPrice::from_raw(BASE_PRICE),
-                    FixedQty::from_raw(ONE_BTC * 100), i,
+                    FixedQty::from_raw(ONE_BTC * 100),
+                    i,
                 );
                 let _ = risk.check_order(&order);
             }
@@ -140,17 +148,26 @@ fn bench_audit_comparison(c: &mut Criterion) {
         b.iter_custom(|iters| {
             let logger = AuditLogger::new(true);
             let events = vec![
-                MatchEvent::OrderAccepted { order_id: 1, timestamp: 1000 },
+                MatchEvent::OrderAccepted {
+                    order_id: 1,
+                    timestamp: 1000,
+                },
                 MatchEvent::Trade(me_core::trade::Trade {
-                    trade_id: 1, symbol: SymbolId(0),
+                    trade_id: 1,
+                    symbol: SymbolId(0),
                     price: FixedPrice::from_raw(BASE_PRICE),
                     qty: FixedQty::from_raw(ONE_BTC),
-                    maker_order_id: 1, taker_order_id: 2,
-                    maker_side: Side::Sell, timestamp: 1000, sequence: 0,
+                    maker_order_id: 1,
+                    taker_order_id: 2,
+                    maker_side: Side::Sell,
+                    timestamp: 1000,
+                    sequence: 0,
                 }),
                 MatchEvent::OrderFilled {
-                    order_id: 2, filled_qty: FixedQty::from_raw(ONE_BTC),
-                    price: FixedPrice::from_raw(BASE_PRICE), timestamp: 1000,
+                    order_id: 2,
+                    filled_qty: FixedQty::from_raw(ONE_BTC),
+                    price: FixedPrice::from_raw(BASE_PRICE),
+                    timestamp: 1000,
                 },
             ];
             let start = std::time::Instant::now();
@@ -166,17 +183,26 @@ fn bench_audit_comparison(c: &mut Criterion) {
         b.iter_custom(|iters| {
             let logger = AsyncAuditLogger::new(65536, AuditFormat::Json);
             let events = vec![
-                MatchEvent::OrderAccepted { order_id: 1, timestamp: 1000 },
+                MatchEvent::OrderAccepted {
+                    order_id: 1,
+                    timestamp: 1000,
+                },
                 MatchEvent::Trade(me_core::trade::Trade {
-                    trade_id: 1, symbol: SymbolId(0),
+                    trade_id: 1,
+                    symbol: SymbolId(0),
                     price: FixedPrice::from_raw(BASE_PRICE),
                     qty: FixedQty::from_raw(ONE_BTC),
-                    maker_order_id: 1, taker_order_id: 2,
-                    maker_side: Side::Sell, timestamp: 1000, sequence: 0,
+                    maker_order_id: 1,
+                    taker_order_id: 2,
+                    maker_side: Side::Sell,
+                    timestamp: 1000,
+                    sequence: 0,
                 }),
                 MatchEvent::OrderFilled {
-                    order_id: 2, filled_qty: FixedQty::from_raw(ONE_BTC),
-                    price: FixedPrice::from_raw(BASE_PRICE), timestamp: 1000,
+                    order_id: 2,
+                    filled_qty: FixedQty::from_raw(ONE_BTC),
+                    price: FixedPrice::from_raw(BASE_PRICE),
+                    timestamp: 1000,
                 },
             ];
             let start = std::time::Instant::now();
@@ -195,7 +221,10 @@ fn bench_audit_comparison(c: &mut Criterion) {
     group.bench_function("disabled", |b| {
         b.iter_custom(|iters| {
             let logger = AuditLogger::new(false);
-            let events = vec![MatchEvent::OrderAccepted { order_id: 1, timestamp: 1000 }];
+            let events = vec![MatchEvent::OrderAccepted {
+                order_id: 1,
+                timestamp: 1000,
+            }];
             let start = std::time::Instant::now();
             for _ in 0..iters {
                 logger.log_match_events(&events, SymbolId(0));
@@ -220,8 +249,13 @@ fn bench_wal_write(c: &mut Criterion) {
             let path = temp_wal_path("bench_buffered");
             let mut wal = WalWriter::open(&path, u64::MAX).unwrap(); // never auto-flush
             let order = Order::new_limit(
-                1, SymbolId(0), Side::Buy, TimeInForce::GTC,
-                FixedPrice::from_raw(BASE_PRICE), FixedQty::from_raw(ONE_BTC), 0,
+                1,
+                SymbolId(0),
+                Side::Buy,
+                TimeInForce::GTC,
+                FixedPrice::from_raw(BASE_PRICE),
+                FixedQty::from_raw(ONE_BTC),
+                0,
             );
             let cmd = WalCommand::PlaceOrder(order);
 
@@ -239,8 +273,13 @@ fn bench_wal_write(c: &mut Criterion) {
             let path = temp_wal_path("bench_fsync");
             let mut wal = WalWriter::open(&path, 1).unwrap(); // fsync every write
             let order = Order::new_limit(
-                1, SymbolId(0), Side::Buy, TimeInForce::GTC,
-                FixedPrice::from_raw(BASE_PRICE), FixedQty::from_raw(ONE_BTC), 0,
+                1,
+                SymbolId(0),
+                Side::Buy,
+                TimeInForce::GTC,
+                FixedPrice::from_raw(BASE_PRICE),
+                FixedQty::from_raw(ONE_BTC),
+                0,
             );
             let cmd = WalCommand::PlaceOrder(order);
 
@@ -258,8 +297,13 @@ fn bench_wal_write(c: &mut Criterion) {
             let path = temp_wal_path("bench_batch");
             let mut wal = WalWriter::open(&path, 100).unwrap();
             let order = Order::new_limit(
-                1, SymbolId(0), Side::Buy, TimeInForce::GTC,
-                FixedPrice::from_raw(BASE_PRICE), FixedQty::from_raw(ONE_BTC), 0,
+                1,
+                SymbolId(0),
+                Side::Buy,
+                TimeInForce::GTC,
+                FixedPrice::from_raw(BASE_PRICE),
+                FixedQty::from_raw(ONE_BTC),
+                0,
             );
             let cmd = WalCommand::PlaceOrder(order);
 
@@ -288,16 +332,26 @@ fn bench_pipeline_breakdown(c: &mut Criterion) {
             let mut engine = fresh_engine();
             for i in 0..iters {
                 let ask = Order::new_limit(
-                    i * 2 + 1, SymbolId(0), Side::Sell, TimeInForce::GTC,
-                    FixedPrice::from_raw(BASE_PRICE), FixedQty::from_raw(ONE_BTC), 0,
+                    i * 2 + 1,
+                    SymbolId(0),
+                    Side::Sell,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE),
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
                 );
                 engine.process(Command::PlaceOrder(ask));
             }
             let start = std::time::Instant::now();
             for i in 0..iters {
                 let buy = Order::new_limit(
-                    i * 2 + 2, SymbolId(0), Side::Buy, TimeInForce::GTC,
-                    FixedPrice::from_raw(BASE_PRICE), FixedQty::from_raw(ONE_BTC), 0,
+                    i * 2 + 2,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE),
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
                 );
                 engine.process(Command::PlaceOrder(buy));
             }
@@ -312,16 +366,26 @@ fn bench_pipeline_breakdown(c: &mut Criterion) {
             let mut risk = risk_engine_for_bench();
             for i in 0..iters {
                 let ask = Order::new_limit(
-                    i * 2 + 1, SymbolId(0), Side::Sell, TimeInForce::GTC,
-                    FixedPrice::from_raw(BASE_PRICE), FixedQty::from_raw(ONE_BTC), 0,
+                    i * 2 + 1,
+                    SymbolId(0),
+                    Side::Sell,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE),
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
                 );
                 engine.process(Command::PlaceOrder(ask));
             }
             let start = std::time::Instant::now();
             for i in 0..iters {
                 let order = Order::new_limit(
-                    i * 2 + 2, SymbolId(0), Side::Buy, TimeInForce::GTC,
-                    FixedPrice::from_raw(BASE_PRICE), FixedQty::from_raw(ONE_BTC), i,
+                    i * 2 + 2,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE),
+                    FixedQty::from_raw(ONE_BTC),
+                    i,
                 );
                 let _ = risk.check_order(&order);
                 engine.process(Command::PlaceOrder(order));
@@ -338,16 +402,26 @@ fn bench_pipeline_breakdown(c: &mut Criterion) {
             let audit = AsyncAuditLogger::new(65536, AuditFormat::Json);
             for i in 0..iters {
                 let ask = Order::new_limit(
-                    i * 2 + 1, SymbolId(0), Side::Sell, TimeInForce::GTC,
-                    FixedPrice::from_raw(BASE_PRICE), FixedQty::from_raw(ONE_BTC), 0,
+                    i * 2 + 1,
+                    SymbolId(0),
+                    Side::Sell,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE),
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
                 );
                 engine.process(Command::PlaceOrder(ask));
             }
             let start = std::time::Instant::now();
             for i in 0..iters {
                 let order = Order::new_limit(
-                    i * 2 + 2, SymbolId(0), Side::Buy, TimeInForce::GTC,
-                    FixedPrice::from_raw(BASE_PRICE), FixedQty::from_raw(ONE_BTC), i,
+                    i * 2 + 2,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE),
+                    FixedQty::from_raw(ONE_BTC),
+                    i,
                 );
                 audit.log_entry(order_to_entry(&order));
                 let _ = risk.check_order(&order);
@@ -373,16 +447,26 @@ fn bench_pipeline_breakdown(c: &mut Criterion) {
 
             for i in 0..iters {
                 let ask = Order::new_limit(
-                    i * 2 + 1, SymbolId(0), Side::Sell, TimeInForce::GTC,
-                    FixedPrice::from_raw(BASE_PRICE), FixedQty::from_raw(ONE_BTC), 0,
+                    i * 2 + 1,
+                    SymbolId(0),
+                    Side::Sell,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE),
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
                 );
                 engine.process(Command::PlaceOrder(ask));
             }
             let start = std::time::Instant::now();
             for i in 0..iters {
                 let order = Order::new_limit(
-                    i * 2 + 2, SymbolId(0), Side::Buy, TimeInForce::GTC,
-                    FixedPrice::from_raw(BASE_PRICE), FixedQty::from_raw(ONE_BTC), i,
+                    i * 2 + 2,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE),
+                    FixedQty::from_raw(ONE_BTC),
+                    i,
                 );
                 // WAL pre-write
                 let _ = wal.append(&WalCommand::PlaceOrder(order));
@@ -411,16 +495,26 @@ fn bench_pipeline_breakdown(c: &mut Criterion) {
             let logger = AuditLogger::new(true);
             for i in 0..iters {
                 let ask = Order::new_limit(
-                    i * 2 + 1, SymbolId(0), Side::Sell, TimeInForce::GTC,
-                    FixedPrice::from_raw(BASE_PRICE), FixedQty::from_raw(ONE_BTC), 0,
+                    i * 2 + 1,
+                    SymbolId(0),
+                    Side::Sell,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE),
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
                 );
                 engine.process(Command::PlaceOrder(ask));
             }
             let start = std::time::Instant::now();
             for i in 0..iters {
                 let order = Order::new_limit(
-                    i * 2 + 2, SymbolId(0), Side::Buy, TimeInForce::GTC,
-                    FixedPrice::from_raw(BASE_PRICE), FixedQty::from_raw(ONE_BTC), i,
+                    i * 2 + 2,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE),
+                    FixedQty::from_raw(ONE_BTC),
+                    i,
                 );
                 let _ = risk.check_order(&order);
                 logger.log_order_submitted(&order);
@@ -452,9 +546,13 @@ fn bench_hft_scenarios(c: &mut Criterion) {
             // Populate asks
             for i in 0..100u64 {
                 let ask = Order::new_limit(
-                    i + 1, SymbolId(0), Side::Sell, TimeInForce::GTC,
+                    i + 1,
+                    SymbolId(0),
+                    Side::Sell,
+                    TimeInForce::GTC,
                     FixedPrice::from_raw(BASE_PRICE + (i as i64 + 1) * TICK),
-                    FixedQty::from_raw(ONE_BTC), 0,
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
                 );
                 engine.process(Command::PlaceOrder(ask));
             }
@@ -462,9 +560,13 @@ fn bench_hft_scenarios(c: &mut Criterion) {
             // Place initial bid
             let mut bid_id = 10_000u64;
             let initial = Order::new_limit(
-                bid_id, SymbolId(0), Side::Buy, TimeInForce::GTC,
+                bid_id,
+                SymbolId(0),
+                Side::Buy,
+                TimeInForce::GTC,
                 FixedPrice::from_raw(BASE_PRICE - TICK),
-                FixedQty::from_raw(ONE_BTC), 0,
+                FixedQty::from_raw(ONE_BTC),
+                0,
             );
             engine.process(Command::PlaceOrder(initial));
 
@@ -472,7 +574,9 @@ fn bench_hft_scenarios(c: &mut Criterion) {
             for i in 0..iters {
                 // Cancel
                 let cancel_events = engine.process(Command::CancelOrder {
-                    order_id: bid_id, symbol: SymbolId(0), timestamp: i,
+                    order_id: bid_id,
+                    symbol: SymbolId(0),
+                    timestamp: i,
                 });
                 for event in cancel_events {
                     if let Some(entry) = match_event_to_entry(event, SymbolId(0)) {
@@ -483,9 +587,13 @@ fn bench_hft_scenarios(c: &mut Criterion) {
                 // Place new bid
                 bid_id += 1;
                 let order = Order::new_limit(
-                    bid_id, SymbolId(0), Side::Buy, TimeInForce::GTC,
+                    bid_id,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
                     FixedPrice::from_raw(BASE_PRICE - ((i % 5) as i64 + 1) * TICK),
-                    FixedQty::from_raw(ONE_BTC), i,
+                    FixedQty::from_raw(ONE_BTC),
+                    i,
                 );
                 let _ = risk.check_order(&order);
                 audit.log_entry(order_to_entry(&order));
@@ -509,8 +617,13 @@ fn bench_hft_scenarios(c: &mut Criterion) {
 
             for i in 0..iters {
                 let ask = Order::new_limit(
-                    i * 2 + 1, SymbolId(0), Side::Sell, TimeInForce::GTC,
-                    FixedPrice::from_raw(BASE_PRICE), FixedQty::from_raw(ONE_BTC), 0,
+                    i * 2 + 1,
+                    SymbolId(0),
+                    Side::Sell,
+                    TimeInForce::GTC,
+                    FixedPrice::from_raw(BASE_PRICE),
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
                 );
                 engine.process(Command::PlaceOrder(ask));
             }
@@ -518,8 +631,12 @@ fn bench_hft_scenarios(c: &mut Criterion) {
             let start = std::time::Instant::now();
             for i in 0..iters {
                 let order = Order::new_market(
-                    i * 2 + 2, SymbolId(0), Side::Buy, TimeInForce::GTC,
-                    FixedQty::from_raw(ONE_BTC), i,
+                    i * 2 + 2,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
+                    FixedQty::from_raw(ONE_BTC),
+                    i,
                 );
                 let _ = risk.check_order(&order);
                 let events = engine.process(Command::PlaceOrder(order));
@@ -542,9 +659,13 @@ fn bench_hft_scenarios(c: &mut Criterion) {
 
             for i in 0..iters {
                 let ask = Order::new_limit(
-                    i * 2 + 1, SymbolId(0), Side::Sell, TimeInForce::GTC,
+                    i * 2 + 1,
+                    SymbolId(0),
+                    Side::Sell,
+                    TimeInForce::GTC,
                     FixedPrice::from_raw(BASE_PRICE),
-                    FixedQty::from_raw(ONE_BTC / 2), 0, // 0.5 BTC
+                    FixedQty::from_raw(ONE_BTC / 2),
+                    0, // 0.5 BTC
                 );
                 engine.process(Command::PlaceOrder(ask));
             }
@@ -552,9 +673,13 @@ fn bench_hft_scenarios(c: &mut Criterion) {
             let start = std::time::Instant::now();
             for i in 0..iters {
                 let order = Order::new_limit(
-                    i * 2 + 2, SymbolId(0), Side::Buy, TimeInForce::IOC,
+                    i * 2 + 2,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::IOC,
                     FixedPrice::from_raw(BASE_PRICE),
-                    FixedQty::from_raw(ONE_BTC), i, // wants 1, gets 0.5
+                    FixedQty::from_raw(ONE_BTC),
+                    i, // wants 1, gets 0.5
                 );
                 let _ = risk.check_order(&order);
                 let events = engine.process(Command::PlaceOrder(order));
@@ -589,9 +714,13 @@ fn bench_throughput_full_pipeline(c: &mut Criterion) {
             // Pre-populate asks
             for i in 0..100u64 {
                 let ask = Order::new_limit(
-                    i + 1, SymbolId(0), Side::Sell, TimeInForce::GTC,
+                    i + 1,
+                    SymbolId(0),
+                    Side::Sell,
+                    TimeInForce::GTC,
                     FixedPrice::from_raw(BASE_PRICE + (i as i64 + 1) * TICK),
-                    FixedQty::from_raw(ONE_BTC), 0,
+                    FixedQty::from_raw(ONE_BTC),
+                    0,
                 );
                 engine.process(Command::PlaceOrder(ask));
             }
@@ -599,9 +728,13 @@ fn bench_throughput_full_pipeline(c: &mut Criterion) {
             let start = std::time::Instant::now();
             for i in 0..iters {
                 let order = Order::new_limit(
-                    1000 + i, SymbolId(0), Side::Buy, TimeInForce::GTC,
+                    1000 + i,
+                    SymbolId(0),
+                    Side::Buy,
+                    TimeInForce::GTC,
                     FixedPrice::from_raw(BASE_PRICE - 100 * TICK),
-                    FixedQty::from_raw(ONE_BTC), i,
+                    FixedQty::from_raw(ONE_BTC),
+                    i,
                 );
                 let _ = risk.check_order(&order);
                 audit.log_entry(order_to_entry(&order));

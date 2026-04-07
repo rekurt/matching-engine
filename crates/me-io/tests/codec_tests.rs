@@ -31,12 +31,7 @@ fn make_frame(msg_type: u8, seq: u64, payload: &[u8]) -> Vec<u8> {
     make_frame_with_req_id(msg_type, seq, default_request_id(msg_type), payload)
 }
 
-fn make_frame_with_req_id(
-    msg_type: u8,
-    seq: u64,
-    request_id: u64,
-    payload: &[u8],
-) -> Vec<u8> {
+fn make_frame_with_req_id(msg_type: u8, seq: u64, request_id: u64, payload: &[u8]) -> Vec<u8> {
     let len = payload.len() as u32;
     let mut buf = Vec::with_capacity(FRAME_HEADER_SIZE + payload.len());
     buf.extend_from_slice(&len.to_le_bytes());

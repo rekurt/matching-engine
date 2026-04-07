@@ -22,8 +22,7 @@ pub fn pin_to_core(core_id: usize) {
         if core_id >= cpu_set_size {
             warn!(
                 core_id,
-                cpu_set_size,
-                "skipping thread pinning: core_id exceeds cpu_set_t capacity"
+                cpu_set_size, "skipping thread pinning: core_id exceeds cpu_set_t capacity"
             );
             return;
         }
@@ -31,7 +30,8 @@ pub fn pin_to_core(core_id: usize) {
         unsafe {
             let mut cpuset: libc::cpu_set_t = std::mem::zeroed();
             libc::CPU_SET(core_id, &mut cpuset);
-            let result = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpuset);
+            let result =
+                libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpuset);
             if result == 0 {
                 debug!(core_id, "thread pinned to core");
             } else {
@@ -42,7 +42,10 @@ pub fn pin_to_core(core_id: usize) {
 
     #[cfg(not(target_os = "linux"))]
     {
-        debug!(core_id, "thread pinning not supported on this platform (no-op)");
+        debug!(
+            core_id,
+            "thread pinning not supported on this platform (no-op)"
+        );
     }
 }
 

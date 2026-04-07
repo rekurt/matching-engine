@@ -471,7 +471,6 @@ impl Router {
             }
         }
     }
-
 }
 
 // ─── Shard worker loop (hot path) ───────────────────────────────────────────
@@ -629,7 +628,6 @@ fn shard_worker_loop(
                     Command::PlaceOrder(order) => Some(order.id),
                     _ => None,
                 };
-
 
                 let events = if wal_pre_write_failed {
                     // Pre-mode WAL guarantee broken — reject without matching.
