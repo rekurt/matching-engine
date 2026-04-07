@@ -13,11 +13,23 @@
 ## Команды
 
 ```bash
+make setup                       # первый раз после клона — активирует pre-commit hook
 cargo build --release            # сборка
 cargo test --workspace           # все тесты
 cargo clippy --workspace --all-targets -- -D warnings   # линтер (0 предупреждений)
 cargo audit                      # проверка CVE
 ```
+
+## Pre-commit hook
+
+Расположен в `.githooks/pre-commit`, активируется через `make setup` (или `git config core.hooksPath .githooks`).
+
+Проверяет (fast-fail):
+1. Отсутствие merge conflict markers (`<<<<<<<`) в staged файлах
+2. `cargo fmt --check` — форматирование
+3. `cargo clippy --workspace --all-targets -- -D warnings` — линтер
+
+Для WIP-коммитов: `git commit --no-verify`.
 
 ## Архитектура тестов
 

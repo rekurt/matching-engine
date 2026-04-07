@@ -1,4 +1,4 @@
-.PHONY: build build-release build-tls test test-all bench bench-latency bench-throughput bench-e2e bench-stress fuzz-codec fuzz-codec-install lint fmt fmt-check doc clean run run-release docker docker-push help
+.PHONY: setup build build-release build-tls test test-all bench bench-latency bench-throughput bench-e2e bench-stress fuzz-codec fuzz-codec-install lint fmt fmt-check doc clean run run-release docker docker-push help
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -7,6 +7,12 @@ DOCKER_IMAGE  ?= matching-engine
 DOCKER_TAG    ?= latest
 TCP_ADDR      ?= 0.0.0.0:2090
 CONFIG        ?= config.toml
+
+# ─── Developer setup (run once after clone) ───────────────────────────────────
+
+setup:
+	git config core.hooksPath .githooks
+	@echo "Pre-commit hook activated (.githooks/pre-commit)"
 
 # ─── Build ────────────────────────────────────────────────────────────────────
 
