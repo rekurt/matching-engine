@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{bounded, Receiver, Sender};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, info_span, trace};
 
 use me_audit::async_logger::AsyncAuditLogger;
@@ -142,7 +142,13 @@ impl Router {
         audit: Option<Arc<AsyncAuditLogger>>,
         wal_config: Option<WalConfig>,
     ) -> Self {
-        Self::build_with_affinity(num_shards, metrics, audit, wal_config, AffinityConfig::default())
+        Self::build_with_affinity(
+            num_shards,
+            metrics,
+            audit,
+            wal_config,
+            AffinityConfig::default(),
+        )
     }
 
     fn build_with_affinity(
@@ -222,10 +228,10 @@ impl Router {
         self.symbol_names
             .insert(id, format!("{}/{}", config.base, config.quote));
         self.symbol_to_shard.insert(id, shard_idx);
-        if let Err(e) = self.shards[shard_idx]
-            .tx
-            .send(ShardMsg::AddSymbol { config, risk_config })
-        {
+        if let Err(e) = self.shards[shard_idx].tx.send(ShardMsg::AddSymbol {
+            config,
+            risk_config,
+        }) {
             panic!(
                 "Router::add_symbol failed for symbol {id:?}: shard {shard_idx} is dead ({e}). \
                  This is a startup error; aborting to avoid a subtly broken server."
@@ -320,7 +326,10 @@ impl Router {
         let Some(&shard_idx) = self.symbol_to_shard.get(&symbol) else {
             return false;
         };
-        if let Err(e) = self.shards[shard_idx].tx.send(ShardMsg::ResumeSymbol(symbol)) {
+        if let Err(e) = self.shards[shard_idx]
+            .tx
+            .send(ShardMsg::ResumeSymbol(symbol))
+        {
             tracing::error!(
                 shard_idx,
                 symbol = ?symbol,
@@ -409,11 +418,10 @@ impl Router {
                 })
                 .is_err()
             {
-                tracing::error!(
-                    shard_idx,
-                    "OpenOrders snapshot ABORTED: shard dead"
-                );
-                return Err(format!("shard {shard_idx} dead: cannot build complete snapshot"));
+                tracing::error!(shard_idx, "OpenOrders snapshot ABORTED: shard dead");
+                return Err(format!(
+                    "shard {shard_idx} dead: cannot build complete snapshot"
+                ));
             }
             replies.push(rx);
         }
@@ -463,7 +471,6 @@ impl Router {
             }
         }
     }
-
 }
 
 // ─── Shard worker loop (hot path) ───────────────────────────────────────────
@@ -481,7 +488,9 @@ fn shard_worker_loop(
     let mut risk: RiskEngine = RiskEngine::new();
 
     // Initialize WAL if configured
-    let wal_mode = wal_config.as_ref().map_or(WalMode::Disabled, |c| c.mode.clone());
+    let wal_mode = wal_config
+        .as_ref()
+        .map_or(WalMode::Disabled, |c| c.mode.clone());
     let mut wal: Option<WalWriter> = wal_config.and_then(|cfg| {
         if cfg.mode == WalMode::Disabled {
             return None;
@@ -615,12 +624,25 @@ fn shard_worker_loop(
                     }
                 };
 
+                let incoming_order_id = match &cmd {
+                    Command::PlaceOrder(order) => Some(order.id),
+                    _ => None,
+                };
+
                 let events = if wal_pre_write_failed {
                     // Pre-mode WAL guarantee broken — reject without matching.
                     let (order_id, ts) = match &cmd {
                         Command::PlaceOrder(o) => (o.id, o.timestamp),
-                        Command::CancelOrder { order_id, timestamp, .. }
-                        | Command::AmendOrder { order_id, timestamp, .. } => (*order_id, *timestamp),
+                        Command::CancelOrder {
+                            order_id,
+                            timestamp,
+                            ..
+                        }
+                        | Command::AmendOrder {
+                            order_id,
+                            timestamp,
+                            ..
+                        } => (*order_id, *timestamp),
                     };
                     vec![MatchEvent::OrderRejected {
                         order_id,
@@ -642,13 +664,28 @@ fn shard_worker_loop(
                     let events = engine.process(cmd).to_vec();
 
                     // 3. Post-trade risk state updates
+                    let triggered_order_ids: FxHashSet<_> = events
+                        .iter()
+                        .filter_map(|event| match event {
+                            MatchEvent::StopTriggered { order_id, .. } => Some(*order_id),
+                            _ => None,
+                        })
+                        .collect();
+
                     for event in &events {
                         match event {
-                            MatchEvent::OrderAccepted { .. } => {
-                                risk.on_order_added(symbol);
+                            MatchEvent::OrderAccepted { order_id, .. } => {
+                                // Stop orders are accepted once when inserted into stop_book,
+                                // then accepted again when triggered into the live book.
+                                // Count only the original client order acceptance (current cmd)
+                                // and skip synthetic acceptances produced by stop triggers.
+                                if Some(*order_id) == incoming_order_id
+                                    && !triggered_order_ids.contains(order_id)
+                                {
+                                    risk.on_order_added(symbol);
+                                }
                             }
-                            MatchEvent::OrderFilled { .. }
-                            | MatchEvent::OrderCancelled { .. } => {
+                            MatchEvent::OrderFilled { .. } | MatchEvent::OrderCancelled { .. } => {
                                 risk.on_order_removed(symbol);
                             }
                             MatchEvent::Trade(t) => {
@@ -943,7 +980,9 @@ mod dead_shard_tests {
         let events = router.process(place_order_cmd(1, SymbolId(0)));
         assert_eq!(events.len(), 1);
         match &events[0] {
-            MatchEvent::OrderRejected { reason, order_id, .. } => {
+            MatchEvent::OrderRejected {
+                reason, order_id, ..
+            } => {
                 assert_eq!(*order_id, 1);
                 assert_eq!(
                     *reason,
@@ -964,7 +1003,9 @@ mod dead_shard_tests {
         let events = router.query_order(42, SymbolId(0));
         assert_eq!(events.len(), 1);
         match &events[0] {
-            MatchEvent::OrderRejected { reason, order_id, .. } => {
+            MatchEvent::OrderRejected {
+                reason, order_id, ..
+            } => {
                 assert_eq!(*order_id, 42);
                 assert_eq!(*reason, RejectReason::InternalError);
             }
@@ -1063,7 +1104,11 @@ mod dead_shard_tests {
         router.process(stop_cmd);
 
         let snapshot = router.get_open_orders_by_session(session).unwrap();
-        assert_eq!(snapshot.len(), 2, "snapshot should include resting + stop orders");
+        assert_eq!(
+            snapshot.len(),
+            2,
+            "snapshot should include resting + stop orders"
+        );
         assert!(snapshot.iter().any(|o| o.id == 1));
         assert!(snapshot.iter().any(|o| o.id == 2 && o.is_stop()));
     }
