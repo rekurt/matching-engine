@@ -54,6 +54,13 @@ fn reset_to_reseeds_counter() {
 }
 
 #[test]
+#[should_panic(expected = "reset_to(0)")]
+fn reset_to_zero_panics() {
+    let mut seq = ServerFrameSeq::FIRST;
+    seq.reset_to(0);
+}
+
+#[test]
 fn default_equals_first() {
     let default = ServerFrameSeq::default();
     assert_eq!(

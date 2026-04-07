@@ -78,6 +78,10 @@ impl ServerFrameSeq {
     /// This is the ONLY way to rewrite the counter from outside.
     #[inline]
     pub fn reset_to(&mut self, next_seq: u64) {
+        assert!(
+            next_seq > 0,
+            "ServerFrameSeq::reset_to(0) violates seq>=1 invariant"
+        );
         self.0 = next_seq;
     }
 }
@@ -446,6 +450,10 @@ impl SessionStore {
     {
         loop {
             let id = id_source();
+            if id.is_none() {
+                tracing::warn!("SessionStore::create drew SessionId::NONE — retrying");
+                continue;
+            }
             let entry =
                 SessionEntry::new(self.buffer_min, self.buffer_max, self.dedup_max, self.ttl);
             let shard = self.shard_for(&id);
