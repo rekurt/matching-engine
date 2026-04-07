@@ -269,9 +269,9 @@ async fn main() {
 
     let router = Arc::new(router);
 
-    // Admin API key (None = no auth required)
+    // Admin API key (None = mutating admin endpoints disabled)
     let admin_api_key = if cfg.server.admin.api_key.is_empty() {
-        warn!("Admin API key not set — admin endpoints are UNPROTECTED");
+        warn!("Admin API key not set — mutating admin endpoints are DISABLED");
         None
     } else {
         info!("Admin API key configured — admin endpoints require X-Admin-Key header");
@@ -323,16 +323,25 @@ async fn main() {
     let metrics_addr = cfg.server.metrics_addr.clone();
     let app_state_clone = app_state.clone();
     tokio::spawn(async move {
-        // Admin routes with authentication middleware
-        let admin_routes = AxumRouter::new()
+        // Public admin status route
+        let mut app = AxumRouter::new()
             .route("/admin/status", get(status_handler))
-            .route("/admin/halt/{symbol_id}", post(halt_handler))
-            .route("/admin/resume/{symbol_id}", post(resume_handler))
-            .route_layer(middleware::from_fn_with_state(
-                app_state_clone.clone(),
-                admin_auth,
-            ))
             .with_state(app_state_clone.clone());
+
+        // Mutating admin routes are only exposed when an API key is configured.
+        if app_state_clone.admin_api_key.is_some() {
+            let protected_admin = AxumRouter::new()
+                .route("/admin/halt/{symbol_id}", post(halt_handler))
+                .route("/admin/resume/{symbol_id}", post(resume_handler))
+                .route_layer(middleware::from_fn_with_state(
+                    app_state_clone.clone(),
+                    admin_auth,
+                ))
+                .with_state(app_state_clone.clone());
+            app = app.merge(protected_admin);
+        } else {
+            warn!("Admin halt/resume routes are not registered because no admin API key is set");
+        }
 
         // Public routes (no auth)
         let public_routes = AxumRouter::new()
@@ -340,7 +349,7 @@ async fn main() {
             .route("/health", get(health_handler))
             .with_state(app_state_clone);
 
-        let app = public_routes.merge(admin_routes);
+        let app = public_routes.merge(app);
 
         let listener = tokio::net::TcpListener::bind(&metrics_addr).await.unwrap();
         info!(addr = %metrics_addr, "Metrics HTTP server listening");
