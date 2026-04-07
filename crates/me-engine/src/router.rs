@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{bounded, Receiver, Sender};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, info_span, trace};
 
 use me_audit::async_logger::AsyncAuditLogger;
@@ -142,7 +142,13 @@ impl Router {
         audit: Option<Arc<AsyncAuditLogger>>,
         wal_config: Option<WalConfig>,
     ) -> Self {
-        Self::build_with_affinity(num_shards, metrics, audit, wal_config, AffinityConfig::default())
+        Self::build_with_affinity(
+            num_shards,
+            metrics,
+            audit,
+            wal_config,
+            AffinityConfig::default(),
+        )
     }
 
     fn build_with_affinity(
@@ -222,10 +228,10 @@ impl Router {
         self.symbol_names
             .insert(id, format!("{}/{}", config.base, config.quote));
         self.symbol_to_shard.insert(id, shard_idx);
-        if let Err(e) = self.shards[shard_idx]
-            .tx
-            .send(ShardMsg::AddSymbol { config, risk_config })
-        {
+        if let Err(e) = self.shards[shard_idx].tx.send(ShardMsg::AddSymbol {
+            config,
+            risk_config,
+        }) {
             panic!(
                 "Router::add_symbol failed for symbol {id:?}: shard {shard_idx} is dead ({e}). \
                  This is a startup error; aborting to avoid a subtly broken server."
@@ -320,7 +326,10 @@ impl Router {
         let Some(&shard_idx) = self.symbol_to_shard.get(&symbol) else {
             return false;
         };
-        if let Err(e) = self.shards[shard_idx].tx.send(ShardMsg::ResumeSymbol(symbol)) {
+        if let Err(e) = self.shards[shard_idx]
+            .tx
+            .send(ShardMsg::ResumeSymbol(symbol))
+        {
             tracing::error!(
                 shard_idx,
                 symbol = ?symbol,
@@ -385,8 +394,16 @@ impl Router {
     /// have orders on multiple symbols) and collects the results. The caller
     /// blocks until all shards respond.
     ///
+    /// Returns `Err` if ANY shard is dead or fails to respond — an
+    /// incomplete snapshot MUST NOT be returned as authoritative state
+    /// during a post-gap resync, because clients would discard orders
+    /// that are still resting on the dead shard.
+    ///
     /// Used by protocol v2 GetOpenOrders handler for post-gap resync.
-    pub fn get_open_orders_by_session(&self, session_id: me_core::SessionId) -> Vec<me_core::order::Order> {
+    pub fn get_open_orders_by_session(
+        &self,
+        session_id: me_core::SessionId,
+    ) -> Result<Vec<me_core::order::Order>, String> {
         let mut all_orders = Vec::new();
         let mut replies = Vec::with_capacity(self.num_shards);
 
@@ -401,13 +418,10 @@ impl Router {
                 })
                 .is_err()
             {
-                // Shard dead — snapshot will be incomplete. Log loudly so
-                // operators know the client's resync may be missing orders.
-                tracing::error!(
-                    shard_idx,
-                    "OpenOrders snapshot incomplete: shard dead, skipping"
-                );
-                continue;
+                tracing::error!(shard_idx, "OpenOrders snapshot ABORTED: shard dead");
+                return Err(format!(
+                    "shard {shard_idx} dead: cannot build complete snapshot"
+                ));
             }
             replies.push(rx);
         }
@@ -419,12 +433,13 @@ impl Router {
                 Err(e) => {
                     tracing::error!(
                         error = %e,
-                        "OpenOrders snapshot incomplete: shard reply dropped"
+                        "OpenOrders snapshot ABORTED: shard reply dropped"
                     );
+                    return Err(format!("shard reply dropped: {e}"));
                 }
             }
         }
-        all_orders
+        Ok(all_orders)
     }
 
     /// Get the async audit logger (for external use if needed).
@@ -456,7 +471,6 @@ impl Router {
             }
         }
     }
-
 }
 
 // ─── Shard worker loop (hot path) ───────────────────────────────────────────
@@ -474,7 +488,9 @@ fn shard_worker_loop(
     let mut risk: RiskEngine = RiskEngine::new();
 
     // Initialize WAL if configured
-    let wal_mode = wal_config.as_ref().map_or(WalMode::Disabled, |c| c.mode.clone());
+    let wal_mode = wal_config
+        .as_ref()
+        .map_or(WalMode::Disabled, |c| c.mode.clone());
     let mut wal: Option<WalWriter> = wal_config.and_then(|cfg| {
         if cfg.mode == WalMode::Disabled {
             return None;
@@ -504,6 +520,13 @@ fn shard_worker_loop(
             }
         }
     });
+    let wal_pre_open_failed = wal_mode == WalMode::Pre && wal.is_none();
+    if wal_pre_open_failed {
+        tracing::error!(
+            shard_id,
+            "WAL pre-mode configured but writer is unavailable; shard will reject all commands to preserve durability"
+        );
+    }
 
     while let Ok(msg) = rx.recv() {
         match msg {
@@ -566,26 +589,60 @@ fn shard_worker_loop(
                             );
                             wal_pre_write_failed = true;
                         }
+                    } else {
+                        tracing::error!(
+                            shard_id,
+                            "WAL PRE-WRITE SKIPPED — writer unavailable, rejecting order (durability violated)"
+                        );
+                        wal_pre_write_failed = true;
                     }
                 }
 
                 // 1. Pre-trade risk check (PlaceOrder only)
-                let risk_rejected = match &cmd {
-                    Command::PlaceOrder(order) => {
-                        if let Some(ref a) = audit {
-                            a.log_entry(order_to_entry(order));
+                let risk_rejected = if wal_pre_write_failed {
+                    false
+                } else {
+                    match &cmd {
+                        Command::PlaceOrder(order) => {
+                            if let Some(ref a) = audit {
+                                a.log_entry(order_to_entry(order));
+                            }
+                            match risk.check_order(order) {
+                                Ok(()) => false,
+                                Err(reason) => {
+                                    debug!(
+                                        order_id = order.id,
+                                        symbol = sym_name,
+                                        reason = ?reason,
+                                        "risk check rejected order"
+                                    );
+                                    true
+                                }
+                            }
                         }
-                        risk.check_order(order).is_err()
+                        _ => false,
                     }
-                    _ => false,
+                };
+
+                let incoming_order_id = match &cmd {
+                    Command::PlaceOrder(order) => Some(order.id),
+                    _ => None,
                 };
 
                 let events = if wal_pre_write_failed {
                     // Pre-mode WAL guarantee broken — reject without matching.
                     let (order_id, ts) = match &cmd {
                         Command::PlaceOrder(o) => (o.id, o.timestamp),
-                        Command::CancelOrder { order_id, timestamp, .. }
-                        | Command::AmendOrder { order_id, timestamp, .. } => (*order_id, *timestamp),
+                        Command::CancelOrder {
+                            order_id,
+                            timestamp,
+                            ..
+                        }
+                        | Command::AmendOrder {
+                            order_id,
+                            timestamp,
+                            ..
+                        } => (*order_id, *timestamp),
                     };
                     vec![MatchEvent::OrderRejected {
                         order_id,
@@ -607,13 +664,28 @@ fn shard_worker_loop(
                     let events = engine.process(cmd).to_vec();
 
                     // 3. Post-trade risk state updates
+                    let triggered_order_ids: FxHashSet<_> = events
+                        .iter()
+                        .filter_map(|event| match event {
+                            MatchEvent::StopTriggered { order_id, .. } => Some(*order_id),
+                            _ => None,
+                        })
+                        .collect();
+
                     for event in &events {
                         match event {
-                            MatchEvent::OrderAccepted { .. } => {
-                                risk.on_order_added(symbol);
+                            MatchEvent::OrderAccepted { order_id, .. } => {
+                                // Stop orders are accepted once when inserted into stop_book,
+                                // then accepted again when triggered into the live book.
+                                // Count only the original client order acceptance (current cmd)
+                                // and skip synthetic acceptances produced by stop triggers.
+                                if Some(*order_id) == incoming_order_id
+                                    && !triggered_order_ids.contains(order_id)
+                                {
+                                    risk.on_order_added(symbol);
+                                }
                             }
-                            MatchEvent::OrderFilled { .. }
-                            | MatchEvent::OrderCancelled { .. } => {
+                            MatchEvent::OrderFilled { .. } | MatchEvent::OrderCancelled { .. } => {
                                 risk.on_order_removed(symbol);
                             }
                             MatchEvent::Trade(t) => {
@@ -633,10 +705,25 @@ fn shard_worker_loop(
                 };
 
                 // 4. WAL post-trade write (if mode == Post)
+                //
+                // CRITICAL: If the write fails, the trade is already applied to the
+                // book and audit log but NOT journaled. On crash, book-to-WAL
+                // divergence occurs. We halt the affected symbol so operators can
+                // investigate, and log at CRITICAL level. Continuing to match without
+                // a working WAL would silently lose every subsequent trade.
                 if !risk_rejected {
                     if let (Some(ref mut w), Some(wal_cmd)) = (&mut wal, wal_cmd_for_post) {
                         if let Err(e) = w.append(&wal_cmd) {
-                            tracing::error!(error = %e, "WAL post-write failed");
+                            tracing::error!(
+                                shard_id,
+                                symbol = sym_name,
+                                error = %e,
+                                "WAL POST-WRITE FAILED — halting symbol to prevent silent data loss"
+                            );
+                            // Halt the symbol to prevent further un-journaled trades.
+                            if let Some(engine) = engines.get_mut(&symbol) {
+                                engine.halt_trading();
+                            }
                         }
                     }
                 }
@@ -725,6 +812,7 @@ fn shard_worker_loop(
                 let mut collected = Vec::new();
                 for engine in engines.values() {
                     collected.extend(engine.book().scan_by_session_id(&session_id));
+                    collected.extend(engine.stop_book().scan_by_session_id(&session_id));
                 }
                 let collected_count = collected.len();
                 if reply.send(collected).is_err() {
@@ -869,6 +957,19 @@ mod dead_shard_tests {
         ))
     }
 
+    fn place_stop_order_cmd(id: u64, symbol: SymbolId) -> Command {
+        Command::PlaceOrder(Order::new_stop_limit(
+            id,
+            symbol,
+            Side::Buy,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(1.1),
+            FixedPrice::from_f64(1.05),
+            FixedQty::from_f64(0.02),
+            id * 1000,
+        ))
+    }
+
     #[test]
     fn process_on_dead_shard_returns_internal_error() {
         let mut router = Router::new(1);
@@ -879,7 +980,9 @@ mod dead_shard_tests {
         let events = router.process(place_order_cmd(1, SymbolId(0)));
         assert_eq!(events.len(), 1);
         match &events[0] {
-            MatchEvent::OrderRejected { reason, order_id, .. } => {
+            MatchEvent::OrderRejected {
+                reason, order_id, ..
+            } => {
                 assert_eq!(*order_id, 1);
                 assert_eq!(
                     *reason,
@@ -900,7 +1003,9 @@ mod dead_shard_tests {
         let events = router.query_order(42, SymbolId(0));
         assert_eq!(events.len(), 1);
         match &events[0] {
-            MatchEvent::OrderRejected { reason, order_id, .. } => {
+            MatchEvent::OrderRejected {
+                reason, order_id, ..
+            } => {
                 assert_eq!(*order_id, 42);
                 assert_eq!(*reason, RejectReason::InternalError);
             }
@@ -933,28 +1038,29 @@ mod dead_shard_tests {
     }
 
     #[test]
-    fn get_open_orders_by_session_handles_dead_shard_partial() {
-        // With multiple shards, one dead → snapshot is partial, not fatal.
+    fn get_open_orders_by_session_returns_err_on_dead_shard() {
+        // With dead shards, get_open_orders_by_session MUST return Err
+        // rather than a partial/empty snapshot. Clients rely on the
+        // snapshot being complete for ReplayGap resync; an incomplete
+        // snapshot would cause silent order loss.
         let mut router = Router::new(4);
         router.add_symbol(btc_cfg());
         let session = me_core::SessionId::from_bytes([0xAAu8; 16]);
 
-        // Place an order (goes to whichever shard owns symbol 0).
         let mut cmd = place_order_cmd(1, SymbolId(0));
         if let Command::PlaceOrder(ref mut o) = cmd {
             o.client_session_id = session;
         }
         router.process(cmd);
 
-        // Kill ALL shards: snapshot should return empty, no panic.
+        // Kill ALL shards: snapshot must fail, not return empty.
         for i in 0..4 {
             kill_shard(&mut router, i);
         }
-        let snapshot = router.get_open_orders_by_session(session);
-        assert_eq!(
-            snapshot.len(),
-            0,
-            "all shards dead: snapshot is empty (logged), not panic"
+        let result = router.get_open_orders_by_session(session);
+        assert!(
+            result.is_err(),
+            "all shards dead: must return Err, not partial snapshot"
         );
     }
 
@@ -977,5 +1083,33 @@ mod dead_shard_tests {
             }
             other => panic!("expected OrderRejected SymbolNotFound, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn get_open_orders_by_session_includes_pending_stop_orders() {
+        let mut router = Router::new(1);
+        router.add_symbol(btc_cfg());
+        let session = me_core::SessionId::from_bytes([0x55u8; 16]);
+
+        let mut limit_cmd = place_order_cmd(1, SymbolId(0));
+        if let Command::PlaceOrder(ref mut o) = limit_cmd {
+            o.client_session_id = session;
+        }
+        router.process(limit_cmd);
+
+        let mut stop_cmd = place_stop_order_cmd(2, SymbolId(0));
+        if let Command::PlaceOrder(ref mut o) = stop_cmd {
+            o.client_session_id = session;
+        }
+        router.process(stop_cmd);
+
+        let snapshot = router.get_open_orders_by_session(session).unwrap();
+        assert_eq!(
+            snapshot.len(),
+            2,
+            "snapshot should include resting + stop orders"
+        );
+        assert!(snapshot.iter().any(|o| o.id == 1));
+        assert!(snapshot.iter().any(|o| o.id == 2 && o.is_stop()));
     }
 }

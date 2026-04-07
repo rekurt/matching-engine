@@ -71,9 +71,7 @@ fn session_id_is_copy_and_hashable() {
 
 #[test]
 fn debug_format_is_readable_hex() {
-    let sid = SessionId::from_bytes([
-        0xDE, 0xAD, 0xBE, 0xEF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ]);
+    let sid = SessionId::from_bytes([0xDE, 0xAD, 0xBE, 0xEF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let dbg = format!("{sid:?}");
     // Debug format should at least contain the log-prefix so it's
     // recognizable in traces; full format can be implementation-defined.

@@ -13,9 +13,8 @@ use me_metrics::EngineMetrics;
 
 use crate::codec::{self, ConnectionCodecState, DecodedFrame};
 use crate::protocol::{
-    ConnectionState, ErrorCode, CAP_BATCH_ORDERS, CAP_EXACTLY_ONCE, CAP_HEARTBEAT,
-    CAP_ORDER_FLAGS, CAP_ORDER_QUERY, CAP_SESSION_RECOVERY, CAP_SNAPSHOT, MAX_WRITE_BUFFER_SIZE,
-    PROTOCOL_VERSION,
+    ConnectionState, ErrorCode, CAP_BATCH_ORDERS, CAP_EXACTLY_ONCE, CAP_HEARTBEAT, CAP_ORDER_FLAGS,
+    CAP_ORDER_QUERY, CAP_SESSION_RECOVERY, CAP_SNAPSHOT, MAX_WRITE_BUFFER_SIZE, PROTOCOL_VERSION,
 };
 use crate::session_store::SessionStore;
 
@@ -52,10 +51,7 @@ impl TcpServer {
         )
     }
 
-    pub fn new_with_metrics(
-        router: Arc<Router>,
-        metrics: Option<Arc<EngineMetrics>>,
-    ) -> Self {
+    pub fn new_with_metrics(router: Arc<Router>, metrics: Option<Arc<EngineMetrics>>) -> Self {
         Self::new_with_config(
             router,
             metrics,
@@ -467,40 +463,67 @@ where
                                                 // tokio executor thread is not stalled.
                                                 let router_for_snapshot = Arc::clone(&router);
                                                 let session_id_copy = conn.session_id;
-                                                let orders = tokio::task::spawn_blocking(move || {
+                                                let snapshot_result = tokio::task::spawn_blocking(move || {
                                                     router_for_snapshot.get_open_orders_by_session(session_id_copy)
                                                 })
-                                                .await
-                                                .unwrap_or_else(|e| {
-                                                    tracing::error!(
-                                                        error = ?e,
-                                                        "GetOpenOrders: spawn_blocking task panicked/cancelled — returning empty snapshot"
-                                                    );
-                                                    Vec::new()
-                                                });
-                                                let snapshot_seq = conn.server_frame_seq.peek();
-                                                codec::encode_open_orders_begin(
-                                                    seq,
-                                                    request_id,
-                                                    orders.len() as u32,
-                                                    snapshot_seq,
-                                                    &mut write_buf,
-                                                );
-                                                for ord in &orders {
-                                                    codec::encode_open_order(
+                                                .await;
+
+                                                // Flatten Result<Result<Vec, String>, JoinError> into
+                                                // a single error path for both spawn panics and shard
+                                                // failures. Neither should produce a snapshot.
+                                                let orders = match snapshot_result {
+                                                    Ok(Ok(orders)) => Some(orders),
+                                                    Ok(Err(shard_err)) => {
+                                                        tracing::error!(
+                                                            error = %shard_err,
+                                                            "GetOpenOrders: shard failure — returning InternalError"
+                                                        );
+                                                        None
+                                                    }
+                                                    Err(join_err) => {
+                                                        tracing::error!(
+                                                            error = ?join_err,
+                                                            "GetOpenOrders: spawn_blocking panicked/cancelled — returning InternalError"
+                                                        );
+                                                        None
+                                                    }
+                                                };
+
+                                                if let Some(orders) = orders {
+                                                    let snapshot_seq = conn.server_frame_seq.peek();
+                                                    codec::encode_open_orders_begin(
                                                         seq,
                                                         request_id,
-                                                        ord,
+                                                        orders.len() as u32,
+                                                        snapshot_seq,
+                                                        &mut write_buf,
+                                                    );
+                                                    for ord in &orders {
+                                                        codec::encode_open_order(
+                                                            seq,
+                                                            request_id,
+                                                            ord,
+                                                            &mut write_buf,
+                                                        );
+                                                    }
+                                                    codec::encode_open_orders_end(
+                                                        seq,
+                                                        request_id,
+                                                        snapshot_seq,
+                                                        &mut write_buf,
+                                                    );
+                                                    new_dedup_request_id = Some(request_id);
+                                                } else {
+                                                    // Return explicit error. NOT cached in dedup
+                                                    // (new_dedup_request_id stays None) so retry
+                                                    // executes fresh.
+                                                    codec::encode_error(
+                                                        seq,
+                                                        ErrorCode::InternalError,
+                                                        "GetOpenOrders failed: incomplete snapshot",
                                                         &mut write_buf,
                                                     );
                                                 }
-                                                codec::encode_open_orders_end(
-                                                    seq,
-                                                    request_id,
-                                                    snapshot_seq,
-                                                    &mut write_buf,
-                                                );
-                                                new_dedup_request_id = Some(request_id);
                                             }
                                         }
                                     }

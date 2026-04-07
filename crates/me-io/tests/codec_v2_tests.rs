@@ -13,9 +13,7 @@ use me_io::codec::{
     decode_frame, encode_flow_control_warning, encode_open_orders_begin, encode_open_orders_end,
     encode_pong, encode_replay_gap, ConnectionCodecState, DecodeError, DecodedFrame,
 };
-use me_io::protocol::{
-    ConnectionState, MessageType, FRAME_HEADER_SIZE, PROTOCOL_VERSION,
-};
+use me_io::protocol::{ConnectionState, MessageType, FRAME_HEADER_SIZE, PROTOCOL_VERSION};
 
 /// System clock for tests.
 static SYS_CLK: me_clock::SystemClock = me_clock::SystemClock;
@@ -24,7 +22,10 @@ static SYS_CLK: me_clock::SystemClock = me_clock::SystemClock;
 
 #[test]
 fn test_frame_header_size_is_22_bytes_v2() {
-    assert_eq!(FRAME_HEADER_SIZE, 22, "v2 header = len(4)+ver(1)+type(1)+seq(8)+req_id(8)");
+    assert_eq!(
+        FRAME_HEADER_SIZE, 22,
+        "v2 header = len(4)+ver(1)+type(1)+seq(8)+req_id(8)"
+    );
 }
 
 #[test]
@@ -269,7 +270,10 @@ fn test_encode_events_mirrors_request_id() {
 
     // Verify request_id in header matches the mirrored value
     let req_id = u64::from_le_bytes(buf[14..22].try_into().unwrap());
-    assert_eq!(req_id, 777, "Server response should mirror client's request_id");
+    assert_eq!(
+        req_id, 777,
+        "Server response should mirror client's request_id"
+    );
 }
 
 #[test]
@@ -394,7 +398,7 @@ fn test_v1_frame_rejected_by_v2_server() {
     frame.push(1); // version = 1 (old)
     frame.push(MessageType::Handshake as u8);
     frame.extend_from_slice(&0u64.to_le_bytes()); // seq
-    // v1 frame ends here — 14 bytes total (no request_id)
+                                                  // v1 frame ends here — 14 bytes total (no request_id)
 
     // Pad to FRAME_HEADER_SIZE so the decoder reads a "full" header
     // (it will interpret the padding as request_id=0, but version check will fail first)

@@ -144,17 +144,12 @@ impl Drop for AsyncAuditLogger {
             // Channel stayed full for 10ms — consumer is either wedged or
             // genuinely saturated. handle.join() below MAY hang; at least
             // surface the reason so operators can diagnose a stuck shutdown.
-            tracing::warn!(
-                "audit Drop: could not wake consumer after 10 retries; join may hang"
-            );
+            tracing::warn!("audit Drop: could not wake consumer after 10 retries; join may hang");
         }
         if let Some(handle) = self._consumer.take() {
             if let Err(panic) = handle.join() {
                 // Consumer panicked — log loudly so operators can investigate.
-                tracing::error!(
-                    ?panic,
-                    "audit consumer thread panicked during shutdown"
-                );
+                tracing::error!(?panic, "audit consumer thread panicked during shutdown");
             }
         }
     }
@@ -248,7 +243,12 @@ fn emit_entry(entry: &AuditEntry, format: AuditFormat) {
                     std::mem::size_of::<AuditEntry>(),
                 )
             };
-            info!(target: "audit_binary", bytes_len = bytes.len(), event_type = entry.event_type);
+            info!(
+                target: "audit_binary",
+                bytes = ?bytes,
+                bytes_len = bytes.len(),
+                event_type = entry.event_type
+            );
         }
     }
 }

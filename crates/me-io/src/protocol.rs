@@ -231,6 +231,11 @@ pub enum ErrorCode {
     /// the server will emit this and disconnect. Today the server emits
     /// FlowControlWarning instead and keeps the connection.
     BufferExhausted = 11,
+    /// An internal server error prevented the request from being
+    /// fulfilled. Clients SHOULD retry; the response is NOT cached in
+    /// the dedup table, so a retry with the same `request_id` will
+    /// execute fresh rather than replaying a cached error.
+    InternalError = 12,
 }
 
 /// Connection state machine.

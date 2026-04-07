@@ -78,6 +78,10 @@ impl ServerFrameSeq {
     /// This is the ONLY way to rewrite the counter from outside.
     #[inline]
     pub fn reset_to(&mut self, next_seq: u64) {
+        assert!(
+            next_seq > 0,
+            "ServerFrameSeq::reset_to(0) violates seq>=1 invariant"
+        );
         self.0 = next_seq;
     }
 }
@@ -238,9 +242,7 @@ impl SessionEntry {
         // with a last_recv_seq lower than last_acked_server_seq. We still
         // detect that gap defensively — frames that were ACKed-then-purged
         // are gone, and the client needs to resync via GetOpenOrders.
-        let gap_boundary = self
-            .highest_evicted_seq
-            .max(self.last_acked_server_seq);
+        let gap_boundary = self.highest_evicted_seq.max(self.last_acked_server_seq);
         if gap_boundary > 0 && last_received < gap_boundary {
             return ReplayResult::Gap {
                 missing_from: last_received + 1,
@@ -334,7 +336,12 @@ impl SessionStore {
     /// and grows adaptively up to `capacity`. Once `capacity` is reached,
     /// oldest frames are evicted to make room (slow-consumer behavior).
     pub fn new(capacity: usize, ttl: Duration) -> Self {
-        Self::new_adaptive(capacity.min(DEFAULT_BUFFER_MIN), capacity, DEFAULT_DEDUP_MAX, ttl)
+        Self::new_adaptive(
+            capacity.min(DEFAULT_BUFFER_MIN),
+            capacity,
+            DEFAULT_DEDUP_MAX,
+            ttl,
+        )
     }
 
     /// Create a new store with custom MAX capacity and dedup table size.
@@ -357,12 +364,8 @@ impl SessionStore {
         dedup_max: usize,
         ttl: Duration,
     ) -> Self {
-        assert!(
-            buffer_min <= buffer_max,
-            "buffer_min must be <= buffer_max"
-        );
-        let shards: [Shard; NUM_SHARDS] =
-            std::array::from_fn(|_| Mutex::new(FxHashMap::default()));
+        assert!(buffer_min <= buffer_max, "buffer_min must be <= buffer_max");
+        let shards: [Shard; NUM_SHARDS] = std::array::from_fn(|_| Mutex::new(FxHashMap::default()));
         Self {
             shards: Arc::new(shards),
             buffer_min,
@@ -446,6 +449,10 @@ impl SessionStore {
     {
         loop {
             let id = id_source();
+            if id.is_none() {
+                tracing::warn!("SessionStore::create drew SessionId::NONE — retrying");
+                continue;
+            }
             let entry =
                 SessionEntry::new(self.buffer_min, self.buffer_max, self.dedup_max, self.ttl);
             let shard = self.shard_for(&id);
@@ -621,8 +628,20 @@ impl SessionStore {
         let Some(entry) = map.get_mut(id) else {
             return 0;
         };
+        // Defensive hardening: `next_outbound_seq()` computes `highest + 1`.
+        // If a malicious client sends ACK=u64::MAX and we stored it verbatim,
+        // that addition would overflow and could crash resume handling.
+        let sanitized_last_acked = if last_acked_server_seq == u64::MAX {
+            tracing::warn!(
+                session = ?id,
+                "ignoring impossible ACK=u64::MAX to preserve seq>=1 invariant"
+            );
+            u64::MAX - 1
+        } else {
+            last_acked_server_seq
+        };
         let before = entry.frames.len();
-        entry.apply_ack(last_acked_server_seq);
+        entry.apply_ack(sanitized_last_acked);
         entry.last_access = Instant::now();
         before.saturating_sub(entry.frames.len())
     }
@@ -680,7 +699,7 @@ impl SessionStore {
         let highest = buf_highest
             .max(entry.highest_evicted_seq)
             .max(entry.last_acked_server_seq);
-        highest + 1
+        highest.saturating_add(1)
     }
 
     /// Get current dedup table size (for metrics/tests).

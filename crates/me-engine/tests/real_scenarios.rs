@@ -384,14 +384,22 @@ fn test_multi_pair_isolation() {
     let events2 = router.process(Command::PlaceOrder(o2));
 
     // Both should be accepted (different symbols, no crossing)
-    assert!(events1.iter().any(|e| matches!(e, MatchEvent::OrderAccepted { .. })));
-    assert!(events2.iter().any(|e| matches!(e, MatchEvent::OrderAccepted { .. })));
+    assert!(events1
+        .iter()
+        .any(|e| matches!(e, MatchEvent::OrderAccepted { .. })));
+    assert!(events2
+        .iter()
+        .any(|e| matches!(e, MatchEvent::OrderAccepted { .. })));
 
     // Verify via query: both orders should exist
     let q1 = router.query_order(1, SymbolId(0));
-    assert!(q1.iter().any(|e| matches!(e, MatchEvent::OrderStatus { .. })));
+    assert!(q1
+        .iter()
+        .any(|e| matches!(e, MatchEvent::OrderStatus { .. })));
     let q2 = router.query_order(2, SymbolId(1));
-    assert!(q2.iter().any(|e| matches!(e, MatchEvent::OrderStatus { .. })));
+    assert!(q2
+        .iter()
+        .any(|e| matches!(e, MatchEvent::OrderStatus { .. })));
 
     // Cancel on symbol 0 should not affect symbol 1
     let cancel_events = router.process(Command::CancelOrder {
@@ -399,13 +407,19 @@ fn test_multi_pair_isolation() {
         symbol: SymbolId(0),
         timestamp: 3000,
     });
-    assert!(cancel_events.iter().any(|e| matches!(e, MatchEvent::OrderCancelled { .. })));
+    assert!(cancel_events
+        .iter()
+        .any(|e| matches!(e, MatchEvent::OrderCancelled { .. })));
 
     // Order 1 should be gone, order 2 should still exist
     let q1_after = router.query_order(1, SymbolId(0));
-    assert!(q1_after.iter().any(|e| matches!(e, MatchEvent::OrderNotFound { .. })));
+    assert!(q1_after
+        .iter()
+        .any(|e| matches!(e, MatchEvent::OrderNotFound { .. })));
     let q2_after = router.query_order(2, SymbolId(1));
-    assert!(q2_after.iter().any(|e| matches!(e, MatchEvent::OrderStatus { .. })));
+    assert!(q2_after
+        .iter()
+        .any(|e| matches!(e, MatchEvent::OrderStatus { .. })));
 }
 
 /// Scenario: Stress test — 10000 random-like operations.

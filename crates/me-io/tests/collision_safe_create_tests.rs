@@ -96,3 +96,23 @@ fn create_public_api_still_works_with_random_ids() {
     assert!(!b.is_none());
     assert_eq!(store.len(), 2);
 }
+
+#[test]
+fn create_retries_when_id_source_returns_none_sentinel() {
+    let store = SessionStore::new(1024, Duration::from_secs(60));
+    let counter = Arc::new(AtomicU8::new(0));
+    let counter_clone = Arc::clone(&counter);
+
+    let id = store.create_with_id_source(move || {
+        let n = counter_clone.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            SessionId::NONE
+        } else {
+            SessionId::from_bytes([0xAB; 16])
+        }
+    });
+
+    assert_eq!(id, SessionId::from_bytes([0xAB; 16]));
+    assert_eq!(counter.load(Ordering::SeqCst), 2);
+    assert_eq!(store.len(), 1);
+}

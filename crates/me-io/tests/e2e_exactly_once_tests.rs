@@ -27,9 +27,7 @@ use me_clock::SystemClock;
 use me_core::symbol::SymbolConfig;
 use me_engine::command::Command;
 use me_engine::router::Router;
-use me_io::codec::{
-    decode_frame, encode_events, ConnectionCodecState, DecodedFrame,
-};
+use me_io::codec::{decode_frame, encode_events, ConnectionCodecState, DecodedFrame};
 use me_io::protocol::{ConnectionState, MessageType, FRAME_HEADER_SIZE, PROTOCOL_VERSION};
 use me_io::session_store::{ReplayResult, SessionStore};
 
@@ -84,8 +82,7 @@ fn handle_place_order(
     write_buf: &mut BytesMut,
 ) -> bool {
     write_buf.clear();
-    let (decoded, _consumed) =
-        decode_frame(wire_frame, conn, &SYS_CLK).expect("frame must decode");
+    let (decoded, _consumed) = decode_frame(wire_frame, conn, &SYS_CLK).expect("frame must decode");
 
     let (mut cmd, seq, request_id) = match decoded {
         DecodedFrame::Command(c, s, r) => (c, s, r),
@@ -136,12 +133,7 @@ fn e2e_place_order_retry_is_cached_and_not_reprocessed() {
 
     // Wire frame: PlaceOrder with client-seq=1, request_id=0xDEADBEEF.
     let payload = place_order_payload(100, 0, 100_000_000);
-    let wire = build_frame(
-        MessageType::PlaceOrder as u8,
-        1,
-        0xDEADBEEF,
-        &payload,
-    );
+    let wire = build_frame(MessageType::PlaceOrder as u8, 1, 0xDEADBEEF, &payload);
 
     // First dispatch: fresh execution.
     let cached1 = handle_place_order(
@@ -158,7 +150,7 @@ fn e2e_place_order_retry_is_cached_and_not_reprocessed() {
     let first_response_bytes = write_buf.clone().freeze();
 
     // Snapshot the book state: exactly one resting order.
-    let orders_before = router.get_open_orders_by_session(session_id);
+    let orders_before = router.get_open_orders_by_session(session_id).unwrap();
     assert_eq!(
         orders_before.len(),
         1,
@@ -175,7 +167,7 @@ fn e2e_place_order_retry_is_cached_and_not_reprocessed() {
     // OR: use a higher seq; request_id is what triggers dedup.
     let retry_wire = build_frame(
         MessageType::PlaceOrder as u8,
-        2,       // higher seq (strictly monotonic — required by decoder)
+        2,          // higher seq (strictly monotonic — required by decoder)
         0xDEADBEEF, // SAME request_id
         &payload,
     );
@@ -200,12 +192,8 @@ fn e2e_place_order_retry_is_cached_and_not_reprocessed() {
     );
 
     // Verify the book STILL has only 1 order — retry was NOT re-executed.
-    let orders_after = router.get_open_orders_by_session(session_id);
-    assert_eq!(
-        orders_after.len(),
-        1,
-        "dedup must prevent double-placement"
-    );
+    let orders_after = router.get_open_orders_by_session(session_id).unwrap();
+    assert_eq!(orders_after.len(), 1, "dedup must prevent double-placement");
 }
 
 #[test]
@@ -226,7 +214,7 @@ fn e2e_replay_after_disconnect_returns_stored_seqs() {
             MessageType::PlaceOrder as u8,
             client_seq,
             client_seq, // use client_seq as request_id (unique per call)
-        &payload,
+            &payload,
         );
         handle_place_order(
             &mut router,
@@ -240,7 +228,10 @@ fn e2e_replay_after_disconnect_returns_stored_seqs() {
 
     // server_frame_seq is "next to assign": after pushing 3 frames with seqs
     // 1,2,3 it points at 4.
-    assert_eq!(server_frame_seq, 4, "3 PlaceOrders → seqs 1,2,3 assigned, next is 4");
+    assert_eq!(
+        server_frame_seq, 4,
+        "3 PlaceOrders → seqs 1,2,3 assigned, next is 4"
+    );
 
     // Simulate reconnect: "I've received nothing, give me all frames"
     match store.resume(&session_id, 0) {
@@ -249,11 +240,7 @@ fn e2e_replay_after_disconnect_returns_stored_seqs() {
             // Each frame's header.seq MUST equal 1, 2, 3 in order.
             for (i, f) in frames.iter().enumerate() {
                 let seq = u64::from_le_bytes(f[6..14].try_into().unwrap());
-                assert_eq!(
-                    seq,
-                    (i + 1) as u64,
-                    "replayed frame[{i}] has wrong seq"
-                );
+                assert_eq!(seq, (i + 1) as u64, "replayed frame[{i}] has wrong seq");
             }
         }
         other => panic!("expected Ok, got {other:?}"),
@@ -277,12 +264,7 @@ fn e2e_ack_purges_replay_buffer_preventing_redelivery() {
     // Submit 5 orders.
     for i in 1..=5u64 {
         let payload = place_order_payload(i, 0, 100_000_000);
-        let wire = build_frame(
-            MessageType::PlaceOrder as u8,
-            i,
-            i,
-            &payload,
-        );
+        let wire = build_frame(MessageType::PlaceOrder as u8, i, i, &payload);
         handle_place_order(
             &mut router,
             &store,
@@ -340,7 +322,14 @@ fn e2e_get_open_orders_snapshot_sees_session_orders_only() {
         let price: i64 = 100_000_000 + (oid as i64) * 1_000_000;
         payload[PRICE_OFFSET..PRICE_OFFSET + 8].copy_from_slice(&price.to_le_bytes());
         let wire = build_frame(MessageType::PlaceOrder as u8, oid, oid, &payload);
-        handle_place_order(&mut router, &store, &mut conn_a, &mut seq_a, &wire, &mut wbuf);
+        handle_place_order(
+            &mut router,
+            &store,
+            &mut conn_a,
+            &mut seq_a,
+            &wire,
+            &mut wbuf,
+        );
     }
 
     // Session B places 1 SELL order far above A's buys (no cross).
@@ -349,11 +338,18 @@ fn e2e_get_open_orders_snapshot_sees_session_orders_only() {
     let price: i64 = 200_000_000; // 2.0
     payload[PRICE_OFFSET..PRICE_OFFSET + 8].copy_from_slice(&price.to_le_bytes());
     let wire = build_frame(MessageType::PlaceOrder as u8, 1, 1, &payload);
-    handle_place_order(&mut router, &store, &mut conn_b, &mut seq_b, &wire, &mut wbuf);
+    handle_place_order(
+        &mut router,
+        &store,
+        &mut conn_b,
+        &mut seq_b,
+        &wire,
+        &mut wbuf,
+    );
 
     // Snapshot each session.
-    let snap_a = router.get_open_orders_by_session(session_a);
-    let snap_b = router.get_open_orders_by_session(session_b);
+    let snap_a = router.get_open_orders_by_session(session_a).unwrap();
+    let snap_b = router.get_open_orders_by_session(session_b).unwrap();
 
     assert_eq!(snap_a.len(), 3, "session A has 3 resting orders");
     assert_eq!(snap_b.len(), 1, "session B has 1 resting order");
@@ -394,7 +390,7 @@ fn e2e_cancel_order_after_place_with_dedup() {
         &mut wbuf,
     );
     assert_eq!(
-        router.get_open_orders_by_session(session_id).len(),
+        router.get_open_orders_by_session(session_id).unwrap().len(),
         1,
         "order placed"
     );
@@ -403,12 +399,7 @@ fn e2e_cancel_order_after_place_with_dedup() {
     let mut cancel_payload = Vec::with_capacity(10);
     cancel_payload.extend_from_slice(&7u64.to_le_bytes());
     cancel_payload.extend_from_slice(&0u16.to_le_bytes());
-    let cancel_wire = build_frame(
-        MessageType::CancelOrder as u8,
-        2,
-        0xBBBB,
-        &cancel_payload,
-    );
+    let cancel_wire = build_frame(MessageType::CancelOrder as u8, 2, 0xBBBB, &cancel_payload);
     handle_place_order(
         &mut router,
         &store,
@@ -420,7 +411,7 @@ fn e2e_cancel_order_after_place_with_dedup() {
 
     // Snapshot should now be empty.
     assert_eq!(
-        router.get_open_orders_by_session(session_id).len(),
+        router.get_open_orders_by_session(session_id).unwrap().len(),
         0,
         "order cancelled"
     );
@@ -456,8 +447,7 @@ fn handle_batch_place_order(
     router_calls: &mut u32,
 ) -> bool {
     write_buf.clear();
-    let (decoded, _) =
-        decode_frame(wire_frame, conn, &SYS_CLK).expect("batch frame must decode");
+    let (decoded, _) = decode_frame(wire_frame, conn, &SYS_CLK).expect("batch frame must decode");
 
     let (cmds, seq, request_id) = match decoded {
         DecodedFrame::Batch(cmds, seq, rid) => (cmds, seq, rid),
@@ -505,7 +495,12 @@ fn e2e_batch_place_order_retry_is_cached_and_not_reprocessed() {
         for p in sub_payloads {
             payload.extend_from_slice(p);
         }
-        build_frame(MessageType::BatchPlaceOrder as u8, seq, request_id, &payload)
+        build_frame(
+            MessageType::BatchPlaceOrder as u8,
+            seq,
+            request_id,
+            &payload,
+        )
     }
 
     let mut router = Router::new(1);
@@ -524,24 +519,40 @@ fn e2e_batch_place_order_retry_is_cached_and_not_reprocessed() {
         p.push(0); // 38-byte padded sub-payload (trailing flags byte)
         p
     }
-    let subs = vec![batch_sub(10, 100_000_000), batch_sub(11, 100_000_000), batch_sub(12, 100_000_000)];
+    let subs = vec![
+        batch_sub(10, 100_000_000),
+        batch_sub(11, 100_000_000),
+        batch_sub(12, 100_000_000),
+    ];
     let wire = build_batch(1, 0xF001, 3, &subs);
 
     // First dispatch: fresh execution, 3 router calls.
     let cached1 = handle_batch_place_order(
-        &mut router, &store, &mut conn, &mut server_frame_seq, &wire, &mut wbuf, &mut router_calls,
+        &mut router,
+        &store,
+        &mut conn,
+        &mut server_frame_seq,
+        &wire,
+        &mut wbuf,
+        &mut router_calls,
     );
     assert!(!cached1, "first batch call: cache miss");
     assert_eq!(router_calls, 3, "3 orders → 3 router.process() invocations");
 
-    let orders_after_first = router.get_open_orders_by_session(session_id);
+    let orders_after_first = router.get_open_orders_by_session(session_id).unwrap();
     assert_eq!(orders_after_first.len(), 3, "all 3 orders placed");
     let first_response = wbuf.clone().freeze();
 
     // Retry with SAME request_id (seq must be strictly monotonic).
     let retry_wire = build_batch(2, 0xF001, 3, &subs);
     let cached2 = handle_batch_place_order(
-        &mut router, &store, &mut conn, &mut server_frame_seq, &retry_wire, &mut wbuf, &mut router_calls,
+        &mut router,
+        &store,
+        &mut conn,
+        &mut server_frame_seq,
+        &retry_wire,
+        &mut wbuf,
+        &mut router_calls,
     );
 
     assert!(cached2, "batch retry MUST hit dedup cache");
@@ -550,13 +561,14 @@ fn e2e_batch_place_order_retry_is_cached_and_not_reprocessed() {
         "retry: router.process() NOT invoked again (dedup prevents double-placement)"
     );
     assert_eq!(
-        &wbuf[..], &first_response[..],
+        &wbuf[..],
+        &first_response[..],
         "cached batch response bytes match original"
     );
 
     // Book STILL has only 3 orders — retry was NOT re-executed.
     assert_eq!(
-        router.get_open_orders_by_session(session_id).len(),
+        router.get_open_orders_by_session(session_id).unwrap().len(),
         3,
         "dedup prevents double-placement of batch"
     );
@@ -578,14 +590,28 @@ fn e2e_dedup_cache_hit_does_not_grow_replay_buffer() {
     // Submit once.
     let payload = place_order_payload(1, 0, 100_000_000);
     let wire = build_frame(MessageType::PlaceOrder as u8, 1, 0xAAAA, &payload);
-    handle_place_order(&mut router, &store, &mut conn, &mut server_frame_seq, &wire, &mut wbuf);
+    handle_place_order(
+        &mut router,
+        &store,
+        &mut conn,
+        &mut server_frame_seq,
+        &wire,
+        &mut wbuf,
+    );
     let buf_after_first = store.buffer_len(&session_id);
     assert!(buf_after_first >= 1);
 
     // Retry the SAME request_id 5 times — buffer MUST NOT grow.
     for i in 2..=6u64 {
         let retry = build_frame(MessageType::PlaceOrder as u8, i, 0xAAAA, &payload);
-        handle_place_order(&mut router, &store, &mut conn, &mut server_frame_seq, &retry, &mut wbuf);
+        handle_place_order(
+            &mut router,
+            &store,
+            &mut conn,
+            &mut server_frame_seq,
+            &retry,
+            &mut wbuf,
+        );
         assert_eq!(
             store.buffer_len(&session_id),
             buf_after_first,

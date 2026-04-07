@@ -23,7 +23,13 @@ fn eth_config() -> SymbolConfig {
     c
 }
 
-fn limit_buy(id: u64, symbol: SymbolId, price: f64, qty: f64, session: me_core::SessionId) -> Command {
+fn limit_buy(
+    id: u64,
+    symbol: SymbolId,
+    price: f64,
+    qty: f64,
+    session: me_core::SessionId,
+) -> Command {
     Command::PlaceOrder(
         Order::new_limit(
             id,
@@ -38,7 +44,13 @@ fn limit_buy(id: u64, symbol: SymbolId, price: f64, qty: f64, session: me_core::
     )
 }
 
-fn limit_sell(id: u64, symbol: SymbolId, price: f64, qty: f64, session: me_core::SessionId) -> Command {
+fn limit_sell(
+    id: u64,
+    symbol: SymbolId,
+    price: f64,
+    qty: f64,
+    session: me_core::SessionId,
+) -> Command {
     Command::PlaceOrder(
         Order::new_limit(
             id,
@@ -59,7 +71,7 @@ fn limit_sell(id: u64, symbol: SymbolId, price: f64, qty: f64, session: me_core:
 fn test_empty_snapshot_for_new_session() {
     let router = Router::new(1);
     let session = me_core::SessionId::from_bytes([0xAAu8; 16]);
-    let orders = router.get_open_orders_by_session(session);
+    let orders = router.get_open_orders_by_session(session).unwrap();
     assert!(orders.is_empty());
 }
 
@@ -74,7 +86,7 @@ fn test_snapshot_returns_placed_orders() {
     router.process(limit_buy(2, SymbolId(0), 49_000.0, 2.0, session));
     router.process(limit_buy(3, SymbolId(0), 48_000.0, 3.0, session));
 
-    let snapshot = router.get_open_orders_by_session(session);
+    let snapshot = router.get_open_orders_by_session(session).unwrap();
     assert_eq!(snapshot.len(), 3);
 
     let ids: std::collections::HashSet<u64> = snapshot.iter().map(|o| o.id).collect();
@@ -97,8 +109,8 @@ fn test_snapshot_isolates_sessions() {
     // Session B places 1 order
     router.process(limit_buy(3, SymbolId(0), 48_000.0, 1.0, session_b));
 
-    let snap_a = router.get_open_orders_by_session(session_a);
-    let snap_b = router.get_open_orders_by_session(session_b);
+    let snap_a = router.get_open_orders_by_session(session_a).unwrap();
+    let snap_b = router.get_open_orders_by_session(session_b).unwrap();
 
     assert_eq!(snap_a.len(), 2);
     assert_eq!(snap_b.len(), 1);
@@ -121,7 +133,7 @@ fn test_snapshot_after_cancel() {
     router.process(limit_buy(1, SymbolId(0), 50_000.0, 1.0, session));
     router.process(limit_buy(2, SymbolId(0), 49_000.0, 1.0, session));
     router.process(limit_buy(3, SymbolId(0), 48_000.0, 1.0, session));
-    assert_eq!(router.get_open_orders_by_session(session).len(), 3);
+    assert_eq!(router.get_open_orders_by_session(session).unwrap().len(), 3);
 
     // Cancel order 2
     router.process(Command::CancelOrder {
@@ -130,7 +142,7 @@ fn test_snapshot_after_cancel() {
         timestamp: 5_000,
     });
 
-    let snapshot = router.get_open_orders_by_session(session);
+    let snapshot = router.get_open_orders_by_session(session).unwrap();
     assert_eq!(snapshot.len(), 2);
     let ids: std::collections::HashSet<u64> = snapshot.iter().map(|o| o.id).collect();
     assert!(ids.contains(&1));
@@ -152,7 +164,7 @@ fn test_snapshot_excludes_filled_orders() {
     router.process(limit_buy(2, SymbolId(0), 50_000.0, 1.0, other_session));
 
     // The resting sell (id=1) should now be filled → not in snapshot
-    let snapshot = router.get_open_orders_by_session(session);
+    let snapshot = router.get_open_orders_by_session(session).unwrap();
     assert!(
         snapshot.iter().all(|o| o.id != 1),
         "filled order should not appear in snapshot"
@@ -176,17 +188,11 @@ fn test_snapshot_aggregates_across_symbols() {
     router.process(limit_buy(10, SymbolId(1), 3_000.0, 2.0, session));
     router.process(limit_buy(11, SymbolId(1), 2_900.0, 2.0, session));
 
-    let snapshot = router.get_open_orders_by_session(session);
+    let snapshot = router.get_open_orders_by_session(session).unwrap();
     assert_eq!(snapshot.len(), 4, "should aggregate across both shards");
 
-    let btc_count = snapshot
-        .iter()
-        .filter(|o| o.symbol == SymbolId(0))
-        .count();
-    let eth_count = snapshot
-        .iter()
-        .filter(|o| o.symbol == SymbolId(1))
-        .count();
+    let btc_count = snapshot.iter().filter(|o| o.symbol == SymbolId(0)).count();
+    let eth_count = snapshot.iter().filter(|o| o.symbol == SymbolId(1)).count();
     assert_eq!(btc_count, 2);
     assert_eq!(eth_count, 2);
 }
@@ -204,7 +210,7 @@ fn test_snapshot_partial_fill_shows_remaining() {
     let other = me_core::SessionId::from_bytes([0x33u8; 16]);
     router.process(limit_buy(2, SymbolId(0), 50_000.0, 3.0, other));
 
-    let snapshot = router.get_open_orders_by_session(session);
+    let snapshot = router.get_open_orders_by_session(session).unwrap();
     assert_eq!(snapshot.len(), 1);
     let remaining = snapshot[0].remaining_qty;
     assert_eq!(
@@ -226,7 +232,7 @@ fn test_snapshot_scales_to_many_orders() {
         router.process(limit_buy(i, SymbolId(0), price, 1.0, session));
     }
 
-    let snapshot = router.get_open_orders_by_session(session);
+    let snapshot = router.get_open_orders_by_session(session).unwrap();
     assert_eq!(snapshot.len(), 100);
 
     // All should have the right session
@@ -246,6 +252,6 @@ fn test_nonexistent_session_returns_empty() {
 
     // Query with a different session that has never placed anything
     let fake = me_core::SessionId::from_bytes([0xFFu8; 16]);
-    let snapshot = router.get_open_orders_by_session(fake);
+    let snapshot = router.get_open_orders_by_session(fake).unwrap();
     assert!(snapshot.is_empty());
 }
