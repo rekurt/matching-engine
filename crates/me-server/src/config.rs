@@ -159,7 +159,7 @@ fn default_tcp_addr() -> String {
     "0.0.0.0:9090".to_string()
 }
 fn default_metrics_addr() -> String {
-    "0.0.0.0:9091".to_string()
+    "127.0.0.1:9091".to_string()
 }
 fn default_drain_timeout() -> u64 {
     30
