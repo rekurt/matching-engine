@@ -217,3 +217,18 @@ fn resume_after_gap_also_restores_seq() {
         "even after Gap, next seq continues from 8"
     );
 }
+
+#[test]
+fn apply_ack_u64_max_is_sanitized_to_prevent_seq_wrap() {
+    let store = SessionStore::new(1024, Duration::from_secs(60));
+    let sid = store.create();
+
+    store.push(&sid, 1, Bytes::from_static(b"x"));
+    let _ = store.apply_ack(&sid, u64::MAX);
+
+    assert_eq!(
+        store.next_outbound_seq(&sid),
+        u64::MAX,
+        "ACK=u64::MAX must not make next_outbound_seq wrap to 0"
+    );
+}

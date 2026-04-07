@@ -628,8 +628,20 @@ impl SessionStore {
         let Some(entry) = map.get_mut(id) else {
             return 0;
         };
+        // Defensive hardening: `next_outbound_seq()` computes `highest + 1`.
+        // If a malicious client sends ACK=u64::MAX and we stored it verbatim,
+        // that addition would overflow and could crash resume handling.
+        let sanitized_last_acked = if last_acked_server_seq == u64::MAX {
+            tracing::warn!(
+                session = ?id,
+                "ignoring impossible ACK=u64::MAX to preserve seq>=1 invariant"
+            );
+            u64::MAX - 1
+        } else {
+            last_acked_server_seq
+        };
         let before = entry.frames.len();
-        entry.apply_ack(last_acked_server_seq);
+        entry.apply_ack(sanitized_last_acked);
         entry.last_access = Instant::now();
         before.saturating_sub(entry.frames.len())
     }
@@ -687,7 +699,7 @@ impl SessionStore {
         let highest = buf_highest
             .max(entry.highest_evicted_seq)
             .max(entry.last_acked_server_seq);
-        highest + 1
+        highest.saturating_add(1)
     }
 
     /// Get current dedup table size (for metrics/tests).
