@@ -23,7 +23,13 @@ fn eth_config() -> SymbolConfig {
     c
 }
 
-fn limit_buy(id: u64, symbol: SymbolId, price: f64, qty: f64, session: me_core::SessionId) -> Command {
+fn limit_buy(
+    id: u64,
+    symbol: SymbolId,
+    price: f64,
+    qty: f64,
+    session: me_core::SessionId,
+) -> Command {
     Command::PlaceOrder(
         Order::new_limit(
             id,
@@ -38,7 +44,13 @@ fn limit_buy(id: u64, symbol: SymbolId, price: f64, qty: f64, session: me_core::
     )
 }
 
-fn limit_sell(id: u64, symbol: SymbolId, price: f64, qty: f64, session: me_core::SessionId) -> Command {
+fn limit_sell(
+    id: u64,
+    symbol: SymbolId,
+    price: f64,
+    qty: f64,
+    session: me_core::SessionId,
+) -> Command {
     Command::PlaceOrder(
         Order::new_limit(
             id,
@@ -179,14 +191,8 @@ fn test_snapshot_aggregates_across_symbols() {
     let snapshot = router.get_open_orders_by_session(session).unwrap();
     assert_eq!(snapshot.len(), 4, "should aggregate across both shards");
 
-    let btc_count = snapshot
-        .iter()
-        .filter(|o| o.symbol == SymbolId(0))
-        .count();
-    let eth_count = snapshot
-        .iter()
-        .filter(|o| o.symbol == SymbolId(1))
-        .count();
+    let btc_count = snapshot.iter().filter(|o| o.symbol == SymbolId(0)).count();
+    let eth_count = snapshot.iter().filter(|o| o.symbol == SymbolId(1)).count();
     assert_eq!(btc_count, 2);
     assert_eq!(eth_count, 2);
 }

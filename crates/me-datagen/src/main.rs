@@ -413,7 +413,12 @@ fn main() {
 
     // Router engines are inside shard threads — stats not directly accessible.
     // Use approximate counts from the generation process.
-    let _ = (&pairs, &mut total_bid_levels, &mut total_ask_levels, &mut total_resting);
+    let _ = (
+        &pairs,
+        &mut total_bid_levels,
+        &mut total_ask_levels,
+        &mut total_resting,
+    );
 
     let avg_bid_depth = total_bid_levels as f64 / cli.pairs.max(1) as f64;
     let avg_ask_depth = total_ask_levels as f64 / cli.pairs.max(1) as f64;

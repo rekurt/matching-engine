@@ -6,7 +6,7 @@ use me_core::types::*;
 use me_core::RejectReason;
 use me_engine::command::Command;
 use me_engine::router::{Router, WalConfig, WalMode};
-use me_persist::wal::{WalReader, WalCommand};
+use me_persist::wal::{WalCommand, WalReader};
 
 fn btc_config() -> SymbolConfig {
     SymbolConfig::default_btc_usdt()
@@ -23,15 +23,25 @@ fn temp_wal_dir(name: &str) -> String {
 
 fn limit_buy(id: u64, price: f64, qty: f64) -> Command {
     Command::PlaceOrder(Order::new_limit(
-        id, SymbolId(0), Side::Buy, TimeInForce::GTC,
-        FixedPrice::from_f64(price), FixedQty::from_f64(qty), id * 1000,
+        id,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(price),
+        FixedQty::from_f64(qty),
+        id * 1000,
     ))
 }
 
 fn limit_sell(id: u64, price: f64, qty: f64) -> Command {
     Command::PlaceOrder(Order::new_limit(
-        id, SymbolId(0), Side::Sell, TimeInForce::GTC,
-        FixedPrice::from_f64(price), FixedQty::from_f64(qty), id * 1000,
+        id,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(price),
+        FixedQty::from_f64(qty),
+        id * 1000,
     ))
 }
 
@@ -119,10 +129,9 @@ fn test_wal_pre_mode_open_failure_rejects_and_preserves_state() {
 
     let order_status = router.query_order(1, SymbolId(0));
     assert!(
-        order_status.iter().any(|e| matches!(
-            e,
-            MatchEvent::OrderNotFound { order_id: 1 }
-        )),
+        order_status
+            .iter()
+            .any(|e| matches!(e, MatchEvent::OrderNotFound { order_id: 1 })),
         "rejected order must not be present in the order book"
     );
 
@@ -148,15 +157,21 @@ fn test_wal_post_mode_skips_risk_rejected() {
 
         // Normal order (should be journaled)
         let events = router.process(limit_buy(1, 100.0, 1.0));
-        assert!(events.iter().any(|e| matches!(e, MatchEvent::OrderAccepted { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, MatchEvent::OrderAccepted { .. })));
 
         // Fat finger order (should be risk-rejected, NOT journaled in post-mode)
         let events = router.process(limit_buy(2, 100.0, 50.0));
-        assert!(events.iter().any(|e| matches!(e, MatchEvent::OrderRejected { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, MatchEvent::OrderRejected { .. })));
 
         // Another normal order
         let events = router.process(limit_sell(3, 100.0, 1.0));
-        assert!(events.iter().any(|e| matches!(e, MatchEvent::OrderAccepted { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, MatchEvent::OrderAccepted { .. })));
 
         router.shutdown();
     }
@@ -167,7 +182,11 @@ fn test_wal_post_mode_skips_risk_rejected() {
     let entries = reader.read_all().unwrap();
 
     // Risk-rejected order should NOT be in WAL
-    assert_eq!(entries.len(), 2, "Only 2 accepted commands should be in WAL (risk-rejected excluded)");
+    assert_eq!(
+        entries.len(),
+        2,
+        "Only 2 accepted commands should be in WAL (risk-rejected excluded)"
+    );
     match &entries[0].command {
         WalCommand::PlaceOrder(o) => assert_eq!(o.id, 1),
         _ => panic!("Expected PlaceOrder id=1"),
@@ -196,7 +215,10 @@ fn test_wal_disabled_no_file() {
 
     // No WAL file should exist
     let wal_path = format!("{}/shard_0.wal", wal_dir);
-    assert!(!std::path::Path::new(&wal_path).exists(), "WAL file should not exist when disabled");
+    assert!(
+        !std::path::Path::new(&wal_path).exists(),
+        "WAL file should not exist when disabled"
+    );
 }
 
 #[test]
@@ -267,20 +289,28 @@ fn test_wal_recovery_restores_book_state() {
     for entry in &entries {
         let cmd = match &entry.command {
             WalCommand::PlaceOrder(order) => Command::PlaceOrder(*order),
-            WalCommand::CancelOrder { order_id, symbol, timestamp } => Command::CancelOrder {
+            WalCommand::CancelOrder {
+                order_id,
+                symbol,
+                timestamp,
+            } => Command::CancelOrder {
                 order_id: *order_id,
                 symbol: *symbol,
                 timestamp: *timestamp,
             },
-            WalCommand::AmendOrder { order_id, symbol, new_price, new_qty, timestamp } => {
-                Command::AmendOrder {
-                    order_id: *order_id,
-                    symbol: *symbol,
-                    new_price: *new_price,
-                    new_qty: *new_qty,
-                    timestamp: *timestamp,
-                }
-            }
+            WalCommand::AmendOrder {
+                order_id,
+                symbol,
+                new_price,
+                new_qty,
+                timestamp,
+            } => Command::AmendOrder {
+                order_id: *order_id,
+                symbol: *symbol,
+                new_price: *new_price,
+                new_qty: *new_qty,
+                timestamp: *timestamp,
+            },
         };
         engine.process(cmd);
     }
@@ -317,12 +347,22 @@ fn test_wal_multi_shard() {
 
         // Symbol 0 → shard 0, Symbol 1 → shard 1
         router.process(Command::PlaceOrder(Order::new_limit(
-            1, SymbolId(0), Side::Buy, TimeInForce::GTC,
-            FixedPrice::from_f64(100.0), FixedQty::from_f64(1.0), 1000,
+            1,
+            SymbolId(0),
+            Side::Buy,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(100.0),
+            FixedQty::from_f64(1.0),
+            1000,
         )));
         router.process(Command::PlaceOrder(Order::new_limit(
-            2, SymbolId(1), Side::Sell, TimeInForce::GTC,
-            FixedPrice::from_f64(50.0), FixedQty::from_f64(2.0), 2000,
+            2,
+            SymbolId(1),
+            Side::Sell,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(50.0),
+            FixedQty::from_f64(2.0),
+            2000,
         )));
 
         router.shutdown();

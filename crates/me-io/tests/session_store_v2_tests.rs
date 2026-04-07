@@ -95,11 +95,12 @@ fn test_dedup_fifo_eviction() {
     // Fourth insert should evict req_id=1 (oldest)
     store.dedup_insert(&sid, 4, Bytes::from_static(b"r4"));
     assert_eq!(store.dedup_len(&sid), 3);
-    assert_eq!(store.dedup_lookup(&sid, 1), None, "oldest should be evicted");
     assert_eq!(
-        store.dedup_lookup(&sid, 4),
-        Some(Bytes::from_static(b"r4"))
+        store.dedup_lookup(&sid, 1),
+        None,
+        "oldest should be evicted"
     );
+    assert_eq!(store.dedup_lookup(&sid, 4), Some(Bytes::from_static(b"r4")));
 }
 
 #[test]
@@ -117,10 +118,7 @@ fn test_dedup_reinsert_same_key_no_eviction() {
         store.dedup_lookup(&sid, 1),
         Some(Bytes::from_static(b"v1_updated"))
     );
-    assert_eq!(
-        store.dedup_lookup(&sid, 2),
-        Some(Bytes::from_static(b"v2"))
-    );
+    assert_eq!(store.dedup_lookup(&sid, 2), Some(Bytes::from_static(b"v2")));
 }
 
 #[test]
@@ -172,7 +170,10 @@ fn test_resume_below_ack_watermark_returns_gap() {
     // Then client reconnects saying "I only have up to 3" (state regression).
     // Server should refuse to silently replay 4,5 — those were ACKed, gone.
     match store.resume(&sid, 3) {
-        ReplayResult::Gap { missing_from, missing_to } => {
+        ReplayResult::Gap {
+            missing_from,
+            missing_to,
+        } => {
             assert_eq!(missing_from, 4);
             assert_eq!(missing_to, 5);
         }
@@ -273,7 +274,10 @@ fn test_resume_requests_evicted_frames_returns_partial() {
     // gap boundary = max(evicted=0, last_acked=10) = 10, so asking for 2
     // yields Gap(3..=10) — client must resync via GetOpenOrders snapshot.
     match store.resume(&sid, 2) {
-        ReplayResult::Gap { missing_from, missing_to } => {
+        ReplayResult::Gap {
+            missing_from,
+            missing_to,
+        } => {
             assert_eq!(missing_from, 3);
             assert_eq!(missing_to, 10);
         }
