@@ -49,15 +49,24 @@ snapshot-запросов.
 | 4        | 1      | ver       | u8      | Версия протокола (должна быть `0x02`)       |
 | 5        | 1      | type      | u8      | Тип сообщения (MessageType discriminant)    |
 | 6        | 8      | seq       | u64 LE  | Монотонно возрастающий порядковый номер     |
-| 14       | 8      | req_id    | u64 LE  | Ключ идемпотентности (0 для server→client)  |
+| 14       | 8      | req_id    | u64 LE  | Ключ идемпотентности (см. семантику ниже)   |
 | 22       | N      | payload   | bytes   | Нагрузка, специфичная для типа              |
 
 Поле `len` содержит **только** размер нагрузки, без учёта заголовка.
 Полный размер кадра = `22 + len` байт.
 
-Поле `req_id` обязательно для торговых команд (PlaceOrder, CancelOrder, AmendOrder,
-GetOrderStatus, GetOpenOrders, BatchPlaceOrder, BatchCancelOrder). Для служебных
-сообщений (Handshake, Ping, Acknowledge) допустим `req_id = 0`.
+### Семантика `req_id`
+
+**Клиент → движок:** `req_id` обязателен (ненулевой) для торговых команд (PlaceOrder,
+CancelOrder, AmendOrder, GetOrderStatus, GetOpenOrders, BatchPlaceOrder,
+BatchCancelOrder). Для служебных сообщений (Handshake, Ping, Acknowledge) допустим
+`req_id = 0`. Используется для дедупликации (exactly-once) при переподключении.
+
+**Движок → клиент:** для **solicited** ответов (события, вызванные командой клиента)
+сервер **зеркалит** `req_id` из исходной команды. Это позволяет клиенту сопоставить
+ответ с запросом и реализовать retry-логику. Для **unsolicited** событий (пассивные
+fill'ы на стороне мейкера, stop-триггеры, service-фреймы вроде Error, Pong,
+FlowControlWarning) `req_id = 0`.
 
 ---
 
@@ -100,7 +109,7 @@ GetOrderStatus, GetOpenOrders, BatchPlaceOrder, BatchCancelOrder). Для слу
 |--------|----------------------|------------------------------------------|
 | `0x10` | OrderAccepted        | 16 байт                                  |
 | `0x11` | OrderRejected        | 17 байт                                  |
-| `0x12` | Trade                | 51 байт                                  |
+| `0x12` | Trade                | 59 байт                                  |
 | `0x13` | OrderFilled          | 32 байта                                 |
 | `0x14` | OrderPartiallyFilled | 40 байт                                  |
 | `0x15` | OrderCancelled       | 24 байта                                 |
@@ -114,7 +123,7 @@ GetOrderStatus, GetOpenOrders, BatchPlaceOrder, BatchCancelOrder). Для слу
 | `0x1E` | OrderNotFound        | 8 байт (order_id)                        |
 | `0x1F` | OpenOrdersBegin      | 12 байт (count + snapshot_seq)           |
 | `0x20` | ReplayGap            | 16 байт (missing_from + missing_to)      |
-| `0x21` | OpenOrder            | переменный (сериализованный Order)       |
+| `0x21` | OpenOrder            | 60 байт (фиксированный, без session_id)  |
 | `0x22` | OpenOrdersEnd        | 8 байт (snapshot_seq)                    |
 | `0x23` | FlowControlWarning   | 2 байта (buffer_pct + is_hard_limit)     |
 
@@ -240,7 +249,7 @@ GetOrderStatus, GetOpenOrders, BatchPlaceOrder, BatchCancelOrder). Для слу
 16         1      reject_reason u8       Причина отклонения (см. перечисления)
 ```
 
-### Trade (0x12) — 51 байт
+### Trade (0x12) — 59 байт
 
 ```
 Смещение  Размер  Поле            Тип      Описание
@@ -253,6 +262,7 @@ GetOrderStatus, GetOpenOrders, BatchPlaceOrder, BatchCancelOrder). Для слу
 34         8      taker_order_id  u64 LE   ID ордера тейкера
 42         1      maker_side      u8       Сторона мейкера (0=Buy, 1=Sell)
 43         8      timestamp       u64 LE   Временная метка (нс)
+51         8      sequence        u64 LE   Порядковый номер сделки в книге
 ```
 
 ### OrderFilled (0x13) — 32 байта
@@ -335,9 +345,28 @@ StopTriggered (24 байта): `order_id(8) | trigger_price(8) | timestamp(8)`
 Разрыв в replay-буфере: `missing_from(u64) + missing_to(u64)`.
 Клиент должен отправить GetOpenOrders для ресинхронизации.
 
-### OpenOrder (0x21) — переменный
+### OpenOrder (0x21) — 60 байт (фиксированный)
 
-Одна запись ордера внутри OpenOrders snapshot. Полная сериализация Order.
+Одна запись ордера внутри OpenOrders snapshot. Фиксированный wire-формат, **не**
+полная структура Order — `client_session_id` не включается (клиент знает свой ID).
+
+```
+Смещение  Размер  Поле           Тип      Описание
+--------  ------  -----          ----     --------
+ 0         8      order_id       u64 LE   ID ордера
+ 8         2      symbol_id      u16 LE   ID инструмента
+10         1      side           u8       Buy=0, Sell=1
+11         1      order_type     u8       Limit=0, Market=1, StopLimit=2, StopMarket=3
+12         1      tif            u8       GTC=0, IOC=1, FOK=2
+13         1      status         u8       OrderStatus discriminant
+14         8      price          i64 LE   Цена (fixed-point ×10^8)
+22         8      stop_price     i64 LE   Стоп-цена (fixed-point ×10^8)
+30         8      qty            u64 LE   Начальное количество
+38         8      remaining_qty  u64 LE   Оставшееся количество
+46         8      timestamp      u64 LE   Временная метка (нс)
+54         1      flags          u8       Битовая маска флагов
+55         5      _reserved      [u8; 5]  Зарезервировано (padding, всегда 0)
+```
 
 ### OpenOrdersEnd (0x22) — 8 байт
 
@@ -589,13 +618,13 @@ Offset  Hex                                              Поле
 ```
 Offset  Hex                                              Поле
 ------  -----------------------------------------------  -----
-0000    33 00 00 00                                       len = 51
+0000    3B 00 00 00                                       len = 59
 0004    02                                                ver = 2
 0005    12                                                type = Trade (0x12)
 0006    02 00 00 00 00 00 00 00                           seq = 2
-000E    00 00 00 00 00 00 00 00                           req_id = 0
+000E    00 00 00 00 00 00 00 00                           req_id = 0 (unsolicited — мейкер)
 
-        --- нагрузка (51 байт) ---
+        --- нагрузка (59 байт) ---
 0016    01 00 00 00 00 00 00 00                           trade_id = 1
 001E    01 00                                             symbol_id = 1
 0020    00 50 39 27 8C 04 00 00                           price = 5_000_000_000_000
@@ -604,7 +633,12 @@ Offset  Hex                                              Поле
 0038    2A 00 00 00 00 00 00 00                           taker_order_id = 42
 0040    01                                                maker_side = Sell (1)
 0041    ... (8 bytes timestamp)
+0049    ... (8 bytes sequence)
 ```
+
+> **Примечание:** `req_id` для Trade может быть ненулевым, если сделка произошла
+> в результате команды клиента (solicited fill для тейкера). Для мейкера, чей ордер
+> покоился в книге, `req_id = 0` (unsolicited).
 
 ---
 

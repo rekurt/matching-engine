@@ -287,7 +287,7 @@ The engine communicates via a custom binary protocol over TCP or Unix Domain Soc
 - `ver` -- protocol version, must be `0x02` / версия протокола, должна быть `0x02`
 - `type` -- message type identifier / идентификатор типа сообщения
 - `seq` -- monotonically increasing sequence number / монотонно возрастающий порядковый номер
-- `req_id` -- client idempotency key (0 for server→client) / ключ идемпотентности клиента
+- `req_id` -- idempotency key; mirrored in solicited responses, 0 for unsolicited / ключ идемпотентности; зеркалится в ответах на команды, 0 для unsolicited
 
 **Inbound messages / Входящие сообщения:** `PlaceOrder` (0x01), `CancelOrder` (0x02), `AmendOrder` (0x03), `Ping` (0x04), `Handshake` (0x05), `ResumeSession` (0x06), `GetOrderStatus` (0x07), `Acknowledge` (0x08), `GetOpenOrders` (0x09), `BatchPlaceOrder` (0x0B), `BatchCancelOrder` (0x0C)
 
