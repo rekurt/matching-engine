@@ -130,14 +130,14 @@ def read_frame(sock, timeout=5.0):
     """Блокирует до получения полного фрейма."""
     sock.settimeout(timeout)
     while True:
-        # Проверяем есть ли полный заголовок
-        if len(buf) >= 14:
-            payload_len, ver, msg_type, seq = struct.unpack_from("<IBBQ", buf, 0)
-            total = 14 + payload_len
+        # Проверяем есть ли полный заголовок (22 байта для v2)
+        if len(buf) >= 22:
+            payload_len, ver, msg_type, seq, req_id = struct.unpack_from("<IBBQQ", buf, 0)
+            total = 22 + payload_len
             if len(buf) >= total:
-                payload = bytes(buf[14:total])
+                payload = bytes(buf[22:total])
                 del buf[:total]          # потребить фрейм из буфера
-                return msg_type, seq, payload
+                return msg_type, seq, req_id, payload
         # Нужно больше данных
         chunk = sock.recv(4096)
         if not chunk:
@@ -270,23 +270,36 @@ import socket, struct
 
 SCALE = 10**8
 seq = 0
+req_counter = 0
 
 def to_raw(val): return int(round(val * SCALE))
-def send(sock, t, payload):
+
+def send(sock, t, payload, req_id=0):
+    """Отправить v2-фрейм (22-байт заголовок + payload)."""
     global seq; seq += 1
-    sock.sendall(struct.pack("<IBBQ", len(payload), 1, t, seq) + payload)
+    sock.sendall(struct.pack("<IBBQQ", len(payload), 2, t, seq, req_id) + payload)
+
+def recv_frame(sock):
+    """Прочитать один v2-фрейм (22-байт заголовок)."""
+    hdr = sock.recv(22)
+    pl_len, ver, msg_type, s, rid = struct.unpack("<IBBQQ", hdr)
+    payload = sock.recv(pl_len) if pl_len else b""
+    return msg_type, s, rid, payload
 
 sock = socket.socket()
 sock.connect(("127.0.0.1", 9090))
 
-# Handshake
-send(sock, 0x05, b"")
-hdr = sock.recv(14); pl_len = struct.unpack_from("<I", hdr)[0]
-if pl_len: sock.recv(pl_len)
+# Handshake (req_id=0 для служебных сообщений)
+send(sock, 0x05, struct.pack("B", 2))
+msg_type, _, _, _ = recv_frame(sock)
+assert msg_type == 0x1A, "Expected HandshakeAck"
 
-# Buy 1 BTC @ $50k
-send(sock, 0x01, struct.pack("<QHBBBqqQ", 1, 0, 0, 0, 0, to_raw(50000), 0, to_raw(1.0)))
-hdr = sock.recv(14); print("OrderAccepted" if struct.unpack_from("<BB", hdr, 4)[1] == 0x10 else "?")
+# Buy 1 BTC @ $50k (req_id=1 для торговых команд)
+req_counter += 1
+send(sock, 0x01, struct.pack("<QHBBBqqQ", 1, 0, 0, 0, 0, to_raw(50000), 0, to_raw(1.0)), req_id=req_counter)
+msg_type, _, rid, _ = recv_frame(sock)
+print("OrderAccepted" if msg_type == 0x10 else f"Unexpected: 0x{msg_type:02x}")
+assert rid == req_counter, "req_id must mirror the command"
 
 sock.close()
 ```
