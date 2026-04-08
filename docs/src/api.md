@@ -8,12 +8,12 @@ Matching engine предоставляет два API:
 
 ## Бинарный протокол: Команды (Клиент → Движок)
 
-Все команды отправляются в бинарных кадрах с 14-байтовым заголовком.
+Все команды отправляются в бинарных кадрах с 22-байтовым заголовком (v2).
 Подробный формат кадра см. в [Бинарный протокол](./protocol.md).
 
 ### PlaceOrder — Разместить ордер
 
-Код: `0x01` | Нагрузка: 37 байт
+Код: `0x01` | Нагрузка: 37–38 байт
 
 ```
 Поле        Тип      Описание
@@ -26,6 +26,7 @@ tif         u8       GTC=0, IOC=1, FOK=2
 price       i64 LE   Лимитная цена (fixed-point ×10^8; 0 для Market)
 stop_price  i64 LE   Стоп-цена (fixed-point ×10^8; 0 для не-стоп)
 qty         u64 LE   Количество (fixed-point ×10^8)
+flags       u8       [опционально] Битовая маска (POST_ONLY=0x01, REDUCE_ONLY=0x02, MAKER_OR_CANCEL=0x04)
 ```
 
 Правила:
@@ -88,11 +89,49 @@ has_qty     u8       1 = далее следует новое количеств
 ```
 Поле            Тип  Описание
 -----------     ---  --------
-client_version  u8   [необязательно] Версия протокола клиента (должна быть 1)
+client_version  u8   [необязательно] Версия протокола клиента (должна быть 2)
 ```
 
 **Должен быть первым кадром** (кроме Ping) после TCP-соединения.
-Ответ от движка: HandshakeAck (0x1A).
+Ответ от движка: HandshakeAck (0x1A) с TLV-расширениями.
+
+### ResumeSession — Восстановить сессию
+
+Код: `0x06` | Нагрузка: 24 байта
+
+```
+Поле            Тип        Описание
+-----------     -------    --------
+session_id      [u8; 16]   ID сессии из предыдущего HandshakeAck
+last_recv_seq   u64 LE     Последний принятый server seq
+```
+
+Ответ: SessionResumed (0x1B) + replay пропущенных фреймов, или ReplayGap (0x20).
+
+### GetOrderStatus — Запросить статус ордера
+
+Код: `0x07` | Нагрузка: 10 байт
+
+Формат аналогичен CancelOrder: `order_id(8) + symbol_id(2)`.
+Ответ: OrderStatus (0x1D) или OrderNotFound (0x1E).
+
+### Acknowledge — Cumulative ACK
+
+Код: `0x08` | Нагрузка: 8 байт — `last_processed_server_seq(u64)`.
+Сервер освобождает replay-буфер до указанного seq.
+
+### GetOpenOrders — Снапшот открытых ордеров
+
+Код: `0x09` | Нагрузка: 0 байт.
+Ответ: OpenOrdersBegin → N × OpenOrder → OpenOrdersEnd.
+
+### BatchPlaceOrder — Массовое размещение
+
+Код: `0x0B` | Нагрузка: `count(1) + [PlaceOrder_payload × count]`. Макс. 20 ордеров.
+
+### BatchCancelOrder — Массовая отмена
+
+Код: `0x0C` | Нагрузка: `count(1) + [CancelOrder_payload × count]`. Макс. 50 отмен.
 
 ---
 
@@ -137,10 +176,12 @@ reject_reason  u8       Причина отклонения (см. RejectReason 
 | 8        | SymbolNotFound        | Неизвестный ID инструмента             |
 | 9        | TradingHalted         | Торговля по инструменту приостановлена |
 | 10       | RiskCheckFailed       | Проверка pre-trade риска не пройдена   |
+| 11       | WouldTakeMarket       | POST_ONLY ордер пересёк бы спред      |
+| 12       | InternalError         | Внутренняя ошибка сервера              |
 
 ### Trade — Сделка
 
-Код: `0x12` | Нагрузка: 51 байт
+Код: `0x12` | Нагрузка: 59 байт
 
 ```
 Поле            Тип      Описание
@@ -153,9 +194,11 @@ maker_order_id  u64 LE   ID ордера мейкера
 taker_order_id  u64 LE   ID ордера тейкера
 maker_side      u8       Сторона мейкера (Buy=0, Sell=1)
 timestamp       u64 LE   Временная метка сервера (нс)
+sequence        u64 LE   Порядковый номер сделки в книге
 ```
 
-Trade отправляется **обоим** участникам сделки (мейкеру и тейкеру).
+Trade и все остальные события, порождённые командой, отправляются на соединение,
+приславшее команду. Все фреймы несут `req_id` исходной команды.
 
 ### OrderFilled — Ордер полностью исполнен
 
@@ -231,11 +274,22 @@ timestamp      u64 LE   Временная метка сервера (нс)
 После StopTriggered ордер конвертируется (StopLimit → Limit, StopMarket → Market)
 и немедленно обрабатывается матчинговым движком.
 
-### HandshakeAck, Pong, Error
+### HandshakeAck — Подтверждение сеанса (v2)
 
-- **HandshakeAck (0x1A)**: 1 байт нагрузки — `server_version: u8`.
-- **Pong (0x18)**: 0 байт нагрузки — ответ на Ping.
-- **Error (0x19)**: переменная нагрузка — `error_code: u8` + опциональное сообщение.
+Код: `0x1A` | Нагрузка: 41 байт
+
+Содержит `server_version(1)` + TLV-расширения:
+- **TLV_CAPABILITIES** (tag=0x0001, 8 байт) — битовая маска возможностей
+- **TLV_SESSION_ID** (tag=0x0002, 16 байт) — ID сессии для ResumeSession
+- **TLV_HEARTBEAT_MS** (tag=0x0003, 4 байта) — интервал heartbeat в миллисекундах
+
+### Pong
+
+Код: `0x18` | Нагрузка: 8 байт — `last_processed_client_seq: u64 LE`. Ответ на Ping.
+
+### Error
+
+Код: `0x19` | Переменная нагрузка — `error_code: u16 LE` + опциональное сообщение.
 
 | Значение | ErrorCode            | Описание                                |
 |----------|----------------------|-----------------------------------------|
@@ -245,6 +299,23 @@ timestamp      u64 LE   Временная метка сервера (нс)
 | 4        | InvalidPayload       | Некорректная нагрузка кадра            |
 | 5        | ServerShuttingDown   | Сервер завершает работу                 |
 | 6        | Backpressure         | Переполнение буфера записи (256 КБ)    |
+| 7        | HeartbeatTimeout     | Клиент не отправил Ping вовремя        |
+| 8        | TlsError             | Ошибка TLS handshake                    |
+| 9        | InvalidRequestId     | Отсутствует обязательный request_id    |
+| 10       | SessionExpired       | Сессия истекла (TTL)                    |
+| 11       | BufferExhausted      | Replay-буфер исчерпан                   |
+| 12       | InternalError        | Внутренняя ошибка сервера               |
+
+### Дополнительные события v2
+
+- **SessionResumed (0x1B)**: 4 байта — `replayed_count(u32)`.
+- **OrderStatus (0x1D)**: 41 байт — ответ на GetOrderStatus.
+- **OrderNotFound (0x1E)**: 8 байт — ордер не найден.
+- **OpenOrdersBegin (0x1F)**: 12 байт — начало снапшота.
+- **ReplayGap (0x20)**: 16 байт — разрыв в replay-буфере.
+- **OpenOrder (0x21)**: 60 байт — фиксированный wire-формат ордера (без `client_session_id`).
+- **OpenOrdersEnd (0x22)**: 8 байт — конец снапшота.
+- **FlowControlWarning (0x23)**: 2 байта — предупреждение о медленном чтении.
 
 После Error-кадра с кодами 1–4 соединение закрывается.
 

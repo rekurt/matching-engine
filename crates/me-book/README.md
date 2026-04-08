@@ -8,7 +8,10 @@ Price-time priority order book with LIMIT, MARKET, STOP-LIMIT, and STOP-MARKET o
 | Time in force | GTC, IOC, FOK |
 | Data structures | BTreeMap price levels + Slab allocator + intrusive FIFO list |
 | Cancel/amend | O(1) via FxHashMap<OrderId, OrderLocation> |
+| Amend rules | Qty-down only: in-place (time priority preserved); price/qty-up: cancel + re-insert |
 | Stop orders | Separate StopBook; cascading triggers bounded to 100 iterations |
+| Invariants | Configurable policy per symbol: Strict (panic), HaltSymbol, Continue |
+| Session queries | `scan_by_session_id(session_id)` for per-client open orders |
 
 ## Quick example
 

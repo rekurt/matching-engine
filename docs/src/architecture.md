@@ -73,11 +73,12 @@ me-datagen ──> me-core    (генератор потока ордеров)
 | `me-book`    | Стакан ордеров: BTreeMap по ценовым уровням, slab allocator, StopBook     |
 | `me-engine`  | Engine на торговую пару, Router, ShardedRouterV2                           |
 | `me-persist` | WAL с CRC32 и снапшоты с атомарным переименованием                         |
-| `me-io`      | Бинарный протокол (14-байт заголовок), async TCP и UDS серверы (tokio)    |
+| `me-io`      | Бинарный протокол v2 (22-байт заголовок), async TCP и UDS серверы (tokio) |
 | `me-server`  | Точка входа, CLI (clap), TOML конфиг, REST admin API (Axum, порт 9091)    |
 | `me-metrics` | 50+ метрик Prometheus: ордера, сделки, книга, соединения, WAL              |
 | `me-risk`    | Pre-trade риск: token-bucket rate limiting, price bands, position limits   |
 | `me-audit`   | Структурированные JSON-события аудита через tracing                         |
+| `me-clock`   | Абстракция часов: SystemClock, CoarseClock, RdtscClock                     |
 | `me-bench`   | Criterion-бенчмарки: 18 сценариев по throughput, latency, e2e матчинг     |
 
 ---
@@ -103,21 +104,23 @@ FixedQty(u64)     — беззнаковый (количество всегда 
 
 ```rust
 #[repr(C)]
-pub struct Order {             // 72 байта, cache-line friendly
-    pub id: OrderId,           // u64
-    pub price: FixedPrice,     // i64
-    pub stop_price: FixedPrice,// i64
-    pub qty: FixedQty,         // u64
-    pub remaining_qty: FixedQty,
-    pub cumulative_qty: FixedQty,
-    pub timestamp: u64,        // наносекунды от эпохи
-    pub sequence: SequenceId,  // u64 (монотонный счётчик книги)
-    pub symbol: SymbolId,      // u16
-    pub side: Side,            // u8
-    pub order_type: OrderType, // u8
-    pub tif: TimeInForce,      // u8
-    pub status: OrderStatus,   // u8
-    pub _pad: [u8; 2],
+pub struct Order {                     // 88 байт
+    pub id: OrderId,                   // u64
+    pub price: FixedPrice,             // i64
+    pub stop_price: FixedPrice,        // i64
+    pub qty: FixedQty,                 // u64
+    pub remaining_qty: FixedQty,       // u64
+    pub cumulative_qty: FixedQty,      // u64
+    pub timestamp: u64,                // наносекунды от эпохи
+    pub sequence: SequenceId,          // u64 (монотонный счётчик книги)
+    pub symbol: SymbolId,              // u16
+    pub side: Side,                    // u8
+    pub order_type: OrderType,         // u8
+    pub tif: TimeInForce,              // u8
+    pub status: OrderStatus,           // u8
+    pub flags: u8,                     // битовая маска (POST_ONLY, REDUCE_ONLY, MAKER_OR_CANCEL)
+    pub _pad: u8,
+    pub client_session_id: SessionId,  // [u8; 16] — привязка к сессии клиента
 }
 ```
 

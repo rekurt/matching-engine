@@ -9,6 +9,9 @@ One-engine-per-symbol orchestrator with lock-free single-thread-per-symbol guara
 | Circuit breaker | `TradingState::Halted` — cancels allowed, new orders rejected |
 | Stop cascade | Bounded to 100 iterations to prevent infinite loops |
 | Command types | PlaceOrder, CancelOrder, AmendOrder, Halt/Resume |
+| WAL | Optional Write-Ahead Log (Pre/Post/Disabled modes) |
+| Snapshots | `snapshot()` / `restore_from_snapshot()` for crash recovery |
+| Thread affinity | Optional CPU pinning and RT priority via `AffinityConfig` |
 
 ## Quick example
 
@@ -61,7 +64,7 @@ shards = 4  # 0 = auto (number of CPU cores)
 
 ```toml
 [[symbols]]
-id     = 1
+id     = 0
 base   = "BTC"
 quote  = "USDT"
 price_scale = 2   # $50000.00 stored as 5000000

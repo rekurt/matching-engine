@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Pre-commit hook for matching-engine.
+#
+# Checks (in order, fast-fail):
+#   1. No merge conflict markers in staged files
+#   2. cargo fmt --check (instant)
+#   3. cargo clippy (incremental, ~2-5s)
+#
+# Setup (once per clone):
+#   git config core.hooksPath .githooks
+#
+# To skip temporarily (e.g. WIP commit):
+#   git commit --no-verify
+
+set -euo pipefail
+
+# ─── Colors ──────────────────────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m' # No Color
+
+step() { printf "${YELLOW}[pre-commit]${NC} %s\n" "$1"; }
+ok()   { printf "${GREEN}[pre-commit]${NC} %s ✓\n" "$1"; }
+fail() { printf "${RED}[pre-commit]${NC} %s ✗\n" "$1"; }
+
+# ─── 1. Conflict markers ────────────────────────────────────────────────────
+step "Checking for conflict markers..."
+
+# Only check staged files (not the whole tree).
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
+if [ -n "$STAGED_FILES" ]; then
+    if echo "$STAGED_FILES" | xargs grep -lE '^(<{7}|={7}|>{7})' 2>/dev/null; then
+        fail "Conflict markers found in staged files (see above)"
+        exit 1
+    fi
+fi
+ok "No conflict markers"
+
+# ─── 2. cargo fmt ────────────────────────────────────────────────────────────
+step "Checking formatting (cargo fmt)..."
+
+if ! cargo fmt --all -- --check 2>/dev/null; then
+    fail "Formatting issues found. Run: cargo fmt --all"
+    exit 1
+fi
+ok "Formatting"
+
+# ─── 3. cargo clippy ────────────────────────────────────────────────────────
+step "Running clippy..."
+
+if ! cargo clippy --workspace --all-targets -- -D warnings 2>/dev/null; then
+    fail "Clippy warnings found. Fix them before committing."
+    exit 1
+fi
+ok "Clippy"
+
+printf "${GREEN}[pre-commit]${NC} All checks passed.\n"
