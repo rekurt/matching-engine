@@ -140,7 +140,7 @@ with `#[inline]` and saturating variants are provided for safety.
 
 ```rust
 #[repr(C)]
-pub struct Order {             // 72 bytes, cache-line friendly
+pub struct Order {             // 88 bytes, cache-line friendly
     pub id: OrderId,           // u64
     pub price: FixedPrice,     // i64
     pub stop_price: FixedPrice,// i64
@@ -154,7 +154,9 @@ pub struct Order {             // 72 bytes, cache-line friendly
     pub order_type: OrderType, // u8   (Limit=0, Market=1, StopLimit=2, StopMarket=3)
     pub tif: TimeInForce,      // u8   (GTC=0, IOC=1, FOK=2)
     pub status: OrderStatus,   // u8
-    pub _pad: [u8; 2],         // alignment padding
+    pub flags: u8,             // bitmask: POST_ONLY(0x01), REDUCE_ONLY(0x02), MAKER_OR_CANCEL(0x04)
+    pub _pad: u8,              // alignment padding
+    pub client_session_id: SessionId, // [u8; 16] — session binding for OpenOrders queries
 }
 ```
 
@@ -922,7 +924,7 @@ the common case.
    start of each command but never deallocated. The underlying `Vec` retains
    its allocation across commands.
 
-3. **Fixed-size types**: `Order` (72 bytes) and `Trade` are `Copy` types with
+3. **Fixed-size types**: `Order` (88 bytes) and `Trade` are `Copy` types with
    `#[repr(C)]` layout. No heap-allocated fields (strings, Vecs) on the hot
    path.
 
@@ -994,7 +996,7 @@ The system is optimized for single-digit microsecond matching latency:
 
 - **Fixed-point arithmetic**: all price/quantity math uses integer operations.
   No floating-point conversion anywhere in the matching path.
-- **Cache-friendly layout**: `Order` is 72 bytes (`#[repr(C)]`), and
+- **Cache-friendly layout**: `Order` is 88 bytes (`#[repr(C)]`), and
   `OrderNode` instances within a price level are accessed sequentially via
   the intrusive linked list, promoting prefetch.
 - **No locks**: each Engine is single-threaded. No mutex acquisition, no

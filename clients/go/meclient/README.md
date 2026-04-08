@@ -58,22 +58,23 @@ All integers are **little-endian**. Prices and quantities use **fixed-point** re
 
 ### Frame Format
 
-Every message is wrapped in a length-prefixed, versioned frame:
+Every message is wrapped in a length-prefixed, versioned frame (protocol v2):
 
 ```
-┌──────────┬──────────┬──────────┬──────────┬─────────────────┐
-│ len: u32 │ ver: u8  │ type: u8 │ seq: u64 │ payload: [u8]   │
-│ 4 bytes  │ 1 byte   │ 1 byte   │ 8 bytes  │ variable        │
-└──────────┴──────────┴──────────┴──────────┴─────────────────┘
+┌──────────┬──────────┬──────────┬──────────┬─────────────┬─────────────────┐
+│ len: u32 │ ver: u8  │ type: u8 │ seq: u64 │ req_id: u64 │ payload: [u8]   │
+│ 4 bytes  │ 1 byte   │ 1 byte   │ 8 bytes  │ 8 bytes     │ variable        │
+└──────────┴──────────┴──────────┴──────────┴─────────────┴─────────────────┘
 ```
 
 - **len** (4 bytes, LE): Length of `payload` only (not including header)
-- **ver** (1 byte): Protocol version (currently 1)
+- **ver** (1 byte): Protocol version (currently 2)
 - **type** (1 byte): Message type identifier
-- **seq** (8 bytes, LE): Sequence number for request/response correlation
+- **seq** (8 bytes, LE): Monotonically increasing sequence number
+- **req_id** (8 bytes, LE): Idempotency key; mirrored in solicited replies, 0 for unsolicited
 - **payload** (variable): Message-specific data
 
-Header size: 14 bytes total.
+Header size: 22 bytes total.
 
 ### Connection Lifecycle
 

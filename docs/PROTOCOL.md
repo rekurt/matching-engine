@@ -1,7 +1,7 @@
 # Wire Protocol Specification / Спецификация сетевого протокола
 
-**Version / Версия:** 1.0
-**Protocol Version Byte / Байт версии протокола:** `0x01`
+**Version / Версия:** 2.0
+**Protocol Version Byte / Байт версии протокола:** `0x02`
 **Status / Статус:** Stable / Стабильный
 **Encoding / Кодировка:** Little-Endian for all multi-byte integers / Little-Endian для всех многобайтовых целых
 
@@ -47,10 +47,14 @@ a type-specific payload.
 
 | Constant                | Value      | Description (EN)                        | Описание (RU)                                |
 |-------------------------|------------|-----------------------------------------|----------------------------------------------|
-| `PROTOCOL_VERSION`      | `1`        | Current protocol version                | Текущая версия протокола                     |
-| `FRAME_HEADER_SIZE`     | `14` bytes | Fixed header preceding every payload    | Фиксированный заголовок перед каждой нагрузкой|
-| `MAX_PAYLOAD_SIZE`      | `1024` bytes | Maximum allowed payload length        | Максимально допустимая длина нагрузки        |
+| `PROTOCOL_VERSION`      | `2`        | Current protocol version                | Текущая версия протокола                     |
+| `FRAME_HEADER_SIZE`     | `22` bytes | Fixed header preceding every payload    | Фиксированный заголовок перед каждой нагрузкой|
+| `MAX_PAYLOAD_SIZE`      | `1024` bytes | Maximum allowed payload length (regular) | Макс. длина нагрузки (обычные фреймы)      |
+| `MAX_PAYLOAD_SIZE_BATCH`| `4096` bytes | Maximum payload for batch frames      | Макс. нагрузка для batch-фреймов             |
+| `MAX_PAYLOAD_SIZE_SNAPSHOT`| `8192` bytes | Maximum payload for snapshot frames | Макс. нагрузка для snapshot-фреймов          |
 | `MAX_WRITE_BUFFER_SIZE` | `262144` bytes (256 KB) | Server write-buffer backpressure limit | Лимит буфера записи для обратного давления |
+| `MAX_BATCH_PLACE`       | `20`       | Max orders in BatchPlaceOrder           | Макс. ордеров в BatchPlaceOrder              |
+| `MAX_BATCH_CANCEL`      | `50`       | Max orders in BatchCancelOrder          | Макс. ордеров в BatchCancelOrder             |
 
 ---
 
@@ -78,6 +82,10 @@ followed by the payload bytes. There is no padding and no alignment requirement.
 +                               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                               |                               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               +
+|                      Request ID (u64 LE)                      |
++                               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                               |                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               +
 |                        Payload (variable)                     |
 +                              ...                              +
 ```
@@ -91,7 +99,8 @@ Offset  Size   Field       Type      Description
  4       1     ver         u8        Protocol version (must be 0x02)
  5       1     type        u8        MessageType enum discriminant
  6       8     seq         u64 LE    Monotonically increasing sequence number
-14       N     payload     bytes     Type-specific payload (0..1024 bytes)
+14       8     req_id      u64 LE    Idempotency key (mirrored in solicited replies, 0 for unsolicited)
+22       N     payload     bytes     Type-specific payload (0..1024 bytes)
 ```
 
 > **Русский:**
@@ -102,9 +111,10 @@ Offset  Size   Field       Type      Description
 > | 4        | 1      | ver     | u8      | Версия протокола (должна быть 0x02)                 |
 > | 5        | 1      | type    | u8      | Дискриминант перечисления MessageType                |
 > | 6        | 8      | seq     | u64 LE  | Монотонно возрастающий порядковый номер              |
-> | 14       | N      | payload | байты   | Полезная нагрузка, специфичная для типа (0..1024 б) |
+> | 14       | 8      | req_id  | u64 LE  | Ключ идемпотентности (зеркалится в ответах на команды) |
+> | 22       | N      | payload | байты   | Полезная нагрузка, специфичная для типа (0..1024 б) |
 
-**Total frame size** = `FRAME_HEADER_SIZE + len` = `14 + len` bytes.
+**Total frame size** = `FRAME_HEADER_SIZE + len` = `22 + len` bytes.
 
 The `len` field covers **only** the payload bytes. It does NOT include the 22-byte (v2)
 header itself.
@@ -971,15 +981,15 @@ All examples show complete frames (header + payload) as they appear on the wire.
 
 ### 12.1 Handshake (Client -> Engine)
 
-A Handshake with `client_version=1`, `seq=0`:
+A Handshake with `client_version=2`, `seq=0`:
 
 ```
-Payload length = 1 byte, version = 0x01, type = 0x05, seq = 0
+Payload length = 1 byte, version = 0x02, type = 0x05, seq = 0
 
 Offset  Hex                                              ASCII
 ------  -----------------------------------------------  ----------------
 0000    01 00 00 00  01 05  00 00 00 00 00 00 00 00  01  ................
-        |len=1     | V  T  |seq=0                     |  |payload: ver=1|
+        |len=1     | V  T  |seq=0                     |  |payload: ver=2|
         |          |       |                           |  |              |
 
 Header breakdown:
@@ -996,7 +1006,7 @@ Total frame: 15 bytes (14 header + 1 payload)
 
 ### 12.2 HandshakeAck (Engine -> Client)
 
-Response with `server_version=1`, `seq=0`:
+Response with `server_version=2`, `seq=0`:
 
 ```
 Offset  Hex                                              ASCII
@@ -1032,7 +1042,7 @@ Header breakdown:
 
 Payload: (none)
 
-Total frame: 14 bytes (header only)
+Total frame: 22 bytes (header only)
 ```
 
 ### 12.4 Pong (Engine -> Client)
@@ -1050,7 +1060,7 @@ Header breakdown:
   18           = type: Pong (0x18)
   01 00 00 00 00 00 00 00 = seq: 1 (u64 LE)
 
-Total frame: 14 bytes
+Total frame: 22 bytes
 ```
 
 ### 12.5 PlaceOrder -- Limit Buy 1.0 BTC @ 50,000.00
@@ -1065,7 +1075,7 @@ Place a Limit Buy order: `order_id=42`, `symbol_id=1` (e.g., BTCUSD),
 Offset  Hex
 ------  -----------------------------------------------
 0000    25 00 00 00                                       len = 37
-0004    01                                                ver = 1
+0004    02                                                ver = 2
 0005    01                                                type = PlaceOrder (0x01)
 0006    01 00 00 00 00 00 00 00                           seq = 1
 
@@ -1094,7 +1104,7 @@ Cancel order 42 on symbol 1, `seq=2`:
 Offset  Hex
 ------  -----------------------------------------------
 0000    0A 00 00 00                                       len = 10
-0004    01                                                ver = 1
+0004    02                                                ver = 2
 0005    02                                                type = CancelOrder (0x02)
 0006    02 00 00 00 00 00 00 00                           seq = 2
 
@@ -1115,7 +1125,7 @@ Trade: `trade_id=1001`, `symbol_id=1`, `price=50000.00`,
 Offset  Hex
 ------  -----------------------------------------------
 0000    33 00 00 00                                       len = 51
-0004    01                                                ver = 1
+0004    02                                                ver = 2
 0005    12                                                type = Trade (0x12)
 0006    03 00 00 00 00 00 00 00                           seq = 3
 
@@ -1140,7 +1150,7 @@ Reject order 42 with `DuplicateOrderId(7)`, `timestamp=1700000000000000000`, `se
 Offset  Hex
 ------  -----------------------------------------------
 0000    11 00 00 00                                       len = 17
-0004    01                                                ver = 1
+0004    02                                                ver = 2
 0005    11                                                type = OrderRejected (0x11)
 0006    02 00 00 00 00 00 00 00                           seq = 2
 
@@ -1160,7 +1170,7 @@ Client sent a command before Handshake. Error with code 3, message "handshake re
 Offset  Hex
 ------  -----------------------------------------------
 0000    16 00 00 00                                       len = 22
-0004    01                                                ver = 1
+0004    02                                                ver = 2
 0005    19                                                type = Error (0x19)
 0006    00 00 00 00 00 00 00 00                           seq = 0
 
@@ -1184,7 +1194,7 @@ Qty   = 0.75     =>        75_000_000 = 0x00000000047868C0 (LE: C0 68 78 04 00 0
 Offset  Hex
 ------  -----------------------------------------------
 0000    1C 00 00 00                                       len = 28
-0004    01                                                ver = 1
+0004    02                                                ver = 2
 0005    03                                                type = AmendOrder (0x03)
 0006    03 00 00 00 00 00 00 00                           seq = 3
 
@@ -1212,16 +1222,17 @@ Pseudocode for reading a single frame from a TCP stream:
 ```
 function read_frame(stream):
     // 1. Read the 22-byte header (v2)
-    header = stream.read_exact(14)
+    header = stream.read_exact(22)
 
     // 2. Parse header fields (all little-endian)
     payload_len = u32_from_le(header[0..4])
     version     = header[4]
     msg_type    = header[5]
     seq         = u64_from_le(header[6..14])
+    req_id      = u64_from_le(header[14..22])
 
     // 3. Validate
-    if version != 1:
+    if version != 2:
         error("unsupported protocol version")
     if payload_len > 1024:
         error("payload exceeds MAX_PAYLOAD_SIZE")
@@ -1229,19 +1240,20 @@ function read_frame(stream):
     // 4. Read payload
     payload = stream.read_exact(payload_len)
 
-    return Frame { version, msg_type, seq, payload }
+    return Frame { version, msg_type, seq, req_id, payload }
 ```
 
 ### 13.2 Writing Frames / Запись кадров
 
 ```
-function write_frame(stream, msg_type, seq, payload):
+function write_frame(stream, msg_type, seq, req_id, payload):
     // 1. Build the 22-byte header (v2)
     header = []
-    header.append(u32_to_le(len(payload)))   // 4 bytes
-    header.append(0x01)                       // version byte
-    header.append(msg_type)                   // type byte
-    header.append(u64_to_le(seq))            // 8 bytes
+    header.append(u32_to_le(len(payload)))   // 4 bytes: payload length
+    header.append(0x02)                       // 1 byte:  version
+    header.append(msg_type)                   // 1 byte:  type
+    header.append(u64_to_le(seq))            // 8 bytes: sequence
+    header.append(u64_to_le(req_id))         // 8 bytes: request id
 
     // 2. Write header + payload atomically
     stream.write(header + payload)
@@ -1252,9 +1264,9 @@ function write_frame(stream, msg_type, seq, payload):
 ```
 Client                                          Engine
   |                                               |
-  |--- [Handshake, seq=0, ver=1] --------------->|
+  |--- [Handshake, seq=0, ver=2] --------------->|
   |                                               |
-  |<-- [HandshakeAck, seq=0, server_ver=1] ------|  (state -> Active)
+  |<-- [HandshakeAck, seq=0, server_ver=2] ------|  (state -> Active)
   |                                               |
   |--- [PlaceOrder, seq=1, Buy 1.0 @ 50000] --->|
   |                                               |
@@ -1282,9 +1294,9 @@ Client                                          Engine
 > ```
 > Клиент                                         Движок
 >   |                                               |
->   |--- [Handshake, seq=0, ver=1] --------------->|
+>   |--- [Handshake, seq=0, ver=2] --------------->|
 >   |                                               |
->   |<-- [HandshakeAck, seq=0, server_ver=1] ------|  (состояние -> Активное)
+>   |<-- [HandshakeAck, seq=0, server_ver=2] ------|  (состояние -> Активное)
 >   |                                               |
 >   |--- [PlaceOrder, seq=1, Buy 1.0 @ 50000] --->|
 >   |                                               |
@@ -1370,13 +1382,13 @@ can continue operating.
 ## Appendix A: Quick Reference Card / Краткая справочная карта
 
 ```
-FRAME HEADER (14 bytes, always present):
-+------+-----+------+----------+
-| len  | ver | type |   seq    |
-| 4B   | 1B  | 1B   |   8B     |
-+------+-----+------+----------+
-  u32    u8    u8      u64
-  LE                   LE
+FRAME HEADER (22 bytes, always present):
++------+-----+------+----------+----------+
+| len  | ver | type |   seq    |  req_id  |
+| 4B   | 1B  | 1B   |   8B     |   8B     |
++------+-----+------+----------+----------+
+  u32    u8    u8      u64       u64
+  LE                   LE        LE
 
 INBOUND MESSAGE TYPES:
   0x01 PlaceOrder      37B   order_id(8)+sym(2)+side(1)+type(1)+tif(1)+price(8)+stop(8)+qty(8)

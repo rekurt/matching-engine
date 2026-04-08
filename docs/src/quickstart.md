@@ -66,7 +66,7 @@ INFO  me_server: registered symbol BTC/USDT (id=0)
 Проверить что сервер жив:
 
 ```bash
-curl http://localhost:9091/healthz
+curl http://localhost:9091/health
 # {"status":"ok"}
 ```
 
