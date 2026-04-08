@@ -39,6 +39,7 @@ cargo doc --workspace --no-deps --open
 | `me-datagen` | Order flow generator |
 | `me-risk` | Risk management |
 | `me-audit` | Audit logging |
+| `me-clock` | Clock abstraction (SystemClock, CoarseClock, RdtscClock) |
 
 ## Development Workflow / Рабочий процесс
 
@@ -48,7 +49,7 @@ cargo doc --workspace --no-deps --open
 4. **Run checks:**
    ```bash
    cargo fmt --all -- --check
-   cargo clippy --workspace -- -D warnings
+   cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace
    cargo doc --workspace --no-deps -D warnings
    ```

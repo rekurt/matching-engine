@@ -2,7 +2,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://rubx-x.github.io/matching-engine/)
+[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://rekurt.github.io/matching-engine/)
 
 **HFT Cryptocurrency Spot Matching Engine** written in Rust.
 
@@ -44,7 +44,7 @@ event, _ := client.ReadEvent()
 fmt.Printf("event: %+v\n", event)
 ```
 
-Full walkthrough: [docs.rubx-x.github.io/matching-engine/](https://rubx-x.github.io/matching-engine/quickstart.html)
+Full walkthrough: [rekurt.github.io/matching-engine/](https://rekurt.github.io/matching-engine/quickstart.html)
 
 ---
 
@@ -52,38 +52,40 @@ Full walkthrough: [docs.rubx-x.github.io/matching-engine/](https://rubx-x.github
 
 ```
                        +-----------+
-                       |  TCP/UDS  |    Binary wire protocol
-                       |  Clients  |    Бинарный сетевой протокол
+                       |  TCP/UDS  |    Binary wire protocol v2
+                       |  Clients  |    Бинарный протокол v2
                        +-----+-----+
                              |
                     +--------v--------+
-                    |    me-io        |   Frame decode/encode
-                    |  codec + server |   Декодирование/кодирование фреймов
+                    |    me-io        |   Frame decode/encode (22-byte header)
+                    |  codec + server |   Session management, TLS
                     +--------+--------+
                              |
-                    +--------v--------+
-                    |   me-engine     |
-                    |  Router (shard) |   Command dispatch per SymbolId
-                    +--------+--------+   Маршрутизация команд по SymbolId
-                             |
-               +-------------+-------------+
-               |             |             |
-          +----v----+   +----v----+   +----v----+
-          | Engine  |   | Engine  |   | Engine  |   1 Engine = 1 pair
-          | BTC/USD |   | ETH/USD |   | SOL/USD |   1 движок = 1 пара
-          +----+----+   +---------+   +---------+
+                  +----------+----------+
+                  |                     |
+         +--------v--------+   +--------v--------+
+         |    me-risk      |   |   me-engine     |
+         | Rate limit,     |   |  Router (shard) |   Command dispatch per SymbolId
+         | price bands     |   +--------+--------+   Маршрутизация команд по SymbolId
+         +-----------------+            |
+               +------------------------+-------------+
+               |                        |             |
+          +----v----+              +----v----+   +----v----+
+          | Engine  |              | Engine  |   | Engine  |   1 Engine = 1 pair
+          | BTC/USD |              | ETH/USD |   | SOL/USD |   1 движок = 1 пара
+          +----+----+              +---------+   +---------+
                |
        +-------+-------+
        |               |
-  +----v----+    +-----v------+
-  | OrderBook|   |  StopBook  |   BTreeMap + Slab + linked list
-  | me-book  |   |  me-book   |
-  +----------+   +------------+
-                                       |
-                              +--------v--------+
-                              |   me-persist    |   WAL + Snapshots
-                              | wal + snapshot  |   WAL + Снепшоты
-                              +-----------------+
+  +----v-----+   +-----v------+
+  | OrderBook |  |  StopBook  |   BTreeMap + Slab + linked list
+  |  me-book  |  |  me-book   |
+  +----+------+  +------------+
+       |                              +------------------+
+       +---> me-core                  |   me-persist     |  WAL + Snapshots
+             FixedPrice, Order, Trade |  wal + snapshot  |
+                                      +------------------+
+  Observability: me-metrics (Prometheus 50+) | me-audit (JSON events)
 ```
 
 ## Crate Structure / Структура крейтов
@@ -101,6 +103,7 @@ Full walkthrough: [docs.rubx-x.github.io/matching-engine/](https://rubx-x.github
 | [**me-risk**](crates/me-risk/README.md) | Risk management: rate limiting, position limits | Риск-менеджмент: ограничение частоты, лимиты позиций |
 | **me-audit** | Audit logging: JSON events for all matching operations | Аудит: JSON-события всех операций мэтчинга |
 | **me-datagen** | Realistic order flow generator with configurable parameters: volatility, market/limit/stop ratios, cancel/amend ratios | Генератор реалистичного потока ордеров с настраиваемыми параметрами |
+| **me-clock** | Clock abstraction: `SystemClock`, `CoarseClock`, `RdtscClock` for deterministic testing and low-overhead timestamping | Абстракция часов для тестирования и low-overhead таймстемпинга |
 
 ## Features / Возможности
 
@@ -257,11 +260,13 @@ Run `cargo bench -p me-bench` for precise measurements on your hardware.
 
 ### Benchmark Suites / Наборы бенчмарков
 
-| Suite | Benchmarks | Focus / Фокус |
-|-------|------------|----------------|
-| `throughput` | 2 | Sustained throughput for limit and market orders / Пропускная способность |
-| `latency` | 2 | Single-operation latency (place + cancel) / Задержка одиночных операций |
-| `e2e` | 18 | Full scenarios: all order types, TIFs, amend, cancel, stop triggers, deep book, multi-pair routing, full lifecycle / Полные сценарии |
+| Suite | Focus / Фокус |
+|-------|----------------|
+| `throughput` | Sustained throughput for limit and market orders / Пропускная способность |
+| `latency` | Single-operation latency (place + cancel) / Задержка одиночных операций |
+| `e2e` | Full scenarios: all order types, TIFs, amend, cancel, stop triggers, deep book, multi-pair routing / Полные сценарии |
+| `stress` | High-load stress testing / Стресс-тестирование под нагрузкой |
+| `realistic` | Realistic trading patterns / Реалистичные торговые паттерны |
 
 ## Wire Protocol Overview / Обзор сетевого протокола
 
@@ -269,23 +274,24 @@ The engine communicates via a custom binary protocol over TCP or Unix Domain Soc
 
 Движок общается через бинарный протокол по TCP или Unix Domain Socket. Все целые числа в little-endian. Цены и количества используют представление с фиксированной точкой с масштабом 10^8.
 
-**Frame format / Формат фрейма:**
+**Frame format / Формат фрейма (protocol v2):**
 
 ```
-+----------+---------+----------+----------+-----------------+
-| len: u32 | ver: u8 | type: u8 | seq: u64 | payload: [u8]   |
-| 4 bytes  | 1 byte  | 1 byte   | 8 bytes  | variable        |
-+----------+---------+----------+----------+-----------------+
++----------+---------+----------+----------+-------------+-----------------+
+| len: u32 | ver: u8 | type: u8 | seq: u64 | req_id: u64 | payload: [u8]   |
+| 4 bytes  | 1 byte  | 1 byte   | 8 bytes  | 8 bytes     | variable        |
++----------+---------+----------+----------+-------------+-----------------+
 ```
 
-- `len` -- payload length (does not include the 14-byte header) / длина payload (не включает 14-байтный заголовок)
-- `ver` -- protocol version, must be `0x01` / версия протокола, должна быть `0x01`
+- `len` -- payload length (does not include the 22-byte header) / длина payload (не включает 22-байтный заголовок)
+- `ver` -- protocol version, must be `0x02` / версия протокола, должна быть `0x02`
 - `type` -- message type identifier / идентификатор типа сообщения
-- `seq` -- sequence number for request/response correlation / порядковый номер для корреляции запрос/ответ
+- `seq` -- monotonically increasing sequence number / монотонно возрастающий порядковый номер
+- `req_id` -- idempotency key; mirrored in solicited responses, 0 for unsolicited / ключ идемпотентности; зеркалится в ответах на команды, 0 для unsolicited
 
-**Inbound messages / Входящие сообщения:** `PlaceOrder` (0x01), `CancelOrder` (0x02), `AmendOrder` (0x03)
+**Inbound messages / Входящие сообщения:** `PlaceOrder` (0x01), `CancelOrder` (0x02), `AmendOrder` (0x03), `Ping` (0x04), `Handshake` (0x05), `ResumeSession` (0x06), `GetOrderStatus` (0x07), `Acknowledge` (0x08), `GetOpenOrders` (0x09), `BatchPlaceOrder` (0x0B), `BatchCancelOrder` (0x0C)
 
-**Outbound messages / Исходящие сообщения:** `OrderAccepted` (0x10), `OrderRejected` (0x11), `Trade` (0x12), `OrderFilled` (0x13), `OrderPartiallyFilled` (0x14), `OrderCancelled` (0x15), `OrderAmended` (0x16), `StopTriggered` (0x17)
+**Outbound messages / Исходящие сообщения:** `OrderAccepted` (0x10), `OrderRejected` (0x11), `Trade` (0x12), `OrderFilled` (0x13), `OrderPartiallyFilled` (0x14), `OrderCancelled` (0x15), `OrderAmended` (0x16), `StopTriggered` (0x17), `Pong` (0x18), `Error` (0x19), `HandshakeAck` (0x1A), `SessionResumed` (0x1B), `OrderStatus` (0x1D), `OrderNotFound` (0x1E), `OpenOrdersBegin` (0x1F), `ReplayGap` (0x20), `OpenOrder` (0x21), `OpenOrdersEnd` (0x22), `FlowControlWarning` (0x23)
 
 For detailed byte layouts, see [docs/PROTOCOL.md](docs/PROTOCOL.md) and `clients/go/meclient/README.md`.
 
@@ -324,7 +330,7 @@ Go клиентская библиотека находится в [`clients/go/
 
 ## Documentation / Документация
 
-**Online (GitHub Pages):** [https://rubx-x.github.io/matching-engine/](https://rubx-x.github.io/matching-engine/)
+**Online (GitHub Pages):** [https://rekurt.github.io/matching-engine/](https://rekurt.github.io/matching-engine/)
 
 - [Architecture (English)](docs/ARCHITECTURE.md) / [Архитектура (русский)](docs/ARCHITECTURE_RU.md)
 - [Wire Protocol Specification](docs/PROTOCOL.md) / [Спецификация протокола](docs/PROTOCOL.md)

@@ -11,7 +11,7 @@ create-missing = false
 
 [output.html]
 default-theme = "navy"
-git-repository-url = "https://github.com/rubx-x/matching-engine"
-edit-url-template = "https://github.com/rubx-x/matching-engine/edit/master/{path}"
+git-repository-url = "https://github.com/rekurt/matching-engine"
+edit-url-template = "https://github.com/rekurt/matching-engine/edit/master/{path}"
 search.enable = true
 search.limit = 30

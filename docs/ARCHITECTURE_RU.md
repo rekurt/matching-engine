@@ -11,7 +11,7 @@ me-core      Базовые типы: FixedPrice, FixedQty, Order, Trade, MatchE
 me-book      Order book + matching algorithm (single-threaded, no sync)
 me-engine    Multi-pair engine, sharded router, command dispatch
 me-persist   WAL + Snapshots для персистентности
-me-io        Binary wire protocol (14-byte header), TCP + UDS серверы
+me-io        Binary wire protocol (22-byte header (v2)), TCP + UDS серверы
 me-server    Серверный бинарник, TOML конфигурация, REST admin API
 me-metrics   Prometheus метрики (50+ метрик)
 me-risk      Риск-менеджмент: rate limiting, лимиты позиций
@@ -186,7 +186,7 @@ HTTP REST API на отдельном порту (по умолчанию :9091)
 
 ## Binary Wire Protocol
 
-14-байтный заголовок:
+22-байтный заголовок (v2):
 ```
 ┌──────────┬──────────┬──────────┬──────────┬─────────────────┐
 │ len: u32 │ ver: u8  │ type: u8 │ seq: u64 │ payload: [u8]   │

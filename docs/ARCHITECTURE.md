@@ -103,7 +103,7 @@ me-datagen ──> me-core    (order flow generation)
 | `me-book` | Order book data structure: BTreeMap price levels, slab allocator, intrusive linked lists, stop book. |
 | `me-engine` | Per-pair `Engine` (command dispatch, validation, stop cascade). `Router` (single-thread). `ShardedRouterV2` (multi-thread). |
 | `me-persist` | Write-ahead log and snapshot persistence with CRC32 integrity checks. |
-| `me-io` | Binary wire protocol (14-byte header), frame codec, async TCP and UDS servers (tokio). |
+| `me-io` | Binary wire protocol (22-byte header (v2)), frame codec, async TCP and UDS servers (tokio). |
 | `me-server` | Binary entry point, CLI (clap), TOML config, REST admin API (Axum on port 9091), signal handling. |
 | `me-metrics` | 50+ Prometheus metrics: orders, trades, book state, connections, WAL, shard queue depth. |
 | `me-bench` | Criterion benchmarks: throughput, latency, e2e matching, stress testing (18 benchmarks). |
@@ -140,7 +140,7 @@ with `#[inline]` and saturating variants are provided for safety.
 
 ```rust
 #[repr(C)]
-pub struct Order {             // 72 bytes, cache-line friendly
+pub struct Order {             // 88 bytes, cache-line friendly
     pub id: OrderId,           // u64
     pub price: FixedPrice,     // i64
     pub stop_price: FixedPrice,// i64
@@ -154,7 +154,9 @@ pub struct Order {             // 72 bytes, cache-line friendly
     pub order_type: OrderType, // u8   (Limit=0, Market=1, StopLimit=2, StopMarket=3)
     pub tif: TimeInForce,      // u8   (GTC=0, IOC=1, FOK=2)
     pub status: OrderStatus,   // u8
-    pub _pad: [u8; 2],         // alignment padding
+    pub flags: u8,             // bitmask: POST_ONLY(0x01), REDUCE_ONLY(0x02), MAKER_OR_CANCEL(0x04)
+    pub _pad: u8,              // alignment padding
+    pub client_session_id: SessionId, // [u8; 16] — session binding for OpenOrders queries
 }
 ```
 
@@ -583,17 +585,18 @@ commands for the same shard.
 ### Frame Format
 
 ```
-+----------+----------+----------+----------+-----------------+
-| len: u32 | ver: u8  | type: u8 | seq: u64 | payload: [u8]   |
-| 4 bytes  | 1 byte   | 1 byte   | 8 bytes  | variable        |
-+----------+----------+----------+----------+-----------------+
-      \_______________________________________________/
-                   14-byte header
++----------+----------+----------+----------+-------------+-----------------+
+| len: u32 | ver: u8  | type: u8 | seq: u64 | req_id: u64 | payload: [u8]   |
+| 4 bytes  | 1 byte   | 1 byte   | 8 bytes  | 8 bytes     | variable        |
++----------+----------+----------+----------+-------------+-----------------+
+      \______________________________________________________________/
+                          22-byte header (v2)
 
-len:  payload size only (does NOT include the 14-byte header)
-ver:  protocol version (currently 1)
-type: message type enum (see below)
-seq:  monotonically increasing sequence number per connection
+len:    payload size only (does NOT include the 22-byte header)
+ver:    protocol version (currently 2)
+type:   message type enum (see below)
+seq:    monotonically increasing sequence number per connection
+req_id: idempotency key; mirrored in solicited replies, 0 for unsolicited
 ```
 
 ### Message Types
@@ -922,7 +925,7 @@ the common case.
    start of each command but never deallocated. The underlying `Vec` retains
    its allocation across commands.
 
-3. **Fixed-size types**: `Order` (72 bytes) and `Trade` are `Copy` types with
+3. **Fixed-size types**: `Order` (88 bytes) and `Trade` are `Copy` types with
    `#[repr(C)]` layout. No heap-allocated fields (strings, Vecs) on the hot
    path.
 
@@ -994,7 +997,7 @@ The system is optimized for single-digit microsecond matching latency:
 
 - **Fixed-point arithmetic**: all price/quantity math uses integer operations.
   No floating-point conversion anywhere in the matching path.
-- **Cache-friendly layout**: `Order` is 72 bytes (`#[repr(C)]`), and
+- **Cache-friendly layout**: `Order` is 88 bytes (`#[repr(C)]`), and
   `OrderNode` instances within a price level are accessed sequentially via
   the intrusive linked list, promoting prefetch.
 - **No locks**: each Engine is single-threaded. No mutex acquisition, no
