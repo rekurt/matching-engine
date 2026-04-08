@@ -115,7 +115,7 @@ FlowControlWarning) `req_id = 0`.
 | `0x15` | OrderCancelled       | 24 байта                                 |
 | `0x16` | OrderAmended         | 32 байта                                 |
 | `0x17` | StopTriggered        | 24 байта                                 |
-| `0x18` | Pong                 | 0 или 8 байт                             |
+| `0x18` | Pong                 | 8 байт (last_processed_client_seq)       |
 | `0x19` | Error                | переменный (code + message)              |
 | `0x1A` | HandshakeAck         | 41 байт (version + TLV extensions)       |
 | `0x1B` | SessionResumed       | 4 байта (replayed_count)                 |
@@ -554,16 +554,24 @@ Offset  Hex                                              Поле
 
 Содержит server_version + TLV-расширения (capabilities, session_id, heartbeat).
 
-### Ping / Pong (22 байт — только заголовок, без ACK payload)
+### Ping (v2: с piggyback ACK) / Pong (8 байт payload)
+
+Ping v2 содержит `ack_seq` (8 байт) — cumulative ACK последнего обработанного
+серверного фрейма. Payload опционален (0 байт для v1-совместимости).
+
+Pong **всегда** содержит `last_processed_client_seq` (8 байт) — подтверждение
+последнего обработанного клиентского фрейма.
 
 ```
-Ping (seq=1):
-0000    00 00 00 00  02 04  01 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00
-        len=0        V  T   seq=1                     req_id=0
+Ping (seq=1, ack_seq=5):
+0000    08 00 00 00  02 04  01 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00
+        len=8        V  T   seq=1                     req_id=0
+0016    05 00 00 00 00 00 00 00                        ack_seq=5
 
-Pong (seq=1):
-0000    00 00 00 00  02 18  01 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00
-        len=0        V  T   seq=1                     req_id=0
+Pong (seq=1, last_processed_client_seq=1):
+0000    08 00 00 00  02 18  01 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00
+        len=8        V  T   seq=1                     req_id=0
+0016    01 00 00 00 00 00 00 00                        last_processed_client_seq=1
 ```
 
 ### PlaceOrder — Limit Buy 1.0 BTC @ 50,000.00

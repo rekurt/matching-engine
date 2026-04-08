@@ -981,27 +981,21 @@ All examples show complete frames (header + payload) as they appear on the wire.
 
 ### 12.1 Handshake (Client -> Engine)
 
-A Handshake with `client_version=2`, `seq=0`:
+A Handshake with `client_version=2`, `seq=0`, `req_id=0`:
 
 ```
-Payload length = 1 byte, version = 0x02, type = 0x05, seq = 0
+Offset  Hex
+------  -----------------------------------------------
+0000    01 00 00 00                                       len = 1
+0004    02                                                ver = 2
+0005    05                                                type = Handshake (0x05)
+0006    00 00 00 00 00 00 00 00                           seq = 0
+000E    00 00 00 00 00 00 00 00                           req_id = 0
 
-Offset  Hex                                              ASCII
-------  -----------------------------------------------  ----------------
-0000    01 00 00 00  01 05  00 00 00 00 00 00 00 00  01  ................
-        |len=1     | V  T  |seq=0                     |  |payload: ver=2|
-        |          |       |                           |  |              |
+        --- payload (1 byte) ---
+0016    02                                                client_version = 2
 
-Header breakdown:
-  01 00 00 00  = len: 1 (u32 LE)
-  01           = ver: 1
-  05           = type: Handshake (0x05)
-  00 00 00 00 00 00 00 00 = seq: 0 (u64 LE)
-
-Payload breakdown:
-  01           = client_version: 1
-
-Total frame: 15 bytes (14 header + 1 payload)
+Total frame: 23 bytes (22 header + 1 payload)
 ```
 
 ### 12.2 HandshakeAck (Engine -> Client)
@@ -1009,58 +1003,62 @@ Total frame: 15 bytes (14 header + 1 payload)
 Response with `server_version=2`, `seq=0`:
 
 ```
-Offset  Hex                                              ASCII
-------  -----------------------------------------------  ----------------
-0000    01 00 00 00  01 1A  00 00 00 00 00 00 00 00  01  ................
+Offset  Hex
+------  -----------------------------------------------
+0000    29 00 00 00                                       len = 41
+0004    02                                                ver = 2
+0005    1A                                                type = HandshakeAck (0x1A)
+0006    00 00 00 00 00 00 00 00                           seq = 0
+000E    00 00 00 00 00 00 00 00                           req_id = 0
 
-Header breakdown:
-  01 00 00 00  = len: 1 (u32 LE)
-  01           = ver: 1
-  1A           = type: HandshakeAck (0x1A)
-  00 00 00 00 00 00 00 00 = seq: 0 (u64 LE)
+        --- payload (41 bytes) ---
+0016    02                                                server_version = 2
+0017    01 00  08 00  xx xx xx xx xx xx xx xx             TLV: capabilities (tag=0x0001, len=8, value=u64)
+0023    02 00  10 00  xx xx xx xx xx xx xx xx             TLV: session_id (tag=0x0002, len=16, value=[u8;16])
+              xx xx xx xx xx xx xx xx
+0037    03 00  04 00  xx xx xx xx                         TLV: heartbeat_ms (tag=0x0003, len=4, value=u32)
 
-Payload breakdown:
-  01           = server_version: 1
-
-Total frame: 15 bytes
+Total frame: 63 bytes (22 header + 41 payload)
 ```
 
 ### 12.3 Ping (Client -> Engine)
 
-Ping with `seq=1`:
+Ping with `seq=1`, piggyback `ack_seq=5` (client has processed server frames up to seq 5):
 
 ```
-Offset  Hex                                              ASCII
-------  -----------------------------------------------  ----------------
-0000    00 00 00 00  01 04  01 00 00 00 00 00 00 00      ..............
+Offset  Hex
+------  -----------------------------------------------
+0000    08 00 00 00                                       len = 8
+0004    02                                                ver = 2
+0005    04                                                type = Ping (0x04)
+0006    01 00 00 00 00 00 00 00                           seq = 1
+000E    00 00 00 00 00 00 00 00                           req_id = 0
 
-Header breakdown:
-  00 00 00 00  = len: 0 (u32 LE, no payload)
-  01           = ver: 1
-  04           = type: Ping (0x04)
-  01 00 00 00 00 00 00 00 = seq: 1 (u64 LE)
+        --- payload (8 bytes) ---
+0016    05 00 00 00 00 00 00 00                           ack_seq = 5 (last processed server seq)
 
-Payload: (none)
-
-Total frame: 22 bytes (header only)
+Total frame: 30 bytes (22 header + 8 payload)
 ```
+
+> **Note:** Ping payload is optional. A 0-byte payload (v1 compat) is accepted; `ack_seq` defaults to 0.
 
 ### 12.4 Pong (Engine -> Client)
 
-Pong with `seq=1`:
+Pong with `seq=1`, `last_processed_client_seq=1`:
 
 ```
-Offset  Hex                                              ASCII
-------  -----------------------------------------------  ----------------
-0000    00 00 00 00  01 18  01 00 00 00 00 00 00 00      ..............
+Offset  Hex
+------  -----------------------------------------------
+0000    08 00 00 00                                       len = 8
+0004    02                                                ver = 2
+0005    18                                                type = Pong (0x18)
+0006    01 00 00 00 00 00 00 00                           seq = 1
+000E    00 00 00 00 00 00 00 00                           req_id = 0
 
-Header breakdown:
-  00 00 00 00  = len: 0
-  01           = ver: 1
-  18           = type: Pong (0x18)
-  01 00 00 00 00 00 00 00 = seq: 1 (u64 LE)
+        --- payload (8 bytes) ---
+0016    01 00 00 00 00 00 00 00                           last_processed_client_seq = 1
 
-Total frame: 22 bytes
+Total frame: 30 bytes (22 header + 8 payload)
 ```
 
 ### 12.5 PlaceOrder -- Limit Buy 1.0 BTC @ 50,000.00
@@ -1078,18 +1076,19 @@ Offset  Hex
 0004    02                                                ver = 2
 0005    01                                                type = PlaceOrder (0x01)
 0006    01 00 00 00 00 00 00 00                           seq = 1
+000E    01 00 00 00 00 00 00 00                           req_id = 1
 
         --- payload (37 bytes) ---
-000E    2A 00 00 00 00 00 00 00                           order_id = 42
-0016    01 00                                             symbol_id = 1
-0018    00                                                side = Buy (0)
-0019    00                                                order_type = Limit (0)
-001A    00                                                tif = GTC (0)
-001B    00 50 39 27 8C 04 00 00                           price = 5_000_000_000_000
-0023    00 00 00 00 00 00 00 00                           stop_price = 0
-002B    00 E1 F5 05 00 00 00 00                           qty = 100_000_000 (1.0)
+0016    2A 00 00 00 00 00 00 00                           order_id = 42
+001E    01 00                                             symbol_id = 1
+0020    00                                                side = Buy (0)
+0021    00                                                order_type = Limit (0)
+0022    00                                                tif = GTC (0)
+0023    00 50 39 27 8C 04 00 00                           price = 5_000_000_000_000
+002B    00 00 00 00 00 00 00 00                           stop_price = 0
+0033    00 E1 F5 05 00 00 00 00                           qty = 100_000_000 (1.0)
 
-Total frame: 51 bytes (14 header + 37 payload)
+Total frame: 59 bytes (22 header + 37 payload)
 ```
 
 > **Русский:** Размещение лимитного ордера на покупку: `order_id=42`, `symbol_id=1`
@@ -1107,12 +1106,13 @@ Offset  Hex
 0004    02                                                ver = 2
 0005    02                                                type = CancelOrder (0x02)
 0006    02 00 00 00 00 00 00 00                           seq = 2
+000E    02 00 00 00 00 00 00 00                           req_id = 2
 
         --- payload (10 bytes) ---
-000E    2A 00 00 00 00 00 00 00                           order_id = 42
-0016    01 00                                             symbol_id = 1
+0016    2A 00 00 00 00 00 00 00                           order_id = 42
+001E    01 00                                             symbol_id = 1
 
-Total frame: 24 bytes (14 header + 10 payload)
+Total frame: 32 bytes (22 header + 10 payload)
 ```
 
 ### 12.7 Trade Execution
@@ -1124,22 +1124,24 @@ Trade: `trade_id=1001`, `symbol_id=1`, `price=50000.00`,
 ```
 Offset  Hex
 ------  -----------------------------------------------
-0000    33 00 00 00                                       len = 51
+0000    3B 00 00 00                                       len = 59
 0004    02                                                ver = 2
 0005    12                                                type = Trade (0x12)
 0006    03 00 00 00 00 00 00 00                           seq = 3
+000E    01 00 00 00 00 00 00 00                           req_id = 1 (mirrored from taker's PlaceOrder)
 
-        --- payload (51 bytes) ---
-000E    E9 03 00 00 00 00 00 00                           trade_id = 1001
-0016    01 00                                             symbol_id = 1
-0018    00 50 39 27 8C 04 00 00                           price = 5_000_000_000_000
-0020    00 65 CD 1D 00 00 00 00                           qty = 50_000_000 (0.5)
-0028    2A 00 00 00 00 00 00 00                           maker_order_id = 42
-0030    63 00 00 00 00 00 00 00                           taker_order_id = 99
-0038    00                                                maker_side = Buy (0)
-0039    00 00 1C E9 0A 68 99 17                           timestamp = 1700000000000000000
+        --- payload (59 bytes) ---
+0016    E9 03 00 00 00 00 00 00                           trade_id = 1001
+001E    01 00                                             symbol_id = 1
+0020    00 50 39 27 8C 04 00 00                           price = 5_000_000_000_000
+0028    00 65 CD 1D 00 00 00 00                           qty = 50_000_000 (0.5)
+0030    2A 00 00 00 00 00 00 00                           maker_order_id = 42
+0038    63 00 00 00 00 00 00 00                           taker_order_id = 99
+0040    00                                                maker_side = Buy (0)
+0041    00 00 1C E9 0A 68 99 17                           timestamp = 1700000000000000000
+0049    01 00 00 00 00 00 00 00                           sequence = 1
 
-Total frame: 65 bytes (14 header + 51 payload)
+Total frame: 81 bytes (22 header + 59 payload)
 ```
 
 ### 12.8 OrderRejected -- DuplicateOrderId
@@ -1153,13 +1155,14 @@ Offset  Hex
 0004    02                                                ver = 2
 0005    11                                                type = OrderRejected (0x11)
 0006    02 00 00 00 00 00 00 00                           seq = 2
+000E    01 00 00 00 00 00 00 00                           req_id = 1 (mirrored from client command)
 
         --- payload (17 bytes) ---
-000E    2A 00 00 00 00 00 00 00                           order_id = 42
-0016    07                                                reason = DuplicateOrderId (7)
-0017    00 00 1C E9 0A 68 99 17                           timestamp = 1700000000000000000
+0016    2A 00 00 00 00 00 00 00                           order_id = 42
+001E    07                                                reason = DuplicateOrderId (7)
+001F    00 00 1C E9 0A 68 99 17                           timestamp = 1700000000000000000
 
-Total frame: 31 bytes (14 header + 17 payload)
+Total frame: 39 bytes (22 header + 17 payload)
 ```
 
 ### 12.9 Error -- HandshakeRequired
@@ -1173,14 +1176,15 @@ Offset  Hex
 0004    02                                                ver = 2
 0005    19                                                type = Error (0x19)
 0006    00 00 00 00 00 00 00 00                           seq = 0
+000E    00 00 00 00 00 00 00 00                           req_id = 0 (unsolicited)
 
         --- payload (22 bytes) ---
-000E    03 00                                             error_code = 3 (HandshakeRequired)
-0010    12 00                                             msg_len = 18
-0012    68 61 6E 64 73 68 61 6B 65 20 72 65 71 75 69     "handshake requi"
-0021    72 65 64                                          "red"
+0016    03 00                                             error_code = 3 (HandshakeRequired)
+0018    12 00                                             msg_len = 18
+001A    68 61 6E 64 73 68 61 6B 65 20 72 65 71 75 69     "handshake requi"
+0029    72 65 64                                          "red"
 
-Total frame: 36 bytes (14 header + 22 payload)
+Total frame: 44 bytes (22 header + 22 payload)
 ```
 
 ### 12.10 AmendOrder -- Price and Quantity
@@ -1197,16 +1201,17 @@ Offset  Hex
 0004    02                                                ver = 2
 0005    03                                                type = AmendOrder (0x03)
 0006    03 00 00 00 00 00 00 00                           seq = 3
+000E    03 00 00 00 00 00 00 00                           req_id = 3
 
         --- payload (28 bytes) ---
-000E    2A 00 00 00 00 00 00 00                           order_id = 42
-0016    01 00                                             symbol_id = 1
-0018    01                                                has_price = 1 (yes)
-0019    00 00 A9 44 9D 04 00 00                           price = 5_100_000_000_000
-0021    01                                                has_qty = 1 (yes)
-0022    C0 68 78 04 00 00 00 00                           qty = 75_000_000 (0.75)
+0016    2A 00 00 00 00 00 00 00                           order_id = 42
+001E    01 00                                             symbol_id = 1
+0020    01                                                has_price = 1 (yes)
+0021    00 00 A9 44 9D 04 00 00                           price = 5_100_000_000_000
+0029    01                                                has_qty = 1 (yes)
+002A    C0 68 78 04 00 00 00 00                           qty = 75_000_000 (0.75)
 
-Total frame: 42 bytes (14 header + 28 payload)
+Total frame: 50 bytes (22 header + 28 payload)
 ```
 
 ---
