@@ -99,7 +99,7 @@ Offset  Size   Field       Type      Description
  4       1     ver         u8        Protocol version (must be 0x02)
  5       1     type        u8        MessageType enum discriminant
  6       8     seq         u64 LE    Monotonically increasing sequence number
-14       8     req_id      u64 LE    Idempotency key (mirrored in solicited replies, 0 for unsolicited)
+14       8     req_id      u64 LE    Idempotency key (mirrored in command replies, 0 for service frames)
 22       N     payload     bytes     Type-specific payload (0..1024 bytes)
 ```
 
@@ -1128,7 +1128,7 @@ Offset  Hex
 0004    02                                                ver = 2
 0005    12                                                type = Trade (0x12)
 0006    03 00 00 00 00 00 00 00                           seq = 3
-000E    01 00 00 00 00 00 00 00                           req_id = 1 (mirrored from taker's PlaceOrder)
+000E    01 00 00 00 00 00 00 00                           req_id = 1 (mirrored from triggering command)
 
         --- payload (59 bytes) ---
 0016    E9 03 00 00 00 00 00 00                           trade_id = 1001
@@ -1176,7 +1176,7 @@ Offset  Hex
 0004    02                                                ver = 2
 0005    19                                                type = Error (0x19)
 0006    00 00 00 00 00 00 00 00                           seq = 0
-000E    00 00 00 00 00 00 00 00                           req_id = 0 (unsolicited)
+000E    00 00 00 00 00 00 00 00                           req_id = 0 (service frame)
 
         --- payload (22 bytes) ---
 0016    03 00                                             error_code = 3 (HandshakeRequired)
