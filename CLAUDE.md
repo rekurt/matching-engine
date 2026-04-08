@@ -106,8 +106,8 @@ status: OrderStatus(u8), flags: u8, _pad: u8, client_session_id: SessionId([u8;1
 
 Флаги ордера (битовая маска в `order.flags`):
 - `ORDER_FLAG_POST_ONLY` (0x01) — отклонить, если пересекает спред
-- `ORDER_FLAG_REDUCE_ONLY` (0x02) — отклонить, если не уменьшает позицию
-- `ORDER_FLAG_MAKER_OR_CANCEL` (0x04) — как POST_ONLY, но для triggered stops
+- `ORDER_FLAG_REDUCE_ONLY` (0x02) — зарезервирован (определён, но не проверяется движком)
+- `ORDER_FLAG_MAKER_OR_CANCEL` (0x04) — зарезервирован (определён, но не проверяется движком)
 
 ### Обработка ошибок в codec
 

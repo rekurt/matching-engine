@@ -100,7 +100,7 @@ Offset  Size   Field       Type      Description
  5       1     type        u8        MessageType enum discriminant
  6       8     seq         u64 LE    Monotonically increasing sequence number
 14       8     req_id      u64 LE    Idempotency key (mirrored in command replies, 0 for service frames)
-22       N     payload     bytes     Type-specific payload (0..1024 bytes)
+22       N     payload     bytes     Type-specific payload (0..1024 bytes; batch: 0..4096; snapshot: 0..8192)
 ```
 
 > **Русский:**
@@ -112,7 +112,7 @@ Offset  Size   Field       Type      Description
 > | 5        | 1      | type    | u8      | Дискриминант перечисления MessageType                |
 > | 6        | 8      | seq     | u64 LE  | Монотонно возрастающий порядковый номер              |
 > | 14       | 8      | req_id  | u64 LE  | Ключ идемпотентности (зеркалится в ответах на команды) |
-> | 22       | N      | payload | байты   | Полезная нагрузка, специфичная для типа (0..1024 б) |
+> | 22       | N      | payload | байты   | Нагрузка (0..1024; batch: 0..4096; snapshot: 0..8192) |
 
 **Total frame size** = `FRAME_HEADER_SIZE + len` = `22 + len` bytes.
 
