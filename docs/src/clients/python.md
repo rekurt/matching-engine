@@ -27,7 +27,7 @@ python3 examples/python/client.py [host] [port]
 Matching Engine -- Python Client Example
 ============================================================
 [*] Connected to 127.0.0.1:9090
-[*] Handshake OK -- server version 1
+[*] Handshake OK -- server version 2
 [>] PlaceOrder  id=1  symbol=1  Buy  price=50000.0  qty=1.0
   [<] OrderAccepted  order_id=1  ts=2024-01-01 12:00:00  seq=1
 [>] PlaceOrder  id=2  symbol=1  Sell  price=49999.0  qty=0.5
@@ -46,15 +46,20 @@ Matching Engine -- Python Client Example
 ### Константы протокола
 
 ```python
-PROTOCOL_VERSION = 1
-HEADER_SIZE = 14        # len(4) + ver(1) + type(1) + seq(8)
+PROTOCOL_VERSION = 2
+HEADER_SIZE = 22        # len(4) + ver(1) + type(1) + seq(8) + req_id(8)
 PRICE_SCALE = 10**8     # фиксированная точка
 
 # Команды клиента → движок
-MSG_PLACE_ORDER  = 0x01
-MSG_CANCEL_ORDER = 0x02
-MSG_PING         = 0x04
-MSG_HANDSHAKE    = 0x05
+MSG_PLACE_ORDER    = 0x01
+MSG_CANCEL_ORDER   = 0x02
+MSG_AMEND_ORDER    = 0x03
+MSG_PING           = 0x04
+MSG_HANDSHAKE      = 0x05
+MSG_RESUME_SESSION = 0x06
+MSG_GET_ORDER_STATUS = 0x07
+MSG_ACKNOWLEDGE    = 0x08
+MSG_GET_OPEN_ORDERS = 0x09
 
 # События движок → клиент
 MSG_ORDER_ACCEPTED        = 0x10
@@ -65,7 +70,9 @@ MSG_ORDER_PARTIALLY_FILLED = 0x14
 MSG_ORDER_CANCELLED       = 0x15
 MSG_STOP_TRIGGERED        = 0x17
 MSG_PONG                  = 0x18
+MSG_ERROR                 = 0x19
 MSG_HANDSHAKE_ACK         = 0x1A
+MSG_SESSION_RESUMED       = 0x1B
 ```
 
 ### Фиксированная точка
@@ -93,16 +100,16 @@ sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 sock.connect(("127.0.0.1", 9090))
 
-# Отправить Handshake (тип 0x05, пустой payload)
-def send_frame(sock, msg_type, payload, seq):
-    header = struct.pack("<IBBQ", len(payload), 1, msg_type, seq)
+# Отправить Handshake (тип 0x05, payload: client_version=2)
+def send_frame(sock, msg_type, payload, seq, req_id=0):
+    header = struct.pack("<IBBQQ", len(payload), 2, msg_type, seq, req_id)
     sock.sendall(header + payload)
 
-send_frame(sock, 0x05, b"", seq=1)
+send_frame(sock, 0x05, struct.pack("B", 2), seq=0)
 
-# Прочитать HandshakeAck
-header = sock.recv(14)
-payload_len, ver, msg_type, seq = struct.unpack("<IBBQ", header)
+# Прочитать HandshakeAck (22-байт заголовок + 41-байт payload)
+header = sock.recv(22)
+payload_len, ver, msg_type, seq, req_id = struct.unpack("<IBBQQ", header)
 payload = sock.recv(payload_len) if payload_len > 0 else b""
 assert msg_type == 0x1A, "Expected HandshakeAck"
 server_version = payload[0]

@@ -30,7 +30,7 @@
 This document specifies the binary wire protocol used by the matching engine for
 client-server communication over TCP. The protocol is designed for ultra-low-latency
 trading with minimal overhead: no TLV wrappers, no JSON, no string parsing. Every
-message is a length-prefixed binary frame with a fixed 14-byte header followed by
+message is a length-prefixed binary frame with a fixed 22-byte header (v2) followed by
 a type-specific payload.
 
 > **Русский:**
@@ -38,7 +38,7 @@ a type-specific payload.
 > движком для взаимодействия клиента и сервера по TCP. Протокол спроектирован
 > для сверхнизкой задержки: без TLV-обёрток, без JSON, без разбора строк.
 > Каждое сообщение представляет собой бинарный кадр с префиксом длины,
-> состоящий из фиксированного 14-байтового заголовка и полезной нагрузки,
+> состоящий из фиксированного 22-байтового заголовка (v2) и полезной нагрузки,
 > специфичной для типа сообщения.
 
 ---
@@ -56,12 +56,12 @@ a type-specific payload.
 
 ## 3. Frame Format / Формат кадра
 
-Every message on the wire is a **frame** consisting of a 14-byte header immediately
+Every message on the wire is a **frame** consisting of a 22-byte header (v2) immediately
 followed by the payload bytes. There is no padding and no alignment requirement.
 
 > **Русский:**
 > Каждое сообщение на проводе представляет собой **кадр**, состоящий из
-> 14-байтового заголовка, за которым непосредственно следуют байты полезной
+> 22-байтового заголовка (v2), за которым непосредственно следуют байты полезной
 > нагрузки. Выравнивание и заполнение не требуются.
 
 ### ASCII Diagram / ASCII-диаграмма
@@ -88,7 +88,7 @@ followed by the payload bytes. There is no padding and no alignment requirement.
 Offset  Size   Field       Type      Description
 ------  ----   -----       ----      -----------
  0       4     len         u32 LE    Payload length in bytes (NOT including header)
- 4       1     ver         u8        Protocol version (must be 0x01)
+ 4       1     ver         u8        Protocol version (must be 0x02)
  5       1     type        u8        MessageType enum discriminant
  6       8     seq         u64 LE    Monotonically increasing sequence number
 14       N     payload     bytes     Type-specific payload (0..1024 bytes)
@@ -99,19 +99,19 @@ Offset  Size   Field       Type      Description
 > | Смещение | Размер | Поле    | Тип     | Описание                                            |
 > |----------|--------|---------|---------|-----------------------------------------------------|
 > | 0        | 4      | len     | u32 LE  | Длина полезной нагрузки в байтах (без заголовка)    |
-> | 4        | 1      | ver     | u8      | Версия протокола (должна быть 0x01)                 |
+> | 4        | 1      | ver     | u8      | Версия протокола (должна быть 0x02)                 |
 > | 5        | 1      | type    | u8      | Дискриминант перечисления MessageType                |
 > | 6        | 8      | seq     | u64 LE  | Монотонно возрастающий порядковый номер              |
 > | 14       | N      | payload | байты   | Полезная нагрузка, специфичная для типа (0..1024 б) |
 
 **Total frame size** = `FRAME_HEADER_SIZE + len` = `14 + len` bytes.
 
-The `len` field covers **only** the payload bytes. It does NOT include the 14-byte
+The `len` field covers **only** the payload bytes. It does NOT include the 22-byte (v2)
 header itself.
 
 > **Русский:**
 > Поле `len` охватывает **только** байты полезной нагрузки. Оно НЕ включает
-> 14-байтовый заголовок.
+> 22-байтовый заголовок.
 
 ---
 
@@ -1211,7 +1211,7 @@ Pseudocode for reading a single frame from a TCP stream:
 
 ```
 function read_frame(stream):
-    // 1. Read the 14-byte header
+    // 1. Read the 22-byte header (v2)
     header = stream.read_exact(14)
 
     // 2. Parse header fields (all little-endian)
@@ -1236,7 +1236,7 @@ function read_frame(stream):
 
 ```
 function write_frame(stream, msg_type, seq, payload):
-    // 1. Build the 14-byte header
+    // 1. Build the 22-byte header (v2)
     header = []
     header.append(u32_to_le(len(payload)))   // 4 bytes
     header.append(0x01)                       // version byte

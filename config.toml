@@ -3,9 +3,9 @@
 
 [server]
 # TCP listen address / Адрес TCP сервера
-tcp_addr = "0.0.0.0:2090"
+tcp_addr = "0.0.0.0:9090"
 # Metrics/Admin HTTP listen address / Адрес HTTP метрик и админки
-metrics_addr = "0.0.0.0:2091"
+metrics_addr = "0.0.0.0:9091"
 # Number of engine shards (0 = auto, uses available_parallelism)
 # Количество шардов (0 = авто, по числу ядер)
 shards = 0

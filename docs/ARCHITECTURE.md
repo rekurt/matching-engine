@@ -103,7 +103,7 @@ me-datagen ──> me-core    (order flow generation)
 | `me-book` | Order book data structure: BTreeMap price levels, slab allocator, intrusive linked lists, stop book. |
 | `me-engine` | Per-pair `Engine` (command dispatch, validation, stop cascade). `Router` (single-thread). `ShardedRouterV2` (multi-thread). |
 | `me-persist` | Write-ahead log and snapshot persistence with CRC32 integrity checks. |
-| `me-io` | Binary wire protocol (14-byte header), frame codec, async TCP and UDS servers (tokio). |
+| `me-io` | Binary wire protocol (22-byte header (v2)), frame codec, async TCP and UDS servers (tokio). |
 | `me-server` | Binary entry point, CLI (clap), TOML config, REST admin API (Axum on port 9091), signal handling. |
 | `me-metrics` | 50+ Prometheus metrics: orders, trades, book state, connections, WAL, shard queue depth. |
 | `me-bench` | Criterion benchmarks: throughput, latency, e2e matching, stress testing (18 benchmarks). |
@@ -588,9 +588,9 @@ commands for the same shard.
 | 4 bytes  | 1 byte   | 1 byte   | 8 bytes  | variable        |
 +----------+----------+----------+----------+-----------------+
       \_______________________________________________/
-                   14-byte header
+                   22-byte header (v2)
 
-len:  payload size only (does NOT include the 14-byte header)
+len:  payload size only (does NOT include the 22-byte header (v2))
 ver:  protocol version (currently 1)
 type: message type enum (see below)
 seq:  monotonically increasing sequence number per connection

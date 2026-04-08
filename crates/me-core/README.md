@@ -8,12 +8,17 @@
 |-----|----------|
 | `FixedPrice` | Цена с фиксированной точкой, i64, 8 знаков после запятой |
 | `FixedQty` | Количество с фиксированной точкой, u64, 8 знаков после запятой |
-| `Order` | Структура ордера (72 байт, выровнена по кэш-линии) |
+| `Order` | Структура ордера (88 байт, `#[repr(C)]`) |
 | `OrderType` | Limit / Market / StopLimit / StopMarket |
 | `TimeInForce` | GTC / IOC / FOK |
 | `Side` | Buy / Sell |
 | `SymbolId` | Идентификатор торговой пары (u16) |
+| `SessionId` | 128-бит идентификатор сессии (`[u8; 16]`) |
 | `MatchEvent` | Outbound события: Trade, OrderAccepted, OrderFilled и др. |
+| `EventBuffer` | Переиспользуемый буфер событий (ёмкость по умолч. 256) |
+| `OrderFlags` | POST_ONLY (0x01), REDUCE_ONLY (0x02), MAKER_OR_CANCEL (0x04) |
+| `InvariantPolicy` | Strict / HaltSymbol / Continue — реакция на нарушения инвариантов |
+| `RejectReason` | 13 причин отклонения (NoLiquidity..InternalError) |
 
 ## Пример создания ордера
 
