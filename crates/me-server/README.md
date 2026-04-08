@@ -60,11 +60,11 @@ qty_scale   = 8
 ## Admin API endpoints
 
 ```
-GET  /health              — liveness probe
-GET  /metrics             — Prometheus text format
-GET  /admin/status        — server status (requires X-Admin-Key if configured)
-POST /admin/halt/{id}     — halt trading for symbol {id}
-POST /admin/resume/{id}   — resume trading for symbol {id}
+GET  /health              — liveness probe (public)
+GET  /metrics             — Prometheus text format (public)
+GET  /admin/status        — server status (public, no auth required)
+POST /admin/halt/{id}     — halt trading for symbol {id} (requires X-Admin-Key)
+POST /admin/resume/{id}   — resume trading for symbol {id} (requires X-Admin-Key)
 ```
 
 ## Ports

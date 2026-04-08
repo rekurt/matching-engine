@@ -1396,24 +1396,38 @@ FRAME HEADER (22 bytes, always present):
   LE                   LE        LE
 
 INBOUND MESSAGE TYPES:
-  0x01 PlaceOrder      37B   order_id(8)+sym(2)+side(1)+type(1)+tif(1)+price(8)+stop(8)+qty(8)
-  0x02 CancelOrder     10B   order_id(8)+sym(2)
-  0x03 AmendOrder      var   order_id(8)+sym(2)+has_p(1)+[price(8)]+has_q(1)+[qty(8)]
-  0x04 Ping             0B   (empty)
-  0x05 Handshake       0-1B  [client_version(1)]
+  0x01 PlaceOrder       37-38B  order_id(8)+sym(2)+side(1)+type(1)+tif(1)+price(8)+stop(8)+qty(8)+[flags(1)]
+  0x02 CancelOrder       10B   order_id(8)+sym(2)
+  0x03 AmendOrder        var   order_id(8)+sym(2)+has_p(1)+[price(8)]+has_q(1)+[qty(8)]
+  0x04 Ping             0|8B   [ack_seq(8)]  (piggyback cumulative ACK)
+  0x05 Handshake        0-1B   [client_version(1)]
+  0x06 ResumeSession     24B   session_id(16)+last_recv_seq(8)
+  0x07 GetOrderStatus    10B   order_id(8)+sym(2)
+  0x08 Acknowledge        8B   last_processed_server_seq(8)
+  0x09 GetOpenOrders      0B   (empty)
+  0x0B BatchPlaceOrder   var   count(1)+[PlaceOrder×N]  (max 20)
+  0x0C BatchCancelOrder  var   count(1)+[CancelOrder×N] (max 50)
 
 OUTBOUND MESSAGE TYPES:
-  0x10 OrderAccepted    16B   order_id(8)+ts(8)
-  0x11 OrderRejected    17B   order_id(8)+reason(1)+ts(8)
-  0x12 Trade            51B   trade_id(8)+sym(2)+price(8)+qty(8)+maker(8)+taker(8)+side(1)+ts(8)
-  0x13 OrderFilled      32B   order_id(8)+filled_qty(8)+price(8)+ts(8)
-  0x14 OrderPartFilled  40B   order_id(8)+filled(8)+remaining(8)+price(8)+ts(8)
-  0x15 OrderCancelled   24B   order_id(8)+remaining(8)+ts(8)
-  0x16 OrderAmended     32B   order_id(8)+new_price(8)+new_qty(8)+ts(8)
-  0x17 StopTriggered    24B   order_id(8)+trigger_price(8)+ts(8)
-  0x18 Pong              0B   (empty)
-  0x19 Error            var   error_code(2)+msg_len(2)+msg(N)
-  0x1A HandshakeAck      1B   server_version(1)
+  0x10 OrderAccepted     16B   order_id(8)+ts(8)
+  0x11 OrderRejected     17B   order_id(8)+reason(1)+ts(8)
+  0x12 Trade             59B   trade_id(8)+sym(2)+price(8)+qty(8)+maker(8)+taker(8)+side(1)+ts(8)+seq(8)
+  0x13 OrderFilled       32B   order_id(8)+filled_qty(8)+price(8)+ts(8)
+  0x14 OrderPartFilled   40B   order_id(8)+filled(8)+remaining(8)+price(8)+ts(8)
+  0x15 OrderCancelled    24B   order_id(8)+remaining(8)+ts(8)
+  0x16 OrderAmended      32B   order_id(8)+new_price(8)+new_qty(8)+ts(8)
+  0x17 StopTriggered     24B   order_id(8)+trigger_price(8)+ts(8)
+  0x18 Pong               8B   last_processed_client_seq(8)
+  0x19 Error             var   error_code(2)+msg_len(2)+msg(N)
+  0x1A HandshakeAck      41B   server_ver(1)+TLV(capabilities+session_id+heartbeat_ms)
+  0x1B SessionResumed     4B   replayed_count(4)
+  0x1D OrderStatus       41B   order_id(8)+status(1)+filled(8)+remaining(8)+price(8)+ts(8)
+  0x1E OrderNotFound      8B   order_id(8)
+  0x1F OpenOrdersBegin   12B   count(4)+snapshot_seq(8)
+  0x20 ReplayGap         16B   missing_from(8)+missing_to(8)
+  0x21 OpenOrder         60B   fixed wire format (see spec)
+  0x22 OpenOrdersEnd      8B   snapshot_seq(8)
+  0x23 FlowControlWarn    2B   buffer_pct(1)+is_hard(1)
 
 FIXED-POINT: scale = 10^8, prices = i64, quantities = u64, all LE
 STATES: HandshakePending -> Active -> Closing

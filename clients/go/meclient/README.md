@@ -60,10 +60,10 @@ All integers are **little-endian**. Prices and quantities use **fixed-point** re
 
 Every message is wrapped in a length-prefixed, versioned frame:
 
-> **Note:** The Go client library currently implements **protocol v1** (14-byte header,
-> no `req_id`). The server accepts v1 clients for backward compatibility. The v2 wire
-> format (22-byte header with `req_id`) is documented below for reference — a v2
-> migration of this library is planned.
+> **⚠ Migration required:** The Go client library currently implements **protocol v1**
+> (14-byte header, no `req_id`). The server enforces **v2 only** — connecting with
+> this client will fail with `UnsupportedVersion`. A v2 migration of this library
+> is in progress. The v2 wire format is documented below for implementers.
 
 **Protocol v1 (current Go client):**
 
