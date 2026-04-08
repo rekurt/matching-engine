@@ -58,7 +58,25 @@ All integers are **little-endian**. Prices and quantities use **fixed-point** re
 
 ### Frame Format
 
-Every message is wrapped in a length-prefixed, versioned frame (protocol v2):
+Every message is wrapped in a length-prefixed, versioned frame:
+
+> **Note:** The Go client library currently implements **protocol v1** (14-byte header,
+> no `req_id`). The server accepts v1 clients for backward compatibility. The v2 wire
+> format (22-byte header with `req_id`) is documented below for reference — a v2
+> migration of this library is planned.
+
+**Protocol v1 (current Go client):**
+
+```
+┌──────────┬──────────┬──────────┬──────────┬─────────────────┐
+│ len: u32 │ ver: u8  │ type: u8 │ seq: u64 │ payload: [u8]   │
+│ 4 bytes  │ 1 byte   │ 1 byte   │ 8 bytes  │ variable        │
+└──────────┴──────────┴──────────┴──────────┴─────────────────┘
+```
+
+Header size: 14 bytes. Version byte: `0x01`.
+
+**Protocol v2 (server native):**
 
 ```
 ┌──────────┬──────────┬──────────┬──────────┬─────────────┬─────────────────┐
@@ -67,14 +85,7 @@ Every message is wrapped in a length-prefixed, versioned frame (protocol v2):
 └──────────┴──────────┴──────────┴──────────┴─────────────┴─────────────────┘
 ```
 
-- **len** (4 bytes, LE): Length of `payload` only (not including header)
-- **ver** (1 byte): Protocol version (currently 2)
-- **type** (1 byte): Message type identifier
-- **seq** (8 bytes, LE): Monotonically increasing sequence number
-- **req_id** (8 bytes, LE): Idempotency key; mirrored in solicited replies, 0 for unsolicited
-- **payload** (variable): Message-specific data
-
-Header size: 22 bytes total.
+Header size: 22 bytes. Version byte: `0x02`. `req_id` enables exactly-once semantics and response correlation.
 
 ### Connection Lifecycle
 
