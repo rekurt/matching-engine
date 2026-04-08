@@ -585,17 +585,18 @@ commands for the same shard.
 ### Frame Format
 
 ```
-+----------+----------+----------+----------+-----------------+
-| len: u32 | ver: u8  | type: u8 | seq: u64 | payload: [u8]   |
-| 4 bytes  | 1 byte   | 1 byte   | 8 bytes  | variable        |
-+----------+----------+----------+----------+-----------------+
-      \_______________________________________________/
-                   22-byte header (v2)
++----------+----------+----------+----------+-------------+-----------------+
+| len: u32 | ver: u8  | type: u8 | seq: u64 | req_id: u64 | payload: [u8]   |
+| 4 bytes  | 1 byte   | 1 byte   | 8 bytes  | 8 bytes     | variable        |
++----------+----------+----------+----------+-------------+-----------------+
+      \______________________________________________________________/
+                          22-byte header (v2)
 
-len:  payload size only (does NOT include the 22-byte header (v2))
-ver:  protocol version (currently 1)
-type: message type enum (see below)
-seq:  monotonically increasing sequence number per connection
+len:    payload size only (does NOT include the 22-byte header)
+ver:    protocol version (currently 2)
+type:   message type enum (see below)
+seq:    monotonically increasing sequence number per connection
+req_id: idempotency key; mirrored in solicited replies, 0 for unsolicited
 ```
 
 ### Message Types

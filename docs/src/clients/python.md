@@ -163,7 +163,8 @@ qty        : u64  (8 байт)   fixed-point 10^8
 ```
 
 ```python
-seq = 2  # следующий порядковый номер
+seq = 2       # следующий порядковый номер
+req_id = 1    # ненулевой req_id обязателен для торговых команд
 
 payload = struct.pack(
     "<QHBBBqqQ",
@@ -178,8 +179,9 @@ payload = struct.pack(
 )
 assert len(payload) == 37
 
-send_frame(sock, 0x01, payload, seq)
+send_frame(sock, 0x01, payload, seq, req_id=req_id)
 seq += 1
+req_id += 1
 ```
 
 ---
@@ -190,8 +192,9 @@ CancelOrder payload — 10 байт:
 
 ```python
 payload = struct.pack("<QH", 1001, 0)  # order_id, symbol_id
-send_frame(sock, 0x02, payload, seq)
+send_frame(sock, 0x02, payload, seq, req_id=req_id)
 seq += 1
+req_id += 1
 ```
 
 ---
