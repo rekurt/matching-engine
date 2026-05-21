@@ -123,8 +123,8 @@ pub fn decode_wal_command(data: &[u8]) -> Result<WalCommand, String> {
 
 /// Size of encoded order in bytes.
 /// v2: +16 bytes for client_session_id. v3: +1 byte for `flags`.
-/// v4: +8 bytes for `expire_at` (GTD).
-pub const ORDER_ENCODED_SIZE: usize = 95;
+/// v4: +8 bytes for `expire_at` (GTD). v5: +8 bytes for `trail_offset`.
+pub const ORDER_ENCODED_SIZE: usize = 103;
 
 /// Encode an order into a buffer (public, used by snapshot).
 pub fn encode_order_to(order: &Order, buf: &mut Vec<u8>) {
@@ -144,6 +144,7 @@ fn encode_order(order: &Order, buf: &mut Vec<u8>) {
     buf.extend_from_slice(&order.remaining_qty.raw().to_le_bytes());
     buf.extend_from_slice(&order.cumulative_qty.raw().to_le_bytes());
     buf.extend_from_slice(&order.expire_at.to_le_bytes());
+    buf.extend_from_slice(&order.trail_offset.raw().to_le_bytes());
     buf.extend_from_slice(&order.timestamp.to_le_bytes());
     buf.extend_from_slice(&order.sequence.to_le_bytes());
     buf.extend_from_slice(&order.symbol.0.to_le_bytes());
@@ -173,29 +174,30 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
     let remaining_qty = FixedQty::from_raw(u64::from_le_bytes(data[32..40].try_into().unwrap()));
     let cumulative_qty = FixedQty::from_raw(u64::from_le_bytes(data[40..48].try_into().unwrap()));
     let expire_at = u64::from_le_bytes(data[48..56].try_into().unwrap());
-    let timestamp = u64::from_le_bytes(data[56..64].try_into().unwrap());
-    let sequence = u64::from_le_bytes(data[64..72].try_into().unwrap());
-    let symbol = SymbolId(u16::from_le_bytes(data[72..74].try_into().unwrap()));
-    let side = match data[74] {
+    let trail_offset = FixedPrice::from_raw(i64::from_le_bytes(data[56..64].try_into().unwrap()));
+    let timestamp = u64::from_le_bytes(data[64..72].try_into().unwrap());
+    let sequence = u64::from_le_bytes(data[72..80].try_into().unwrap());
+    let symbol = SymbolId(u16::from_le_bytes(data[80..82].try_into().unwrap()));
+    let side = match data[82] {
         0 => Side::Buy,
         1 => Side::Sell,
         v => return Err(format!("Invalid side: {v}")),
     };
-    let order_type = match data[75] {
+    let order_type = match data[83] {
         0 => OrderType::Limit,
         1 => OrderType::Market,
         2 => OrderType::StopLimit,
         3 => OrderType::StopMarket,
         v => return Err(format!("Invalid order type: {v}")),
     };
-    let tif = match data[76] {
+    let tif = match data[84] {
         0 => TimeInForce::GTC,
         1 => TimeInForce::IOC,
         2 => TimeInForce::FOK,
         3 => TimeInForce::GTD,
         v => return Err(format!("Invalid TIF: {v}")),
     };
-    let status = match data[77] {
+    let status = match data[85] {
         0 => OrderStatus::New,
         1 => OrderStatus::PartiallyFilled,
         2 => OrderStatus::Filled,
@@ -204,9 +206,9 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
         5 => OrderStatus::Triggered,
         v => return Err(format!("Invalid status: {v}")),
     };
-    let flags = data[78];
+    let flags = data[86];
     let mut session_bytes = [0u8; 16];
-    session_bytes.copy_from_slice(&data[79..95]);
+    session_bytes.copy_from_slice(&data[87..103]);
     let client_session_id = me_core::SessionId::from_bytes(session_bytes);
 
     Ok(Order {
@@ -217,6 +219,7 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
         remaining_qty,
         cumulative_qty,
         expire_at,
+        trail_offset,
         timestamp,
         sequence,
         symbol,

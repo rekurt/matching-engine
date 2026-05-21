@@ -218,3 +218,54 @@ fn test_g57_stop_limit_rests_after_trigger() {
     // (It was placed through process_order after conversion)
     assert!(e.book().best_bid().is_some());
 }
+
+// ─── Trailing stops ──────────────────────────────────────────────────────────
+
+fn trailing_sell_stop(id: OrderId, init_stop: f64, trail: f64, qty: f64) -> Command {
+    Command::PlaceOrder(
+        Order::new_stop_market(
+            id,
+            SymbolId(0),
+            Side::Sell,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(init_stop),
+            FixedQty::from_f64(qty),
+            id * 1000,
+        )
+        .with_trail_offset(FixedPrice::from_f64(trail)),
+    )
+}
+
+#[test]
+fn test_trailing_sell_stop_ratchets_and_fills() {
+    let mut e = setup();
+
+    // Trailing sell stop: initial stop 95, trail 5.
+    e.process(trailing_sell_stop(1, 95.0, 5.0, 1.0));
+    assert_eq!(e.stop_book().len(), 1);
+
+    // Trade at 110 (resting ask 110, taker buy 110) → stop ratchets up to 105.
+    e.process(limit_sell(2, 110.0, 1.0));
+    e.process(limit_buy(3, 110.0, 1.0));
+    assert_eq!(e.stop_book().len(), 1, "no trigger while market rises");
+
+    // Build a bid at 105, then a sell hits it → trade at 105 (down move).
+    e.process(limit_buy(4, 105.0, 2.0));
+    let events = e.process(limit_sell(5, 105.0, 1.0)).to_vec();
+
+    // Trade at 105 reaches the ratcheted stop (105) → trailing stop triggers,
+    // converts to a market sell and fills against the remaining bid.
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::StopTriggered { order_id: 1, .. })),
+        "trailing stop must trigger at the ratcheted level"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::Trade(t) if t.taker_order_id == 1)),
+        "triggered trailing stop must trade"
+    );
+    assert_eq!(e.stop_book().len(), 0);
+}

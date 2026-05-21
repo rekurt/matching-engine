@@ -472,6 +472,7 @@ pub fn decode_frame(
 /// StopPrice(8) + Qty(8)  = 37 bytes (base)
 ///   [+ Flags(1)]         = 38 bytes
 ///   [+ ExpireAt(8)]      = 46 bytes (GTD expiry, unix nanoseconds)
+///   [+ TrailOffset(8)]   = 54 bytes (trailing-stop trail distance)
 /// Older clients send 37/38 bytes; the extra fields default to 0.
 fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Command, DecodeError> {
     if payload.len() < 37 {
@@ -542,6 +543,23 @@ fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Com
         ));
     }
 
+    // Backward-compatible trailing-stop offset: bytes 46..54 if present, else 0.
+    let trail_offset = if payload.len() >= 54 {
+        FixedPrice::from_raw(i64::from_le_bytes(
+            payload[46..54]
+                .try_into()
+                .expect("PlaceOrder: trail_offset"),
+        ))
+    } else {
+        FixedPrice::ZERO
+    };
+    let is_trailing = trail_offset.raw() > 0;
+    if is_trailing && !matches!(order_type, OrderType::StopLimit | OrderType::StopMarket) {
+        return Err(DecodeError::InvalidPayload(
+            "trail_offset is only valid on stop orders".into(),
+        ));
+    }
+
     if matches!(order_type, OrderType::Limit | OrderType::StopLimit) && !price.is_positive() {
         return Err(DecodeError::InvalidPayload(
             "Limit/StopLimit order requires positive price".into(),
@@ -565,6 +583,7 @@ fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Com
         remaining_qty: qty,
         cumulative_qty: FixedQty::ZERO,
         expire_at,
+        trail_offset,
         timestamp,
         sequence: 0,
         symbol,
