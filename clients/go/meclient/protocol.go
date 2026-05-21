@@ -9,10 +9,10 @@ import (
 
 // Frame header sizes.
 const (
-	frameLenSize    = 4 // u32 length prefix
-	frameVerSize    = 1 // u8 protocol version
-	frameTypeSize   = 1 // u8 message type
-	frameSeqSize    = 8 // u64 sequence number
+	frameLenSize    = 4                                                          // u32 length prefix
+	frameVerSize    = 1                                                          // u8 protocol version
+	frameTypeSize   = 1                                                          // u8 message type
+	frameSeqSize    = 8                                                          // u64 sequence number
 	frameHeaderSize = frameLenSize + frameVerSize + frameTypeSize + frameSeqSize // 14 bytes
 )
 
@@ -52,14 +52,14 @@ const (
 	placeOrderPayloadSize  = 37
 	cancelOrderPayloadSize = 10
 
-	orderAcceptedPayloadSize      = 16
-	orderRejectedPayloadSize      = 17
-	tradePayloadSize              = 51
-	orderFilledPayloadSize        = 32
+	orderAcceptedPayloadSize        = 16
+	orderRejectedPayloadSize        = 17
+	tradePayloadSize                = 51
+	orderFilledPayloadSize          = 32
 	orderPartiallyFilledPayloadSize = 40
-	orderCancelledPayloadSize     = 24
-	orderAmendedPayloadSize       = 32
-	stopTriggeredPayloadSize      = 24
+	orderCancelledPayloadSize       = 24
+	orderAmendedPayloadSize         = 32
+	stopTriggeredPayloadSize        = 24
 )
 
 // MaxFrameSize is the maximum allowed frame size to prevent excessive memory
@@ -128,9 +128,37 @@ func ReadFrame(r io.Reader) (msgType uint8, seq uint64, payload []byte, err erro
 	return msgType, seq, payload, nil
 }
 
-// EncodePlaceOrder encodes a PlaceOrder request into payload bytes.
+// PlaceOrder optional-field payload sizes (length-tiered, backward compatible):
+//
+//	37 = base
+//	38 = + Flags
+//	46 = + ExpireAt (GTD)
+//	54 = + TrailOffset (trailing stop)
+//	62 = + DisplayQty (iceberg)
+const (
+	placeOrderSizeFlags   = 38
+	placeOrderSizeExpire  = 46
+	placeOrderSizeTrail   = 54
+	placeOrderSizeDisplay = 62
+)
+
+// EncodePlaceOrder encodes a PlaceOrder request into payload bytes. Only the
+// minimal length needed for the set advanced fields is emitted, so plain orders
+// stay at 37 bytes and remain compatible with servers that ignore the extras.
 func EncodePlaceOrder(req *PlaceOrderRequest) []byte {
-	buf := make([]byte, placeOrderPayloadSize)
+	size := placeOrderPayloadSize
+	switch {
+	case req.DisplayQty.RawUint64() != 0:
+		size = placeOrderSizeDisplay
+	case req.TrailOffset.Raw() != 0:
+		size = placeOrderSizeTrail
+	case req.ExpireAt != 0 || req.TimeInForce == TimeInForceGTD:
+		size = placeOrderSizeExpire
+	case req.Flags != 0:
+		size = placeOrderSizeFlags
+	}
+
+	buf := make([]byte, size)
 	binary.LittleEndian.PutUint64(buf[0:8], req.OrderId)
 	binary.LittleEndian.PutUint16(buf[8:10], req.SymbolId)
 	buf[10] = uint8(req.Side)
@@ -139,15 +167,28 @@ func EncodePlaceOrder(req *PlaceOrderRequest) []byte {
 	binary.LittleEndian.PutUint64(buf[13:21], uint64(req.Price.Raw()))
 	binary.LittleEndian.PutUint64(buf[21:29], uint64(req.StopPrice.Raw()))
 	binary.LittleEndian.PutUint64(buf[29:37], req.Qty.RawUint64())
+	if size >= placeOrderSizeFlags {
+		buf[37] = req.Flags
+	}
+	if size >= placeOrderSizeExpire {
+		binary.LittleEndian.PutUint64(buf[38:46], req.ExpireAt)
+	}
+	if size >= placeOrderSizeTrail {
+		binary.LittleEndian.PutUint64(buf[46:54], uint64(req.TrailOffset.Raw()))
+	}
+	if size >= placeOrderSizeDisplay {
+		binary.LittleEndian.PutUint64(buf[54:62], req.DisplayQty.RawUint64())
+	}
 	return buf
 }
 
-// DecodePlaceOrder decodes a PlaceOrder payload.
+// DecodePlaceOrder decodes a PlaceOrder payload. Optional advanced fields are
+// parsed by length and default to zero when absent.
 func DecodePlaceOrder(data []byte) (*PlaceOrderRequest, error) {
-	if len(data) != placeOrderPayloadSize {
-		return nil, fmt.Errorf("%w: PlaceOrder expected %d bytes, got %d", ErrInvalidPayloadSize, placeOrderPayloadSize, len(data))
+	if len(data) < placeOrderPayloadSize {
+		return nil, fmt.Errorf("%w: PlaceOrder expected at least %d bytes, got %d", ErrInvalidPayloadSize, placeOrderPayloadSize, len(data))
 	}
-	return &PlaceOrderRequest{
+	req := &PlaceOrderRequest{
 		OrderId:     binary.LittleEndian.Uint64(data[0:8]),
 		SymbolId:    binary.LittleEndian.Uint16(data[8:10]),
 		Side:        Side(data[10]),
@@ -156,7 +197,20 @@ func DecodePlaceOrder(data []byte) (*PlaceOrderRequest, error) {
 		Price:       NewDecimalRaw(int64(binary.LittleEndian.Uint64(data[13:21]))),
 		StopPrice:   NewDecimalRaw(int64(binary.LittleEndian.Uint64(data[21:29]))),
 		Qty:         NewDecimalFromUint64(binary.LittleEndian.Uint64(data[29:37])),
-	}, nil
+	}
+	if len(data) >= placeOrderSizeFlags {
+		req.Flags = data[37]
+	}
+	if len(data) >= placeOrderSizeExpire {
+		req.ExpireAt = binary.LittleEndian.Uint64(data[38:46])
+	}
+	if len(data) >= placeOrderSizeTrail {
+		req.TrailOffset = NewDecimalRaw(int64(binary.LittleEndian.Uint64(data[46:54])))
+	}
+	if len(data) >= placeOrderSizeDisplay {
+		req.DisplayQty = NewDecimalFromUint64(binary.LittleEndian.Uint64(data[54:62]))
+	}
+	return req, nil
 }
 
 // EncodeCancelOrder encodes a CancelOrder request into payload bytes.
