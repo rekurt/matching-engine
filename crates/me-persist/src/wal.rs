@@ -84,17 +84,30 @@ impl WalWriter {
         self.writer.write_all(&cmd_bytes)?;
 
         self.writes_since_sync += 1;
-        if self.writes_since_sync >= self.sync_interval {
-            self.writer.flush()?;
-            self.writes_since_sync = 0;
+        // sync_interval == 0 means "fsync every write" (maximum durability).
+        if self.sync_interval == 0 || self.writes_since_sync >= self.sync_interval {
+            self.sync()?;
         }
 
         Ok(seq)
     }
 
-    /// Flush and sync the WAL to disk.
+    /// Flush the buffer AND fsync to physical storage.
+    ///
+    /// `BufWriter::flush` alone only pushes bytes into the OS page cache; a
+    /// power loss before the kernel writes back loses "journaled" records.
+    /// `sync_data` forces the data (not necessarily metadata) to disk, which
+    /// is what the Pre-mode durability contract actually requires.
+    pub fn sync(&mut self) -> io::Result<()> {
+        self.writer.flush()?;
+        self.writer.get_ref().sync_data()?;
+        self.writes_since_sync = 0;
+        Ok(())
+    }
+
+    /// Flush and sync the WAL to disk. Durable: kept as the shutdown path.
     pub fn flush(&mut self) -> io::Result<()> {
-        self.writer.flush()
+        self.sync()
     }
 
     /// Current sequence number.
@@ -110,9 +123,32 @@ impl WalWriter {
 
 // ─── WAL Reader ──────────────────────────────────────────────────────────────
 
+/// Hard cap on a single WAL record's payload length. A larger declared
+/// length means a torn write or corruption, NOT a real record — refuse to
+/// allocate gigabytes from a garbage `len` field.
+pub const MAX_WAL_RECORD_LEN: usize = 16 * 1024 * 1024;
+
+/// Per-record framing overhead: len(u32) + crc(u32) + sequence(u64).
+const RECORD_HEADER_LEN: u64 = 4 + 4 + 8;
+
+/// Outcome of a crash-tolerant WAL scan.
+#[derive(Debug)]
+pub struct RecoveryResult {
+    /// Entries successfully read before any torn/corrupt tail.
+    pub entries: Vec<WalEntry>,
+    /// Byte offset just past the last fully-valid record. The caller should
+    /// truncate the WAL file to this length before reopening it for append,
+    /// so new records are not written after a corrupt gap.
+    pub valid_bytes: u64,
+    /// `Some(reason)` if the scan stopped early on a torn/corrupt tail.
+    pub truncated: Option<String>,
+}
+
 /// Reads and replays WAL entries from a file.
 pub struct WalReader {
     reader: BufReader<File>,
+    /// Byte offset of the next record to read (== bytes consumed so far).
+    offset: u64,
 }
 
 impl WalReader {
@@ -120,11 +156,12 @@ impl WalReader {
         let file = File::open(path)?;
         Ok(Self {
             reader: BufReader::new(file),
+            offset: 0,
         })
     }
 
     /// Read the next entry from the WAL.
-    /// Returns None at EOF, Err on corruption.
+    /// Returns None at clean EOF, Err on corruption or a torn tail record.
     pub fn next_entry(&mut self) -> io::Result<Option<WalEntry>> {
         // Read len
         let mut len_buf = [0u8; 4];
@@ -134,6 +171,14 @@ impl WalReader {
             Err(e) => return Err(e),
         }
         let len = u32::from_le_bytes(len_buf) as usize;
+
+        // Reject implausible lengths BEFORE allocating.
+        if len > MAX_WAL_RECORD_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("WAL record len {len} exceeds cap {MAX_WAL_RECORD_LEN} (corrupt/torn)"),
+            ));
+        }
 
         // Read CRC
         let mut crc_buf = [0u8; 4];
@@ -164,10 +209,11 @@ impl WalReader {
             io::Error::new(io::ErrorKind::InvalidData, format!("WAL decode error: {e}"))
         })?;
 
+        self.offset += RECORD_HEADER_LEN + len as u64;
         Ok(Some(WalEntry { sequence, command }))
     }
 
-    /// Read all remaining entries.
+    /// Read all remaining entries (strict: errors on any corruption).
     pub fn read_all(&mut self) -> io::Result<Vec<WalEntry>> {
         let mut entries = Vec::new();
         while let Some(entry) = self.next_entry()? {
@@ -176,15 +222,46 @@ impl WalReader {
         Ok(entries)
     }
 
-    /// Read entries starting from a given sequence number.
+    /// Read entries starting AFTER a given sequence number (exclusive).
+    ///
+    /// `from_sequence` is the last sequence already captured by a snapshot,
+    /// so it must NOT be replayed again — applying it would double-apply the
+    /// command baked into the snapshot.
     pub fn read_from(&mut self, from_sequence: u64) -> io::Result<Vec<WalEntry>> {
         let mut entries = Vec::new();
         while let Some(entry) = self.next_entry()? {
-            if entry.sequence >= from_sequence {
+            if entry.sequence > from_sequence {
                 entries.push(entry);
             }
         }
         Ok(entries)
+    }
+
+    /// Crash-tolerant scan: read every fully-valid record, stopping cleanly at
+    /// the first torn or corrupt record (the expected state of the last record
+    /// after a crash mid-append). Returns the good entries plus the byte offset
+    /// the file should be truncated to.
+    pub fn read_recoverable(&mut self) -> RecoveryResult {
+        let mut entries = Vec::new();
+        loop {
+            match self.next_entry() {
+                Ok(Some(entry)) => entries.push(entry),
+                Ok(None) => {
+                    return RecoveryResult {
+                        entries,
+                        valid_bytes: self.offset,
+                        truncated: None,
+                    }
+                }
+                Err(e) => {
+                    return RecoveryResult {
+                        entries,
+                        valid_bytes: self.offset,
+                        truncated: Some(e.to_string()),
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -243,6 +320,89 @@ mod tests {
                 _ => panic!("Expected CancelOrder"),
             }
         }
+
+        let _ = fs::remove_file(&path);
+    }
+
+    fn write_two_records(path: &Path) -> u64 {
+        let mut writer = WalWriter::open(path, 1).unwrap();
+        let order = Order::new_limit(
+            1,
+            SymbolId(0),
+            Side::Buy,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(100.0),
+            FixedQty::from_f64(1.0),
+            1000,
+        );
+        writer.append(&WalCommand::PlaceOrder(order)).unwrap();
+        writer
+            .append(&WalCommand::CancelOrder {
+                order_id: 1,
+                symbol: SymbolId(0),
+                timestamp: 2000,
+            })
+            .unwrap();
+        writer.flush().unwrap();
+        fs::metadata(path).unwrap().len()
+    }
+
+    #[test]
+    fn test_recoverable_clean_tail() {
+        let path = temp_wal_path("test_recover_clean.wal");
+        let _ = fs::remove_file(&path);
+        let size = write_two_records(&path);
+
+        let mut reader = WalReader::open(&path).unwrap();
+        let result = reader.read_recoverable();
+        assert_eq!(result.entries.len(), 2);
+        assert!(result.truncated.is_none());
+        assert_eq!(result.valid_bytes, size, "clean scan consumes whole file");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_recoverable_torn_tail() {
+        use std::io::Write as _;
+        let path = temp_wal_path("test_recover_torn.wal");
+        let _ = fs::remove_file(&path);
+        let good_size = write_two_records(&path);
+
+        // Simulate a crash mid-append: a len header with no body.
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(&1000u32.to_le_bytes()).unwrap(); // claims 1000 bytes, none follow
+        f.flush().unwrap();
+
+        let mut reader = WalReader::open(&path).unwrap();
+        let result = reader.read_recoverable();
+        assert_eq!(result.entries.len(), 2, "good records recovered");
+        assert!(result.truncated.is_some(), "torn tail reported");
+        assert_eq!(
+            result.valid_bytes, good_size,
+            "truncation point is end of last good record"
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_recoverable_oversized_len_does_not_allocate() {
+        use std::io::Write as _;
+        let path = temp_wal_path("test_recover_huge.wal");
+        let _ = fs::remove_file(&path);
+        let good_size = write_two_records(&path);
+
+        // A garbage len of u32::MAX must be rejected by the cap, not allocated.
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(&u32::MAX.to_le_bytes()).unwrap();
+        f.flush().unwrap();
+
+        let mut reader = WalReader::open(&path).unwrap();
+        let result = reader.read_recoverable();
+        assert_eq!(result.entries.len(), 2);
+        assert!(result.truncated.is_some());
+        assert_eq!(result.valid_bytes, good_size);
 
         let _ = fs::remove_file(&path);
     }

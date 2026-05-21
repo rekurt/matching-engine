@@ -27,7 +27,8 @@ pub struct BookSnapshot {
 /// [stop_count: u32][stop_orders...]
 /// [crc: u32] (of everything above)
 const SNAPSHOT_MAGIC: u32 = 0x4D45534E; // "MESN"
-const SNAPSHOT_VERSION: u16 = 1;
+/// v2: encoded order layout gained a `flags` byte (see codec::ORDER_ENCODED_SIZE).
+const SNAPSHOT_VERSION: u16 = 2;
 
 /// Manager for saving and loading order book snapshots.
 pub struct SnapshotManager {
@@ -76,12 +77,19 @@ impl SnapshotManager {
         let crc = crc32fast::hash(&data);
         data.extend_from_slice(&crc.to_le_bytes());
 
-        // Write atomically: write to temp, then rename
+        // Write atomically: write to temp, fsync the temp file, rename, then
+        // fsync the directory so the rename itself is durable. Without the
+        // directory fsync a crash can leave the new name unpersisted while the
+        // WAL has already been advanced/truncated against this snapshot.
         let tmp_path = path.with_extension("tmp");
         let mut file = File::create(&tmp_path)?;
         file.write_all(&data)?;
         file.sync_all()?;
         fs::rename(&tmp_path, &path)?;
+        // Best-effort durability of the rename: fsync the containing directory.
+        if let Ok(dir) = File::open(&self.snapshot_dir) {
+            let _ = dir.sync_all();
+        }
 
         Ok(path)
     }

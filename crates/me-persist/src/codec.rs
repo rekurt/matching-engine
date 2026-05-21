@@ -121,8 +121,9 @@ pub fn decode_wal_command(data: &[u8]) -> Result<WalCommand, String> {
     }
 }
 
-/// Size of encoded order in bytes (v2: +16 bytes for client_session_id).
-pub const ORDER_ENCODED_SIZE: usize = 86;
+/// Size of encoded order in bytes.
+/// v2: +16 bytes for client_session_id. v3: +1 byte for `flags`.
+pub const ORDER_ENCODED_SIZE: usize = 87;
 
 /// Encode an order into a buffer (public, used by snapshot).
 pub fn encode_order_to(order: &Order, buf: &mut Vec<u8>) {
@@ -148,6 +149,7 @@ fn encode_order(order: &Order, buf: &mut Vec<u8>) {
     buf.push(order.order_type as u8);
     buf.push(order.tif as u8);
     buf.push(order.status as u8);
+    buf.push(order.flags);
     buf.extend_from_slice(order.client_session_id.as_bytes());
 }
 
@@ -198,8 +200,9 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
         5 => OrderStatus::Triggered,
         v => return Err(format!("Invalid status: {v}")),
     };
+    let flags = data[70];
     let mut session_bytes = [0u8; 16];
-    session_bytes.copy_from_slice(&data[70..86]);
+    session_bytes.copy_from_slice(&data[71..87]);
     let client_session_id = me_core::SessionId::from_bytes(session_bytes);
 
     Ok(Order {
@@ -216,7 +219,7 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
         order_type,
         tif,
         status,
-        flags: 0,
+        flags,
         _pad: 0,
         client_session_id,
     })
@@ -249,6 +252,31 @@ mod tests {
                 assert_eq!(o.symbol, SymbolId(5));
                 assert_eq!(o.side, Side::Sell);
                 assert_eq!(o.tif, TimeInForce::IOC);
+            }
+            _ => panic!("Expected PlaceOrder"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_preserves_flags() {
+        use me_core::order::ORDER_FLAG_POST_ONLY;
+        let mut order = Order::new_limit(
+            7,
+            SymbolId(1),
+            Side::Buy,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(100.0),
+            FixedQty::from_f64(1.0),
+            123,
+        );
+        order.flags = ORDER_FLAG_POST_ONLY;
+        let encoded = encode_wal_command(&WalCommand::PlaceOrder(order));
+        match decode_wal_command(&encoded).unwrap() {
+            WalCommand::PlaceOrder(o) => {
+                assert_eq!(
+                    o.flags, ORDER_FLAG_POST_ONLY,
+                    "flags must survive roundtrip"
+                );
             }
             _ => panic!("Expected PlaceOrder"),
         }
