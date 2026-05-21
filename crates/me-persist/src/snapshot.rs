@@ -33,8 +33,11 @@ pub struct BookSnapshot {
 /// [stop_count: u32][stop_orders...]
 /// [crc: u32] (of everything above)
 const SNAPSHOT_MAGIC: u32 = 0x4D45534E; // "MESN"
-/// v2: encoded order layout gained a `flags` byte (see codec::ORDER_ENCODED_SIZE).
-const SNAPSHOT_VERSION: u16 = 2;
+/// v2: encoded order gained a `flags` byte.
+/// v3: encoded order gained `expire_at`, `trail_offset`, `display_qty`
+///     (GTD / trailing-stop / iceberg). Older v2 snapshots are rejected by
+///     `load_file` rather than mis-decoded against the wider record layout.
+const SNAPSHOT_VERSION: u16 = 3;
 
 /// Manager for saving and loading order book snapshots.
 pub struct SnapshotManager {
