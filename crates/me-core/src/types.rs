@@ -159,6 +159,27 @@ impl FixedQty {
         Self(self.0.saturating_sub(other.0))
     }
 
+    /// Checked subtraction. Returns `None` on underflow instead of
+    /// silently saturating — use this on accounting paths (fills, level
+    /// aggregates) where an underflow signals an invariant violation that
+    /// must be observed, not masked.
+    #[inline]
+    pub const fn checked_sub(self, other: Self) -> Option<Self> {
+        match self.0.checked_sub(other.0) {
+            Some(v) => Some(Self(v)),
+            None => None,
+        }
+    }
+
+    /// Checked addition. Returns `None` on overflow.
+    #[inline]
+    pub const fn checked_add(self, other: Self) -> Option<Self> {
+        match self.0.checked_add(other.0) {
+            Some(v) => Some(Self(v)),
+            None => None,
+        }
+    }
+
     #[inline]
     pub const fn min(self, other: Self) -> Self {
         if self.0 < other.0 {
@@ -302,6 +323,16 @@ mod tests {
             FixedQty::ZERO.saturating_sub(FixedQty::from_raw(1)),
             FixedQty::ZERO
         );
+    }
+
+    #[test]
+    fn test_fixed_qty_checked() {
+        let a = FixedQty::from_raw(10);
+        let b = FixedQty::from_raw(3);
+        assert_eq!(a.checked_sub(b), Some(FixedQty::from_raw(7)));
+        assert_eq!(b.checked_sub(a), None); // underflow surfaced, not saturated
+        assert_eq!(a.checked_add(b), Some(FixedQty::from_raw(13)));
+        assert_eq!(FixedQty::MAX.checked_add(FixedQty::from_raw(1)), None);
     }
 
     #[test]

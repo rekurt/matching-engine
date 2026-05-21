@@ -47,6 +47,12 @@ pub enum InvariantKind {
     OrderRemovalAfterVerification,
     /// `Slab::remove` was called on a vacant entry (caller bug).
     SlabRemoveVacant,
+    /// A FOK order passed the pre-trade liquidity check but did not fully
+    /// fill — indicates `level.total_qty` drifted from actual resting qty.
+    FokPartialFillAfterPrecheck,
+    /// A price level's `total_qty` was about to underflow during a fill —
+    /// the level aggregate diverged from the sum of its orders.
+    LevelTotalQtyUnderflow,
 }
 
 impl InvariantKind {
@@ -58,6 +64,8 @@ impl InvariantKind {
             Self::SlabKeyFromLocationMissing => "slab_key_from_location_missing",
             Self::OrderRemovalAfterVerification => "order_removal_after_verification",
             Self::SlabRemoveVacant => "slab_remove_vacant",
+            Self::FokPartialFillAfterPrecheck => "fok_partial_fill_after_precheck",
+            Self::LevelTotalQtyUnderflow => "level_total_qty_underflow",
         }
     }
 }
