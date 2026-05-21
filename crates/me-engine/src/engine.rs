@@ -90,8 +90,7 @@ impl Engine {
 
                 // Track GTD expiry before the order is moved into a book.
                 if order.is_gtd() && order.expire_at != 0 {
-                    self.gtd_expiry
-                        .push(Reverse((order.expire_at, order.id)));
+                    self.gtd_expiry.push(Reverse((order.expire_at, order.id)));
                 }
 
                 if order.is_stop() {
@@ -368,16 +367,14 @@ impl Engine {
         self.gtd_expiry.clear();
         for order in snapshot.resting_orders {
             if order.is_gtd() && order.expire_at != 0 {
-                self.gtd_expiry
-                    .push(Reverse((order.expire_at, order.id)));
+                self.gtd_expiry.push(Reverse((order.expire_at, order.id)));
             }
             self.book.insert_order(order);
         }
         let mut scratch = EventBuffer::default();
         for order in snapshot.stop_orders {
             if order.is_gtd() && order.expire_at != 0 {
-                self.gtd_expiry
-                    .push(Reverse((order.expire_at, order.id)));
+                self.gtd_expiry.push(Reverse((order.expire_at, order.id)));
             }
             self.stop_book.insert(order, &mut scratch);
         }
