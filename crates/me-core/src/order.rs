@@ -34,6 +34,9 @@ pub enum TimeInForce {
     IOC = 1,
     /// Fill or Kill — fill entirely or reject entirely.
     FOK = 2,
+    /// Good Till Date — rests like GTC but is auto-cancelled once
+    /// `Order.expire_at` (unix nanoseconds) is reached.
+    GTD = 3,
 }
 
 // ─── OrderStatus ─────────────────────────────────────────────────────────────
@@ -52,15 +55,14 @@ pub enum OrderStatus {
 
 // ─── Order ───────────────────────────────────────────────────────────────────
 
-/// Core order struct. 88 bytes (72 + 16 client_session_id).
+/// Core order struct. 96 bytes.
 ///
 /// ## Layout rationale
-/// Fields ordered to minimize padding. First 72 bytes match the matching
-/// engine's hot-path access pattern (price/qty/status) and fit in the first
-/// cache line on x86_64 (64 bytes) plus a small tail. The 16-byte
-/// `client_session_id` lives at the end — it's only touched at submission
-/// time (codec decode) and at snapshot time (OpenOrders scan), NEVER in the
-/// matching fast path. Placing it last keeps the critical fields cache-hot.
+/// Fields ordered to minimize padding. Hot-path fields (price/qty/status)
+/// come first. The 16-byte `client_session_id` lives at the end — it's only
+/// touched at submission time (codec decode) and at snapshot time (OpenOrders
+/// scan), NEVER in the matching fast path. Placing it last keeps the critical
+/// fields cache-hot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(C)]
 pub struct Order {
@@ -70,6 +72,8 @@ pub struct Order {
     pub qty: FixedQty,
     pub remaining_qty: FixedQty,
     pub cumulative_qty: FixedQty,
+    /// GTD expiry as unix nanoseconds. `0` means no expiry (GTC/IOC/FOK).
+    pub expire_at: u64,
     pub timestamp: u64,
     pub sequence: SequenceId,
     pub symbol: SymbolId,
@@ -87,11 +91,11 @@ pub struct Order {
 }
 
 /// Compile-time size guard: if someone adds a field that changes Order layout,
-/// the docs at line 54 say "88 bytes" — this fails the build loudly instead of
+/// the docstring above says "96 bytes" — this fails the build loudly instead of
 /// silently drifting. Update both this assert and the docstring together.
 const _: () = assert!(
-    std::mem::size_of::<Order>() == 88,
-    "Order struct size changed — update docstring at line 54 and this assert"
+    std::mem::size_of::<Order>() == 96,
+    "Order struct size changed — update docstring and this assert"
 );
 
 impl Order {
@@ -112,6 +116,7 @@ impl Order {
             qty,
             remaining_qty: qty,
             cumulative_qty: FixedQty::ZERO,
+            expire_at: 0,
             timestamp,
             sequence: 0,
             symbol,
@@ -141,6 +146,7 @@ impl Order {
             qty,
             remaining_qty: qty,
             cumulative_qty: FixedQty::ZERO,
+            expire_at: 0,
             timestamp,
             sequence: 0,
             symbol,
@@ -173,6 +179,7 @@ impl Order {
             qty,
             remaining_qty: qty,
             cumulative_qty: FixedQty::ZERO,
+            expire_at: 0,
             timestamp,
             sequence: 0,
             symbol,
@@ -203,6 +210,7 @@ impl Order {
             qty,
             remaining_qty: qty,
             cumulative_qty: FixedQty::ZERO,
+            expire_at: 0,
             timestamp,
             sequence: 0,
             symbol,
@@ -224,6 +232,27 @@ impl Order {
     pub fn with_session_id(mut self, session_id: SessionId) -> Self {
         self.client_session_id = session_id;
         self
+    }
+
+    /// Builder: set the GTD expiry (unix nanoseconds) and mark the order GTD.
+    #[inline]
+    pub fn with_expiry(mut self, expire_at: u64) -> Self {
+        self.expire_at = expire_at;
+        self.tif = TimeInForce::GTD;
+        self
+    }
+
+    /// Whether this is a GTD order carrying an expiry.
+    #[inline]
+    pub fn is_gtd(&self) -> bool {
+        matches!(self.tif, TimeInForce::GTD)
+    }
+
+    /// Whether this order has expired at the given time (unix nanoseconds).
+    /// Non-GTD orders and GTD orders with `expire_at == 0` never expire.
+    #[inline]
+    pub fn is_expired_at(&self, now_ns: u64) -> bool {
+        self.is_gtd() && self.expire_at != 0 && now_ns >= self.expire_at
     }
 
     /// Whether this order is a stop order (not yet triggered).
@@ -306,6 +335,39 @@ mod tests {
         assert_eq!(o.order_type, OrderType::Limit);
         assert_eq!(o.status, OrderStatus::Triggered);
         assert!(!o.is_stop());
+    }
+
+    #[test]
+    fn test_gtd_expiry_helpers() {
+        let o = Order::new_limit(
+            1,
+            SymbolId(0),
+            Side::Buy,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(100.0),
+            FixedQty::from_f64(1.0),
+            1000,
+        )
+        .with_expiry(5_000);
+        assert!(o.is_gtd());
+        assert_eq!(o.tif, TimeInForce::GTD);
+        assert_eq!(o.expire_at, 5_000);
+        assert!(!o.is_expired_at(4_999));
+        assert!(o.is_expired_at(5_000));
+        assert!(o.is_expired_at(6_000));
+
+        // Non-GTD orders never expire.
+        let g = Order::new_limit(
+            2,
+            SymbolId(0),
+            Side::Buy,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(100.0),
+            FixedQty::from_f64(1.0),
+            1000,
+        );
+        assert!(!g.is_gtd());
+        assert!(!g.is_expired_at(u64::MAX));
     }
 
     #[test]

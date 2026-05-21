@@ -51,13 +51,17 @@ pub fn validate_order(order: &Order, config: &SymbolConfig) -> Option<RejectReas
     }
 
     // Stop price validation for stop orders
-    match order.order_type {
-        OrderType::StopLimit | OrderType::StopMarket => {
-            if !order.stop_price.is_positive() {
-                return Some(RejectReason::InvalidPrice);
-            }
-        }
-        _ => {}
+    if matches!(
+        order.order_type,
+        OrderType::StopLimit | OrderType::StopMarket
+    ) && !order.stop_price.is_positive()
+    {
+        return Some(RejectReason::InvalidPrice);
+    }
+
+    // GTD orders must carry a non-zero expiry.
+    if matches!(order.tif, TimeInForce::GTD) && order.expire_at == 0 {
+        return Some(RejectReason::InvalidExpiry);
     }
 
     None
@@ -171,11 +175,29 @@ fn match_limit(book: &mut OrderBook, order: &mut Order, events: &mut EventBuffer
                 });
             }
             TimeInForce::FOK => {
-                // Shouldn't reach here — FOK was checked above
-                unreachable!("FOK order should have been fully filled or rejected");
+                // FOK was pre-checked against available liquidity and should
+                // have fully filled. Reaching here means the available-qty
+                // calculation disagreed with actual matching — i.e.
+                // `level.total_qty` drifted from the sum of resting orders.
+                // This is an internal invariant violation, NOT a user error.
+                // Never panic on the hot path in production: record the
+                // violation (policy decides halt vs. continue) and cancel the
+                // unfilled remainder so a FOK order never rests on the book.
+                book.record_invariant_violation(
+                    InvariantKind::FokPartialFillAfterPrecheck,
+                    "match_limit::fok_remainder",
+                );
+                order.status = OrderStatus::Cancelled;
+                events.push(MatchEvent::OrderCancelled {
+                    order_id: order.id,
+                    remaining_qty: order.remaining_qty,
+                    timestamp: order.timestamp,
+                });
             }
-            TimeInForce::GTC => {
-                // Rest on book
+            TimeInForce::GTC | TimeInForce::GTD => {
+                // Rest on book. GTD additionally carries an expiry that the
+                // engine layer enforces (lazy expiry sweep) — the book itself
+                // treats GTD identically to GTC.
                 book.insert_order(*order);
             }
         }
@@ -404,19 +426,30 @@ fn match_taker_against_ask_level(
         }
     }
 
-    // Update level qty for partially filled makers
-    // (already done by the order node mutations above, but we need to update PriceLevel.total_qty)
-    // Actually, the PriceLevel.total_qty was not decremented for partial fills.
-    // We need to fix this: decrement total_qty for all fills.
-    // For fully filled orders, remove_order already handles it via PriceLevel::remove.
-    // For partial fills, we need to manually update the level.
-    // Let's update the ask level total_qty for partial fills.
+    // Update level qty for partially filled makers. Fully-filled makers are
+    // removed via remove_order (which adjusts total_qty in PriceLevel::remove);
+    // partial fills must be decremented here. Use checked subtraction so that
+    // a divergence between the level aggregate and the sum of its orders is
+    // surfaced as an invariant violation instead of silently saturating to 0.
+    let mut total_qty_underflow = false;
     if let Some((_, level)) = book.best_ask_level_mut() {
         for (_, fill_qty, fully_filled) in &fills {
             if !fully_filled {
-                level.total_qty -= *fill_qty;
+                match level.total_qty.checked_sub(*fill_qty) {
+                    Some(v) => level.total_qty = v,
+                    None => {
+                        level.total_qty = FixedQty::ZERO;
+                        total_qty_underflow = true;
+                    }
+                }
             }
         }
+    }
+    if total_qty_underflow {
+        book.record_invariant_violation(
+            InvariantKind::LevelTotalQtyUnderflow,
+            "match_taker_against_ask_level::total_qty",
+        );
     }
 
     // Emit taker fill events
@@ -556,12 +589,25 @@ fn match_taker_against_bid_level(
         }
     }
 
+    let mut total_qty_underflow = false;
     if let Some((_, level)) = book.best_bid_level_mut() {
         for (_, fill_qty, fully_filled) in &fills {
             if !fully_filled {
-                level.total_qty -= *fill_qty;
+                match level.total_qty.checked_sub(*fill_qty) {
+                    Some(v) => level.total_qty = v,
+                    None => {
+                        level.total_qty = FixedQty::ZERO;
+                        total_qty_underflow = true;
+                    }
+                }
             }
         }
+    }
+    if total_qty_underflow {
+        book.record_invariant_violation(
+            InvariantKind::LevelTotalQtyUnderflow,
+            "match_taker_against_bid_level::total_qty",
+        );
     }
 
     let total_filled: FixedQty = fills

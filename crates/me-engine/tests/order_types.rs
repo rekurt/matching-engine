@@ -774,3 +774,77 @@ fn test_j77_order_count() {
     });
     assert_eq!(e.book().order_count(), 2);
 }
+
+// ─── GTD (Good-Till-Date) ────────────────────────────────────────────────────
+
+fn gtd_buy(id: OrderId, price: f64, qty: f64, expire_at: u64) -> Command {
+    Command::PlaceOrder(
+        Order::new_limit(
+            id,
+            SymbolId(0),
+            Side::Buy,
+            TimeInForce::GTD,
+            FixedPrice::from_f64(price),
+            FixedQty::from_f64(qty),
+            id * 1000,
+        )
+        .with_expiry(expire_at),
+    )
+}
+
+#[test]
+fn test_gtd_without_expiry_is_rejected() {
+    let mut e = setup();
+    // tif=GTD but expire_at=0 (builder not used) → InvalidExpiry.
+    let mut order = Order::new_limit(
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTD,
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_f64(1.0),
+        1000,
+    );
+    order.expire_at = 0;
+    let events = e.process(Command::PlaceOrder(order)).to_vec();
+    assert!(events.iter().any(|ev| matches!(
+        ev,
+        MatchEvent::OrderRejected {
+            reason: RejectReason::InvalidExpiry,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn test_gtd_rests_then_expires() {
+    let mut e = setup();
+    // expire_at far in the past (1 ns) → SystemClock now is always greater.
+    let events = e.process(gtd_buy(1, 100.0, 1.0, 1)).to_vec();
+    assert!(events
+        .iter()
+        .any(|ev| matches!(ev, MatchEvent::OrderAccepted { .. })));
+    assert_eq!(e.book().order_count(), 1, "GTD order rests like GTC");
+
+    // Lazy sweep cancels the expired order.
+    let expired = e.expire_gtd_now();
+    assert!(
+        expired
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::OrderCancelled { order_id: 1, .. })),
+        "expired GTD order must be cancelled"
+    );
+    assert_eq!(e.book().order_count(), 0);
+}
+
+#[test]
+fn test_gtd_future_expiry_not_swept() {
+    let mut e = setup();
+    // expire_at far in the future.
+    let far = u64::MAX;
+    e.process(gtd_buy(1, 100.0, 1.0, far));
+    assert_eq!(e.book().order_count(), 1);
+    let expired = e.expire_gtd_now();
+    assert!(expired.is_empty(), "future GTD must not be swept");
+    assert_eq!(e.book().order_count(), 1);
+}

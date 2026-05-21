@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # me-book — Order Book and Matching Algorithm
 //!
 //! This crate implements the order book data structure and the price-time priority

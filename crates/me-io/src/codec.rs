@@ -7,9 +7,9 @@ use me_core::types::*;
 use me_engine::command::Command;
 
 use crate::protocol::{
-    ConnectionState, ErrorCode, MessageType, FRAME_HEADER_SIZE, MAX_BATCH_CANCEL, MAX_BATCH_PLACE,
-    MAX_PAYLOAD_SIZE, MAX_PAYLOAD_SIZE_BATCH, PROTOCOL_VERSION, TLV_CAPABILITIES, TLV_HEARTBEAT_MS,
-    TLV_SESSION_ID,
+    ConnectionState, ErrorCode, MessageType, BATCH_PLACE_ENTRY_SIZE, FRAME_HEADER_SIZE,
+    MAX_BATCH_CANCEL, MAX_BATCH_PLACE, MAX_PAYLOAD_SIZE, MAX_PAYLOAD_SIZE_BATCH, PROTOCOL_VERSION,
+    TLV_CAPABILITIES, TLV_HEARTBEAT_MS, TLV_SESSION_ID,
 };
 use crate::session_store::SessionId;
 
@@ -418,18 +418,23 @@ pub fn decode_frame(
             let mut cmds = Vec::with_capacity(count as usize);
             let mut offset = 1usize;
             for _ in 0..count {
-                if payload.len() < offset + 37 {
+                // Batch entries are FIXED at 38 bytes (flags mandatory). The
+                // single-order format allows an optional flags byte (37 or 38),
+                // but inside a batch a variable size is unparseable: with no
+                // per-entry length prefix the decoder cannot tell where one
+                // entry ends. Guessing the size from the remaining buffer (the
+                // previous behaviour) silently corrupted every entry after the
+                // first whenever a 37-byte entry was followed by another entry.
+                if payload.len() < offset + BATCH_PLACE_ENTRY_SIZE {
                     return Err(DecodeError::InvalidPayload(
                         "BatchPlaceOrder truncated".into(),
                     ));
                 }
-                // Each sub-payload is 37 or 38 bytes.
-                let sub_len = if payload.len() >= offset + 38 { 38 } else { 37 };
                 cmds.push(decode_place_order(
-                    &payload[offset..offset + sub_len],
+                    &payload[offset..offset + BATCH_PLACE_ENTRY_SIZE],
                     clock,
                 )?);
-                offset += sub_len;
+                offset += BATCH_PLACE_ENTRY_SIZE;
             }
             DecodedFrame::Batch(cmds, seq, request_id)
         }
@@ -462,8 +467,12 @@ pub fn decode_frame(
     Ok((frame, total_size))
 }
 
-/// PlaceOrder payload (37 or 38 bytes):
-/// OrderId(8) + SymbolId(2) + Side(1) + OrderType(1) + TIF(1) + Price(8) + StopPrice(8) + Qty(8) [+ Flags(1)]
+/// PlaceOrder payload, backward-compatible by length:
+/// OrderId(8) + SymbolId(2) + Side(1) + OrderType(1) + TIF(1) + Price(8) +
+/// StopPrice(8) + Qty(8)  = 37 bytes (base)
+///   [+ Flags(1)]         = 38 bytes
+///   [+ ExpireAt(8)]      = 46 bytes (GTD expiry, unix nanoseconds)
+/// Older clients send 37/38 bytes; the extra fields default to 0.
 fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Command, DecodeError> {
     if payload.len() < 37 {
         return Err(DecodeError::InvalidPayload("PlaceOrder too short".into()));
@@ -497,6 +506,7 @@ fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Com
         0 => TimeInForce::GTC,
         1 => TimeInForce::IOC,
         2 => TimeInForce::FOK,
+        3 => TimeInForce::GTD,
         v => return Err(DecodeError::InvalidPayload(format!("Invalid TIF: {v}"))),
     };
     let price = FixedPrice::from_raw(i64::from_le_bytes(
@@ -520,25 +530,29 @@ fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Com
         0u8
     };
 
-    match order_type {
-        OrderType::Limit | OrderType::StopLimit => {
-            if !price.is_positive() {
-                return Err(DecodeError::InvalidPayload(
-                    "Limit/StopLimit order requires positive price".into(),
-                ));
-            }
-        }
-        _ => {}
+    // Backward-compatible GTD expiry: bytes 38..46 if present, else 0.
+    let expire_at = if payload.len() >= 46 {
+        u64::from_le_bytes(payload[38..46].try_into().expect("PlaceOrder: expire_at"))
+    } else {
+        0u64
+    };
+    if matches!(tif, TimeInForce::GTD) && expire_at == 0 {
+        return Err(DecodeError::InvalidPayload(
+            "GTD order requires a non-zero expire_at".into(),
+        ));
     }
-    match order_type {
-        OrderType::StopLimit | OrderType::StopMarket => {
-            if !stop_price.is_positive() {
-                return Err(DecodeError::InvalidPayload(
-                    "Stop order requires positive stop_price".into(),
-                ));
-            }
-        }
-        _ => {}
+
+    if matches!(order_type, OrderType::Limit | OrderType::StopLimit) && !price.is_positive() {
+        return Err(DecodeError::InvalidPayload(
+            "Limit/StopLimit order requires positive price".into(),
+        ));
+    }
+    if matches!(order_type, OrderType::StopLimit | OrderType::StopMarket)
+        && !stop_price.is_positive()
+    {
+        return Err(DecodeError::InvalidPayload(
+            "Stop order requires positive stop_price".into(),
+        ));
     }
 
     let timestamp = clock.now_ns();
@@ -550,6 +564,7 @@ fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Com
         qty,
         remaining_qty: qty,
         cumulative_qty: FixedQty::ZERO,
+        expire_at,
         timestamp,
         sequence: 0,
         symbol,
@@ -988,5 +1003,7 @@ fn reject_reason_to_u8(reason: &me_core::events::RejectReason) -> u8 {
         RejectReason::RiskCheckFailed => 10,
         RejectReason::WouldTakeMarket => 11,
         RejectReason::InternalError => 12,
+        RejectReason::SelfTradePrevented => 13,
+        RejectReason::InvalidExpiry => 14,
     }
 }

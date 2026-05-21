@@ -54,6 +54,7 @@ fn test_wal_pre_mode_writes_before_matching() {
         mode: WalMode::Pre,
         path: wal_dir.clone(),
         sync_interval: 1, // flush every command
+        ..Default::default()
     };
 
     {
@@ -109,6 +110,7 @@ fn test_wal_pre_mode_open_failure_rejects_and_preserves_state() {
         mode: WalMode::Pre,
         path: blocked_parent.to_string_lossy().into_owned(),
         sync_interval: 1,
+        ..Default::default()
     };
 
     let mut router = Router::new_with_wal(1, None, None, wal_cfg);
@@ -145,6 +147,7 @@ fn test_wal_post_mode_skips_risk_rejected() {
         mode: WalMode::Post,
         path: wal_dir.clone(),
         sync_interval: 1,
+        ..Default::default()
     };
 
     {
@@ -204,6 +207,7 @@ fn test_wal_disabled_no_file() {
         mode: WalMode::Disabled,
         path: wal_dir.clone(),
         sync_interval: 1,
+        ..Default::default()
     };
 
     {
@@ -228,6 +232,7 @@ fn test_wal_batch_flush() {
         mode: WalMode::Pre,
         path: wal_dir.clone(),
         sync_interval: 50, // flush every 50 commands
+        ..Default::default()
     };
 
     {
@@ -257,6 +262,7 @@ fn test_wal_recovery_restores_book_state() {
         mode: WalMode::Pre,
         path: wal_dir.clone(),
         sync_interval: 1,
+        ..Default::default()
     };
 
     // Phase 1: Process commands and write WAL
@@ -325,12 +331,109 @@ fn test_wal_recovery_restores_book_state() {
 }
 
 #[test]
+fn test_router_recovers_book_after_restart() {
+    // End-to-end: a fresh Router pointed at the same WAL dir must rebuild the
+    // resting book on add_symbol, with no snapshots configured (full replay).
+    let wal_dir = temp_wal_dir("router_recovery_replay");
+
+    let mk_cfg = || WalConfig {
+        mode: WalMode::Pre,
+        path: wal_dir.clone(),
+        sync_interval: 0, // fsync every write
+        ..Default::default()
+    };
+
+    // Phase 1: place orders, leave 4 resting, then shut down.
+    {
+        let mut router = Router::new_with_wal(1, None, None, mk_cfg());
+        router.add_symbol(btc_config());
+        for i in 1..=5u64 {
+            router.process(limit_buy(i, 99.0 + (i as f64) * 0.01, 1.0));
+        }
+        router.process(Command::CancelOrder {
+            order_id: 3,
+            symbol: SymbolId(0),
+            timestamp: 10_000,
+        });
+        router.shutdown();
+    }
+
+    // Phase 2: brand-new router on the same dir recovers state via WAL replay.
+    {
+        let mut router = Router::new_with_wal(1, None, None, mk_cfg());
+        router.add_symbol(btc_config());
+
+        for id in [1u64, 2, 4, 5] {
+            let st = router.query_order(id, SymbolId(0));
+            assert!(
+                st.iter().any(
+                    |e| matches!(e, MatchEvent::OrderStatus { order_id, .. } if *order_id == id)
+                ),
+                "order {id} must be restored after restart"
+            );
+        }
+        let cancelled = router.query_order(3, SymbolId(0));
+        assert!(
+            cancelled
+                .iter()
+                .any(|e| matches!(e, MatchEvent::OrderNotFound { order_id: 3 })),
+            "cancelled order 3 must NOT reappear"
+        );
+        router.shutdown();
+    }
+}
+
+#[test]
+fn test_router_recovers_with_snapshot_and_wal_rotation() {
+    // With periodic snapshots enabled, a snapshot is taken (and the WAL
+    // truncated) mid-stream; post-snapshot commands live only in the rotated
+    // WAL. Recovery must combine snapshot + post-snapshot WAL correctly.
+    let wal_dir = temp_wal_dir("router_recovery_snapshot");
+    let snap_dir = format!("{wal_dir}/snapshots");
+
+    let mk_cfg = || WalConfig {
+        mode: WalMode::Pre,
+        path: wal_dir.clone(),
+        sync_interval: 0,
+        snapshot_dir: Some(snap_dir.clone()),
+        snapshot_interval: 3, // snapshot after every 3 commands
+    };
+
+    {
+        let mut router = Router::new_with_wal(1, None, None, mk_cfg());
+        router.add_symbol(btc_config());
+        // 4 commands: snapshot fires after #3 (truncating WAL), #4 goes to the
+        // fresh WAL only.
+        for i in 1..=4u64 {
+            router.process(limit_buy(i, 99.0 + (i as f64) * 0.01, 1.0));
+        }
+        router.shutdown();
+    }
+
+    {
+        let mut router = Router::new_with_wal(1, None, None, mk_cfg());
+        router.add_symbol(btc_config());
+        for id in 1..=4u64 {
+            let st = router.query_order(id, SymbolId(0));
+            assert!(
+                st.iter().any(
+                    |e| matches!(e, MatchEvent::OrderStatus { order_id, .. } if *order_id == id)
+                ),
+                "order {id} must be restored from snapshot+WAL"
+            );
+        }
+        router.shutdown();
+    }
+}
+
+#[test]
 fn test_wal_multi_shard() {
     let wal_dir = temp_wal_dir("multi_shard");
     let wal_cfg = WalConfig {
         mode: WalMode::Pre,
         path: wal_dir.clone(),
         sync_interval: 1,
+        ..Default::default()
     };
 
     {

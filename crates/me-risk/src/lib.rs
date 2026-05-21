@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # me-risk — Risk Management
 //!
 //! Pre-trade risk checks including:

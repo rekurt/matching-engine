@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # me-core — Foundational Types for the Matching Engine
 //!
 //! This crate provides the core type definitions used across all other crates

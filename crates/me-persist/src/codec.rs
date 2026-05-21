@@ -121,8 +121,10 @@ pub fn decode_wal_command(data: &[u8]) -> Result<WalCommand, String> {
     }
 }
 
-/// Size of encoded order in bytes (v2: +16 bytes for client_session_id).
-pub const ORDER_ENCODED_SIZE: usize = 86;
+/// Size of encoded order in bytes.
+/// v2: +16 bytes for client_session_id. v3: +1 byte for `flags`.
+/// v4: +8 bytes for `expire_at` (GTD).
+pub const ORDER_ENCODED_SIZE: usize = 95;
 
 /// Encode an order into a buffer (public, used by snapshot).
 pub fn encode_order_to(order: &Order, buf: &mut Vec<u8>) {
@@ -141,6 +143,7 @@ fn encode_order(order: &Order, buf: &mut Vec<u8>) {
     buf.extend_from_slice(&order.qty.raw().to_le_bytes());
     buf.extend_from_slice(&order.remaining_qty.raw().to_le_bytes());
     buf.extend_from_slice(&order.cumulative_qty.raw().to_le_bytes());
+    buf.extend_from_slice(&order.expire_at.to_le_bytes());
     buf.extend_from_slice(&order.timestamp.to_le_bytes());
     buf.extend_from_slice(&order.sequence.to_le_bytes());
     buf.extend_from_slice(&order.symbol.0.to_le_bytes());
@@ -148,6 +151,7 @@ fn encode_order(order: &Order, buf: &mut Vec<u8>) {
     buf.push(order.order_type as u8);
     buf.push(order.tif as u8);
     buf.push(order.status as u8);
+    buf.push(order.flags);
     buf.extend_from_slice(order.client_session_id.as_bytes());
 }
 
@@ -168,28 +172,30 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
     let qty = FixedQty::from_raw(u64::from_le_bytes(data[24..32].try_into().unwrap()));
     let remaining_qty = FixedQty::from_raw(u64::from_le_bytes(data[32..40].try_into().unwrap()));
     let cumulative_qty = FixedQty::from_raw(u64::from_le_bytes(data[40..48].try_into().unwrap()));
-    let timestamp = u64::from_le_bytes(data[48..56].try_into().unwrap());
-    let sequence = u64::from_le_bytes(data[56..64].try_into().unwrap());
-    let symbol = SymbolId(u16::from_le_bytes(data[64..66].try_into().unwrap()));
-    let side = match data[66] {
+    let expire_at = u64::from_le_bytes(data[48..56].try_into().unwrap());
+    let timestamp = u64::from_le_bytes(data[56..64].try_into().unwrap());
+    let sequence = u64::from_le_bytes(data[64..72].try_into().unwrap());
+    let symbol = SymbolId(u16::from_le_bytes(data[72..74].try_into().unwrap()));
+    let side = match data[74] {
         0 => Side::Buy,
         1 => Side::Sell,
         v => return Err(format!("Invalid side: {v}")),
     };
-    let order_type = match data[67] {
+    let order_type = match data[75] {
         0 => OrderType::Limit,
         1 => OrderType::Market,
         2 => OrderType::StopLimit,
         3 => OrderType::StopMarket,
         v => return Err(format!("Invalid order type: {v}")),
     };
-    let tif = match data[68] {
+    let tif = match data[76] {
         0 => TimeInForce::GTC,
         1 => TimeInForce::IOC,
         2 => TimeInForce::FOK,
+        3 => TimeInForce::GTD,
         v => return Err(format!("Invalid TIF: {v}")),
     };
-    let status = match data[69] {
+    let status = match data[77] {
         0 => OrderStatus::New,
         1 => OrderStatus::PartiallyFilled,
         2 => OrderStatus::Filled,
@@ -198,8 +204,9 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
         5 => OrderStatus::Triggered,
         v => return Err(format!("Invalid status: {v}")),
     };
+    let flags = data[78];
     let mut session_bytes = [0u8; 16];
-    session_bytes.copy_from_slice(&data[70..86]);
+    session_bytes.copy_from_slice(&data[79..95]);
     let client_session_id = me_core::SessionId::from_bytes(session_bytes);
 
     Ok(Order {
@@ -209,6 +216,7 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
         qty,
         remaining_qty,
         cumulative_qty,
+        expire_at,
         timestamp,
         sequence,
         symbol,
@@ -216,7 +224,7 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
         order_type,
         tif,
         status,
-        flags: 0,
+        flags,
         _pad: 0,
         client_session_id,
     })
@@ -249,6 +257,53 @@ mod tests {
                 assert_eq!(o.symbol, SymbolId(5));
                 assert_eq!(o.side, Side::Sell);
                 assert_eq!(o.tif, TimeInForce::IOC);
+            }
+            _ => panic!("Expected PlaceOrder"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_preserves_flags() {
+        use me_core::order::ORDER_FLAG_POST_ONLY;
+        let mut order = Order::new_limit(
+            7,
+            SymbolId(1),
+            Side::Buy,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(100.0),
+            FixedQty::from_f64(1.0),
+            123,
+        );
+        order.flags = ORDER_FLAG_POST_ONLY;
+        let encoded = encode_wal_command(&WalCommand::PlaceOrder(order));
+        match decode_wal_command(&encoded).unwrap() {
+            WalCommand::PlaceOrder(o) => {
+                assert_eq!(
+                    o.flags, ORDER_FLAG_POST_ONLY,
+                    "flags must survive roundtrip"
+                );
+            }
+            _ => panic!("Expected PlaceOrder"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_preserves_gtd_expiry() {
+        let order = Order::new_limit(
+            9,
+            SymbolId(2),
+            Side::Buy,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(100.0),
+            FixedQty::from_f64(1.0),
+            123,
+        )
+        .with_expiry(1_700_000_000_000_000_000);
+        let encoded = encode_wal_command(&WalCommand::PlaceOrder(order));
+        match decode_wal_command(&encoded).unwrap() {
+            WalCommand::PlaceOrder(o) => {
+                assert_eq!(o.tif, TimeInForce::GTD);
+                assert_eq!(o.expire_at, 1_700_000_000_000_000_000);
             }
             _ => panic!("Expected PlaceOrder"),
         }
