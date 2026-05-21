@@ -51,13 +51,12 @@ pub fn validate_order(order: &Order, config: &SymbolConfig) -> Option<RejectReas
     }
 
     // Stop price validation for stop orders
-    match order.order_type {
-        OrderType::StopLimit | OrderType::StopMarket => {
-            if !order.stop_price.is_positive() {
-                return Some(RejectReason::InvalidPrice);
-            }
-        }
-        _ => {}
+    if matches!(
+        order.order_type,
+        OrderType::StopLimit | OrderType::StopMarket
+    ) && !order.stop_price.is_positive()
+    {
+        return Some(RejectReason::InvalidPrice);
     }
 
     None

@@ -671,16 +671,15 @@ fn shard_worker_loop(
 
                     for event in &events {
                         match event {
-                            MatchEvent::OrderAccepted { order_id, .. } => {
-                                // Stop orders are accepted once when inserted into stop_book,
-                                // then accepted again when triggered into the live book.
-                                // Count only the original client order acceptance (current cmd)
-                                // and skip synthetic acceptances produced by stop triggers.
+                            // Stop orders are accepted once when inserted into stop_book,
+                            // then accepted again when triggered into the live book.
+                            // Count only the original client order acceptance (current cmd)
+                            // and skip synthetic acceptances produced by stop triggers.
+                            MatchEvent::OrderAccepted { order_id, .. }
                                 if Some(*order_id) == incoming_order_id
-                                    && !triggered_order_ids.contains(order_id)
-                                {
-                                    risk.on_order_added(symbol);
-                                }
+                                    && !triggered_order_ids.contains(order_id) =>
+                            {
+                                risk.on_order_added(symbol);
                             }
                             MatchEvent::OrderFilled { .. } | MatchEvent::OrderCancelled { .. } => {
                                 risk.on_order_removed(symbol);

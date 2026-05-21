@@ -525,25 +525,17 @@ fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Com
         0u8
     };
 
-    match order_type {
-        OrderType::Limit | OrderType::StopLimit => {
-            if !price.is_positive() {
-                return Err(DecodeError::InvalidPayload(
-                    "Limit/StopLimit order requires positive price".into(),
-                ));
-            }
-        }
-        _ => {}
+    if matches!(order_type, OrderType::Limit | OrderType::StopLimit) && !price.is_positive() {
+        return Err(DecodeError::InvalidPayload(
+            "Limit/StopLimit order requires positive price".into(),
+        ));
     }
-    match order_type {
-        OrderType::StopLimit | OrderType::StopMarket => {
-            if !stop_price.is_positive() {
-                return Err(DecodeError::InvalidPayload(
-                    "Stop order requires positive stop_price".into(),
-                ));
-            }
-        }
-        _ => {}
+    if matches!(order_type, OrderType::StopLimit | OrderType::StopMarket)
+        && !stop_price.is_positive()
+    {
+        return Err(DecodeError::InvalidPayload(
+            "Stop order requires positive stop_price".into(),
+        ));
     }
 
     let timestamp = clock.now_ns();
