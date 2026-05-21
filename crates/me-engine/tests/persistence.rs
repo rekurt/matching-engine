@@ -97,6 +97,7 @@ fn snapshot_engine(engine: &Engine) -> BookSnapshot {
         symbol: engine.config().id,
         sequence: engine.book().sequence,
         trade_id_gen: engine.book().trade_id_gen,
+        wal_sequence: 0,
         resting_orders: engine.book().all_resting_orders(),
         stop_orders: engine.stop_book().all_stop_orders(),
     }

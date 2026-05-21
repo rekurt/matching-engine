@@ -251,11 +251,17 @@ impl Engine {
     /// - `trading_state` (halt/resume is an operator action, not durable)
     /// - `events` buffer (per-command scratch space)
     /// - invariant halt flag (re-derived from next violation)
+    ///
+    /// The `wal_sequence` watermark is set to 0 here; the shard worker (which
+    /// owns the per-shard WAL writer) overwrites it with the live WAL append
+    /// sequence before persisting, so recovery can replay only post-snapshot
+    /// records.
     pub fn snapshot(&self) -> BookSnapshot {
         BookSnapshot {
             symbol: self.book.config.id,
             sequence: self.book.sequence,
             trade_id_gen: self.book.trade_id_gen,
+            wal_sequence: 0,
             resting_orders: self.book.all_resting_orders(),
             stop_orders: self.stop_book.all_stop_orders(),
         }

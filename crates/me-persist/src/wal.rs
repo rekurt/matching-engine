@@ -35,6 +35,18 @@ pub enum WalCommand {
     },
 }
 
+impl WalCommand {
+    /// Symbol this command targets — used to route replayed records to the
+    /// correct engine during recovery.
+    pub fn symbol(&self) -> SymbolId {
+        match self {
+            WalCommand::PlaceOrder(order) => order.symbol,
+            WalCommand::CancelOrder { symbol, .. } => *symbol,
+            WalCommand::AmendOrder { symbol, .. } => *symbol,
+        }
+    }
+}
+
 // ─── WAL Writer ──────────────────────────────────────────────────────────────
 
 /// Write-ahead log writer. Appends commands to a file with CRC32 checksums.
@@ -108,6 +120,20 @@ impl WalWriter {
     /// Flush and sync the WAL to disk. Durable: kept as the shutdown path.
     pub fn flush(&mut self) -> io::Result<()> {
         self.sync()
+    }
+
+    /// Truncate the WAL file to empty after a successful snapshot of all
+    /// symbols on this shard. The append sequence counter keeps advancing, so
+    /// records written after truncation still carry sequences strictly greater
+    /// than the snapshot watermark — recovery filters on that, so truncation is
+    /// purely an optimization to bound file growth and replay time.
+    pub fn rotate_truncate(&mut self) -> io::Result<()> {
+        self.writer.flush()?;
+        let file = self.writer.get_ref();
+        file.set_len(0)?;
+        file.sync_all()?;
+        self.writes_since_sync = 0;
+        Ok(())
     }
 
     /// Current sequence number.

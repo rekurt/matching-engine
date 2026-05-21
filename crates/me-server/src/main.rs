@@ -70,9 +70,25 @@ async fn admin_auth(
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
     match headers.get("x-admin-key").and_then(|v| v.to_str().ok()) {
-        Some(key) if key == expected_key => Ok(next.run(request).await),
+        Some(key) if constant_time_eq(key.as_bytes(), expected_key.as_bytes()) => {
+            Ok(next.run(request).await)
+        }
         _ => Err(StatusCode::UNAUTHORIZED),
     }
+}
+
+/// Constant-time byte comparison to avoid leaking the admin key via response
+/// timing. Length is intentionally folded in without early-out so the running
+/// time depends only on the longer input, not on the match position.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = (a.len() ^ b.len()) as u8;
+    let n = a.len().max(b.len());
+    for i in 0..n {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
@@ -217,11 +233,24 @@ async fn main() {
             "disabled" => WalMode::Disabled,
             _ => WalMode::Pre,
         };
-        info!(mode = %cfg.wal.mode, path = %cfg.wal.path, "WAL enabled");
+        let snapshot_dir = if cfg.wal.snapshot_dir.is_empty() {
+            format!("{}/snapshots", cfg.wal.path)
+        } else {
+            cfg.wal.snapshot_dir.clone()
+        };
+        info!(
+            mode = %cfg.wal.mode,
+            path = %cfg.wal.path,
+            snapshot_dir = %snapshot_dir,
+            snapshot_interval = cfg.wal.snapshot_interval,
+            "WAL enabled (crash recovery active)"
+        );
         Some(EngineWalConfig {
             mode,
             path: cfg.wal.path.clone(),
             sync_interval: cfg.wal.sync_interval,
+            snapshot_dir: Some(snapshot_dir),
+            snapshot_interval: cfg.wal.snapshot_interval,
         })
     } else {
         None
@@ -249,7 +278,15 @@ async fn main() {
         std::process::exit(1);
     }
 
+    let mut seen_ids = std::collections::HashSet::new();
     for sym_entry in &cfg.symbols {
+        if !seen_ids.insert(sym_entry.id) {
+            error!(
+                id = sym_entry.id,
+                "Duplicate symbol id in configuration — ids must be unique"
+            );
+            std::process::exit(1);
+        }
         match sym_entry.to_symbol_config() {
             Ok(sym) => {
                 info!(
@@ -353,9 +390,19 @@ async fn main() {
 
         let app = public_routes.merge(app);
 
-        let listener = tokio::net::TcpListener::bind(&metrics_addr).await.unwrap();
+        let listener = match tokio::net::TcpListener::bind(&metrics_addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                // Do not panic the task silently — the operator loses metrics
+                // AND the halt circuit-breaker endpoint. Surface it loudly.
+                error!(addr = %metrics_addr, error = %e, "Metrics/admin HTTP bind FAILED — observability and admin endpoints are DOWN");
+                return;
+            }
+        };
         info!(addr = %metrics_addr, "Metrics HTTP server listening");
-        axum::serve(listener, app).await.unwrap();
+        if let Err(e) = axum::serve(listener, app).await {
+            error!(error = %e, "Metrics/admin HTTP server terminated");
+        }
     });
 
     // Shared session store (TCP and UDS share the same store so reconnects across
@@ -440,6 +487,25 @@ async fn main() {
     if let Err(e) = tcp_server.listen(&cfg.server.tcp_addr, shutdown_rx).await {
         warn!(error = %e, "TCP server error");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::constant_time_eq;
+
+    #[test]
+    fn constant_time_eq_matches() {
+        assert!(constant_time_eq(b"secret-key", b"secret-key"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects() {
+        assert!(!constant_time_eq(b"secret-key", b"secret-keyX")); // length differs
+        assert!(!constant_time_eq(b"secret-key", b"Secret-key")); // first byte differs
+        assert!(!constant_time_eq(b"secret-key", b"secret-keX")); // last byte differs
+        assert!(!constant_time_eq(b"abc", b""));
     }
 }
 

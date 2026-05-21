@@ -11,7 +11,8 @@ use me_core::events::{MatchEvent, RejectReason};
 use me_core::symbol::SymbolConfig;
 use me_core::types::{FixedQty, OrderId, SymbolId};
 use me_metrics::EngineMetrics;
-use me_persist::wal::{WalCommand, WalWriter};
+use me_persist::snapshot::SnapshotManager;
+use me_persist::wal::{WalCommand, WalEntry, WalReader, WalWriter};
 use me_risk::config::RiskConfig;
 use me_risk::engine::RiskEngine;
 
@@ -19,22 +20,29 @@ use crate::command::Command;
 use crate::engine::Engine;
 
 /// WAL mode: when to write the write-ahead log relative to matching.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum WalMode {
     /// Write WAL before matching (full durability, slightly higher latency).
     Pre,
     /// Write WAL after matching (lower latency, may lose last commands on crash).
     Post,
     /// WAL disabled.
+    #[default]
     Disabled,
 }
 
 /// WAL configuration for the router.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct WalConfig {
     pub mode: WalMode,
     pub path: String,
     pub sync_interval: u64,
+    /// Directory for periodic book snapshots. `None` disables snapshotting
+    /// (recovery then replays the entire WAL from genesis).
+    pub snapshot_dir: Option<String>,
+    /// Take a snapshot of all symbols on the shard every N processed commands,
+    /// then truncate the WAL. `0` disables periodic snapshots.
+    pub snapshot_interval: u64,
 }
 
 /// Thread affinity configuration.
@@ -487,39 +495,15 @@ fn shard_worker_loop(
     let mut symbol_names: FxHashMap<SymbolId, String> = FxHashMap::default();
     let mut risk: RiskEngine = RiskEngine::new();
 
-    // Initialize WAL if configured
-    let wal_mode = wal_config
-        .as_ref()
-        .map_or(WalMode::Disabled, |c| c.mode.clone());
-    let mut wal: Option<WalWriter> = wal_config.and_then(|cfg| {
-        if cfg.mode == WalMode::Disabled {
-            return None;
-        }
-        let wal_path = format!("{}/shard_{}.wal", cfg.path, shard_id);
-        // Ensure directory exists. Log the error directly so operators see
-        // the root cause ("permission denied creating /var/wal") instead of
-        // only the downstream "Failed to open WAL" error.
-        if let Some(parent) = std::path::Path::new(&wal_path).parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                tracing::error!(
-                    shard_id,
-                    parent = %parent.display(),
-                    error = %e,
-                    "Failed to create WAL parent directory — WAL open will also fail"
-                );
-            }
-        }
-        match WalWriter::open(&wal_path, cfg.sync_interval) {
-            Ok(w) => {
-                debug!(shard_id, path = %wal_path, "WAL initialized");
-                Some(w)
-            }
-            Err(e) => {
-                tracing::error!(shard_id, error = %e, "Failed to open WAL");
-                None
-            }
-        }
-    });
+    // Initialize WAL + recover prior state (snapshot + WAL replay) if configured.
+    let snapshot_interval = wal_config.as_ref().map_or(0, |c| c.snapshot_interval);
+    let WalInit {
+        mut wal,
+        replay_entries,
+        snapshot_mgr,
+        wal_mode,
+    } = init_wal_and_recover(shard_id, wal_config);
+
     let wal_pre_open_failed = wal_mode == WalMode::Pre && wal.is_none();
     if wal_pre_open_failed {
         tracing::error!(
@@ -527,6 +511,7 @@ fn shard_worker_loop(
             "WAL pre-mode configured but writer is unavailable; shard will reject all commands to preserve durability"
         );
     }
+    let mut commands_since_snapshot: u64 = 0;
 
     while let Ok(msg) = rx.recv() {
         match msg {
@@ -771,6 +756,18 @@ fn shard_worker_loop(
                         "reply dropped: caller lost response AFTER state mutation"
                     );
                 }
+
+                // Periodic snapshot of all symbols on this shard, then WAL
+                // truncation to bound replay time and file growth.
+                if snapshot_interval > 0 {
+                    if let Some(ref mgr) = snapshot_mgr {
+                        commands_since_snapshot += 1;
+                        if commands_since_snapshot >= snapshot_interval {
+                            take_shard_snapshot(shard_id, &engines, &mut wal, mgr);
+                            commands_since_snapshot = 0;
+                        }
+                    }
+                }
             }
             ShardMsg::QueryOrder {
                 order_id,
@@ -838,7 +835,21 @@ fn shard_worker_loop(
                 if let Some(rc) = risk_config {
                     risk.add_symbol(rc);
                 }
-                engines.insert(id, Engine::new(config));
+                // Recover this symbol's state from the latest snapshot plus any
+                // WAL records written after the snapshot watermark, before the
+                // engine starts accepting live commands.
+                let mut engine = Engine::new(config);
+                let open = recover_symbol(
+                    shard_id,
+                    id,
+                    &mut engine,
+                    &replay_entries,
+                    snapshot_mgr.as_ref(),
+                );
+                if open > 0 {
+                    risk.set_open_order_count(id, open);
+                }
+                engines.insert(id, engine);
             }
             ShardMsg::HaltSymbol(symbol) => {
                 if let Some(engine) = engines.get_mut(&symbol) {
@@ -877,6 +888,215 @@ fn cmd_order_id(cmd: &Command) -> OrderId {
         Command::PlaceOrder(order) => order.id,
         Command::CancelOrder { order_id, .. } => *order_id,
         Command::AmendOrder { order_id, .. } => *order_id,
+    }
+}
+
+// ─── WAL recovery / snapshotting (startup + periodic) ────────────────────────
+
+/// Result of initializing the WAL and scanning prior records for replay.
+struct WalInit {
+    wal: Option<WalWriter>,
+    replay_entries: Vec<WalEntry>,
+    snapshot_mgr: Option<SnapshotManager>,
+    wal_mode: WalMode,
+}
+
+/// Open the shard's WAL, crash-tolerantly scan any existing records (truncating
+/// a torn tail), and prepare the snapshot manager. The scanned entries are
+/// returned for per-symbol replay as engines are added.
+fn init_wal_and_recover(shard_id: usize, wal_config: Option<WalConfig>) -> WalInit {
+    let empty = |wal_mode| WalInit {
+        wal: None,
+        replay_entries: Vec::new(),
+        snapshot_mgr: None,
+        wal_mode,
+    };
+
+    let Some(cfg) = wal_config else {
+        return empty(WalMode::Disabled);
+    };
+    if cfg.mode == WalMode::Disabled {
+        return empty(WalMode::Disabled);
+    }
+    let wal_mode = cfg.mode.clone();
+
+    let wal_path = format!("{}/shard_{}.wal", cfg.path, shard_id);
+    if let Some(parent) = std::path::Path::new(&wal_path).parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::error!(
+                shard_id,
+                parent = %parent.display(),
+                error = %e,
+                "Failed to create WAL parent directory — WAL open will also fail"
+            );
+        }
+    }
+
+    // Crash-tolerant recovery scan of any existing WAL.
+    let mut replay_entries = Vec::new();
+    let mut resume_seq = 0u64;
+    if std::path::Path::new(&wal_path).exists() {
+        match WalReader::open(&wal_path) {
+            Ok(mut reader) => {
+                let result = reader.read_recoverable();
+                if let Some(reason) = &result.truncated {
+                    tracing::warn!(
+                        shard_id,
+                        reason = %reason,
+                        valid_bytes = result.valid_bytes,
+                        "WAL torn/corrupt tail; truncating to last good record"
+                    );
+                    if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&wal_path) {
+                        if let Err(e) = f.set_len(result.valid_bytes) {
+                            tracing::error!(shard_id, error = %e, "WAL tail truncation failed");
+                        }
+                    }
+                }
+                resume_seq = result.entries.last().map_or(0, |e| e.sequence);
+                replay_entries = result.entries;
+                tracing::info!(
+                    shard_id,
+                    records = replay_entries.len(),
+                    resume_seq,
+                    "WAL recovery scan complete"
+                );
+            }
+            Err(e) => tracing::error!(shard_id, error = %e, "Failed to open WAL for recovery"),
+        }
+    }
+
+    let wal = match WalWriter::open(&wal_path, cfg.sync_interval) {
+        Ok(mut w) => {
+            w.set_sequence(resume_seq);
+            debug!(shard_id, path = %wal_path, "WAL writer ready");
+            Some(w)
+        }
+        Err(e) => {
+            tracing::error!(shard_id, error = %e, "Failed to open WAL writer");
+            None
+        }
+    };
+
+    let snapshot_mgr = cfg
+        .snapshot_dir
+        .as_ref()
+        .and_then(|dir| match SnapshotManager::new(dir) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                tracing::error!(shard_id, dir = %dir, error = %e, "Failed to init snapshot manager");
+                None
+            }
+        });
+
+    WalInit {
+        wal,
+        replay_entries,
+        snapshot_mgr,
+        wal_mode,
+    }
+}
+
+/// Restore one symbol's engine from its latest snapshot, then replay WAL
+/// records written after the snapshot watermark. Returns the resulting open
+/// order count (resting + pending stop) so the risk engine can be re-seeded.
+fn recover_symbol(
+    shard_id: usize,
+    id: SymbolId,
+    engine: &mut Engine,
+    replay_entries: &[WalEntry],
+    snapshot_mgr: Option<&SnapshotManager>,
+) -> u32 {
+    let mut watermark = 0u64;
+    if let Some(mgr) = snapshot_mgr {
+        match mgr.load_latest(id) {
+            Ok(Some(snap)) => {
+                watermark = snap.wal_sequence;
+                engine.apply_snapshot(snap);
+                tracing::info!(shard_id, symbol = ?id, watermark, "restored snapshot");
+            }
+            Ok(None) => {}
+            Err(e) => tracing::error!(
+                shard_id,
+                symbol = ?id,
+                error = %e,
+                "snapshot load failed; replaying full WAL for this symbol"
+            ),
+        }
+    }
+
+    let mut replayed = 0u64;
+    for entry in replay_entries {
+        if entry.sequence > watermark && entry.command.symbol() == id {
+            engine.process(wal_to_command(&entry.command));
+            replayed += 1;
+        }
+    }
+    if replayed > 0 {
+        tracing::info!(shard_id, symbol = ?id, replayed, "replayed WAL records");
+    }
+
+    (engine.book().order_count() + engine.stop_book().len()) as u32
+}
+
+/// Snapshot every symbol on the shard at the current WAL watermark, then (only
+/// if all snapshots succeeded) truncate the WAL. Truncating only on full
+/// success avoids dropping un-snapshotted records for a symbol whose save failed.
+fn take_shard_snapshot(
+    shard_id: usize,
+    engines: &FxHashMap<SymbolId, Engine>,
+    wal: &mut Option<WalWriter>,
+    mgr: &SnapshotManager,
+) {
+    let wal_seq = wal.as_ref().map_or(0, |w| w.sequence());
+    let mut all_ok = true;
+    for (id, engine) in engines {
+        let mut snap = engine.snapshot();
+        snap.wal_sequence = wal_seq;
+        match mgr.save(&snap) {
+            Ok(_) => {
+                let _ = mgr.cleanup(*id, 3);
+            }
+            Err(e) => {
+                tracing::error!(shard_id, symbol = ?id, error = %e, "snapshot save failed");
+                all_ok = false;
+            }
+        }
+    }
+    if all_ok {
+        if let Some(w) = wal.as_mut() {
+            if let Err(e) = w.rotate_truncate() {
+                tracing::error!(shard_id, error = %e, "WAL truncate after snapshot failed");
+            }
+        }
+    }
+}
+
+/// Convert a persistence `WalCommand` back into an engine `Command` for replay.
+fn wal_to_command(cmd: &WalCommand) -> Command {
+    match cmd {
+        WalCommand::PlaceOrder(order) => Command::PlaceOrder(*order),
+        WalCommand::CancelOrder {
+            order_id,
+            symbol,
+            timestamp,
+        } => Command::CancelOrder {
+            order_id: *order_id,
+            symbol: *symbol,
+            timestamp: *timestamp,
+        },
+        WalCommand::AmendOrder {
+            order_id,
+            symbol,
+            new_price,
+            new_qty,
+            timestamp,
+        } => Command::AmendOrder {
+            order_id: *order_id,
+            symbol: *symbol,
+            new_price: *new_price,
+            new_qty: *new_qty,
+            timestamp: *timestamp,
+        },
     }
 }
 
