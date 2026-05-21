@@ -1,5 +1,11 @@
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+/// Upper bound on how long a caller waits for a shard to reply before treating
+/// the command as failed. Bounds the blast radius of a wedged shard (e.g. a
+/// stalled disk during WAL fsync) so it cannot hang every client thread.
+const SHARD_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -286,22 +292,26 @@ impl Router {
                 timestamp: ts,
             }];
         }
-        reply_rx.recv().unwrap_or_else(|_| {
-            // Reply channel dropped — shard may have processed the order
-            // AND crashed before replying. Client sees InternalError and
-            // must reconcile (may need to check GetOrderStatus / resume).
-            tracing::error!(
-                shard_idx,
-                symbol = ?symbol,
-                order_id,
-                "REPLY DROPPED: shard may have partially processed, returning InternalError"
-            );
-            vec![MatchEvent::OrderRejected {
-                order_id,
-                reason: RejectReason::InternalError,
-                timestamp: ts,
-            }]
-        })
+        reply_rx
+            .recv_timeout(SHARD_REPLY_TIMEOUT)
+            .unwrap_or_else(|_| {
+                // Reply not received in time: the shard crashed before replying, OR
+                // it is stuck (e.g. blocked on a stalled disk during WAL fsync).
+                // Bound the wait so a single wedged shard can't hang every caller
+                // forever. Client sees InternalError and must reconcile (e.g.
+                // GetOrderStatus / resume).
+                tracing::error!(
+                    shard_idx,
+                    symbol = ?symbol,
+                    order_id,
+                    "REPLY TIMEOUT/DROPPED: shard stuck or crashed, returning InternalError"
+                );
+                vec![MatchEvent::OrderRejected {
+                    order_id,
+                    reason: RejectReason::InternalError,
+                    timestamp: ts,
+                }]
+            })
     }
 
     /// Halt trading for a symbol (circuit breaker).
@@ -381,19 +391,21 @@ impl Router {
                 timestamp: 0,
             }];
         }
-        reply_rx.recv().unwrap_or_else(|_| {
-            tracing::error!(
-                shard_idx,
-                symbol = ?symbol,
-                order_id,
-                "REPLY DROPPED: query_order, returning InternalError"
-            );
-            vec![MatchEvent::OrderRejected {
-                order_id,
-                reason: RejectReason::InternalError,
-                timestamp: 0,
-            }]
-        })
+        reply_rx
+            .recv_timeout(SHARD_REPLY_TIMEOUT)
+            .unwrap_or_else(|_| {
+                tracing::error!(
+                    shard_idx,
+                    symbol = ?symbol,
+                    order_id,
+                    "REPLY TIMEOUT/DROPPED: query_order, returning InternalError"
+                );
+                vec![MatchEvent::OrderRejected {
+                    order_id,
+                    reason: RejectReason::InternalError,
+                    timestamp: 0,
+                }]
+            })
     }
 
     /// Get all open (resting) orders for a client session.
