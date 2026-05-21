@@ -988,5 +988,6 @@ fn reject_reason_to_u8(reason: &me_core::events::RejectReason) -> u8 {
         RejectReason::RiskCheckFailed => 10,
         RejectReason::WouldTakeMarket => 11,
         RejectReason::InternalError => 12,
+        RejectReason::SelfTradePrevented => 13,
     }
 }

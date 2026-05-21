@@ -832,6 +832,10 @@ fn shard_worker_loop(
                 let id = config.id;
                 let name = format!("{}/{}", config.base, config.quote);
                 symbol_names.insert(id, name);
+                let stp = risk_config
+                    .as_ref()
+                    .map(|rc| rc.self_trade_prevention)
+                    .unwrap_or(false);
                 if let Some(rc) = risk_config {
                     risk.add_symbol(rc);
                 }
@@ -839,6 +843,7 @@ fn shard_worker_loop(
                 // WAL records written after the snapshot watermark, before the
                 // engine starts accepting live commands.
                 let mut engine = Engine::new(config);
+                engine.set_self_trade_prevention(stp);
                 let open = recover_symbol(
                     shard_id,
                     id,

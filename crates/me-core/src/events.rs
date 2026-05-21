@@ -31,6 +31,9 @@ pub enum RejectReason {
     RiskCheckFailed,
     /// Post-only order would have taken liquidity (crossed the spread).
     WouldTakeMarket,
+    /// Order would match against the submitter's own resting order
+    /// (self-trade prevention).
+    SelfTradePrevented,
     /// Engine internal error (WAL write failure, shard dead, etc.).
     /// Distinct from business-logic rejections — indicates server-side fault.
     InternalError,

@@ -13,8 +13,9 @@ pub struct RiskConfig {
     /// Prevents accidentally large orders.
     pub max_order_notional: u64, // raw fixed-point
 
-    /// Maximum net position per account (not yet per-account, global for now).
-    /// 0 = unlimited.
+    /// Maximum net position per account. 0 = unlimited.
+    /// RESERVED / NOT ENFORCED: requires an account+position model that does
+    /// not exist yet. `RiskEngine::add_symbol` warns if this is set non-zero.
     pub max_position: FixedQty,
 
     /// Price band: maximum % deviation from reference price.
@@ -33,8 +34,9 @@ pub struct RiskConfig {
     /// Whether trading is enabled for this symbol.
     pub trading_enabled: bool,
 
-    /// Self-trade prevention: if true, reject orders that would match against
-    /// orders from the same account. (Placeholder — no account system yet.)
+    /// Self-trade prevention: if true, reject (cancel-newest) any incoming
+    /// order that would match against a resting order from the same client
+    /// session. Enforced by the engine via `Engine::set_self_trade_prevention`.
     pub self_trade_prevention: bool,
 }
 

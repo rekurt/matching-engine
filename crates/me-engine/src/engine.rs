@@ -34,6 +34,9 @@ pub struct Engine {
     events: EventBuffer,
     trading_state: TradingState,
     clock: Arc<dyn Clock>,
+    /// When true, reject incoming orders that would match against a resting
+    /// order from the same client session (self-trade prevention, cancel-newest).
+    self_trade_prevention: bool,
 }
 
 impl Engine {
@@ -49,7 +52,13 @@ impl Engine {
             events: EventBuffer::with_capacity(256),
             trading_state: TradingState::Active,
             clock,
+            self_trade_prevention: false,
         }
+    }
+
+    /// Enable or disable self-trade prevention for this symbol.
+    pub fn set_self_trade_prevention(&mut self, enabled: bool) {
+        self.self_trade_prevention = enabled;
     }
 
     /// Process a single command and return the resulting events.
@@ -75,6 +84,27 @@ impl Engine {
                     // Route stop orders to stop book
                     self.stop_book.insert(order, &mut self.events);
                 } else {
+                    // Self-trade prevention (cancel-newest): reject before
+                    // matching if the order would cross into a resting order
+                    // from the same session.
+                    if self.self_trade_prevention {
+                        let limit_price = match order.order_type {
+                            me_core::order::OrderType::Market => None,
+                            _ => Some(order.price),
+                        };
+                        if self.book.would_self_trade(
+                            order.side,
+                            limit_price,
+                            &order.client_session_id,
+                        ) {
+                            self.events.push(MatchEvent::OrderRejected {
+                                order_id: order.id,
+                                reason: RejectReason::SelfTradePrevented,
+                                timestamp: order.timestamp,
+                            });
+                            return self.events.events();
+                        }
+                    }
                     matching::process_order(&mut self.book, order, &mut self.events);
                     self.check_stop_triggers();
                 }
