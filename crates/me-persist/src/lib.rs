@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # me-persist — Write-Ahead Log and Snapshots
 //!
 //! Provides crash-recovery persistence for the matching engine via:

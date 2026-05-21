@@ -28,6 +28,15 @@ impl RiskEngine {
     /// Register a symbol with its risk config.
     pub fn add_symbol(&mut self, config: RiskConfig) {
         let symbol = config.symbol;
+        // `max_position` requires per-account net-position tracking, which does
+        // not exist yet. Warn loudly rather than silently ignoring a control an
+        // operator may believe is active.
+        if !config.max_position.is_zero() {
+            warn!(
+                symbol = symbol.0,
+                "max_position is configured but NOT enforced (no account/position model yet) — control is inactive"
+            );
+        }
         let rate = config.max_orders_per_second;
         self.rate_limiters.insert(symbol, RateLimiter::new(rate));
         self.open_order_counts.insert(symbol, 0);
@@ -45,9 +54,24 @@ impl RiskEngine {
     }
 
     /// Update the reference price for a symbol (called after each trade).
+    ///
+    /// The per-update movement is clamped to one band-width so a burst of
+    /// orders cannot "walk" the reference arbitrarily far: each trade can move
+    /// the reference by at most `price_band_bps`. Without this, an attacker
+    /// could chain orders just inside the band, each fill ratcheting the
+    /// reference, to eventually price orders far from the true market.
     pub fn update_reference_price(&mut self, symbol: SymbolId, price: FixedPrice) {
         if let Some(cfg) = self.configs.get_mut(&symbol) {
-            cfg.reference_price = price;
+            if cfg.price_band_bps > 0 && cfg.reference_price.is_positive() {
+                let ref_raw = cfg.reference_price.raw();
+                let band = ((ref_raw as i128) * (cfg.price_band_bps as i128) / 10_000)
+                    .clamp(0, i64::MAX as i128) as i64;
+                let lo = ref_raw.saturating_sub(band);
+                let hi = ref_raw.saturating_add(band);
+                cfg.reference_price = FixedPrice::from_raw(price.raw().clamp(lo, hi));
+            } else {
+                cfg.reference_price = price;
+            }
         }
     }
 
@@ -121,24 +145,38 @@ impl RiskEngine {
             return Err(RiskRejectReason::ExceedsMaxOrderQty);
         }
 
-        // 4. Max notional value (price * qty)
-        if matches!(order.order_type, OrderType::Limit | OrderType::StopLimit) {
-            let notional = (order.price.raw().unsigned_abs() as u128) * (order.qty.raw() as u128)
-                / SCALE_U64 as u128;
+        // 4. Max notional value (price * qty). Market/stop-market orders carry
+        //    no price, so estimate their notional from the reference price —
+        //    otherwise a fat-finger market order bypasses notional limits.
+        let notional_price: Option<u64> = match order.order_type {
+            OrderType::Limit | OrderType::StopLimit => Some(order.price.raw().unsigned_abs()),
+            OrderType::Market | OrderType::StopMarket => {
+                if config.reference_price.is_positive() {
+                    Some(config.reference_price.raw().unsigned_abs())
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(px) = notional_price {
+            let notional = (px as u128) * (order.qty.raw() as u128) / SCALE_U64 as u128;
             if notional > config.max_order_notional as u128 {
                 return Err(RiskRejectReason::ExceedsMaxNotional);
             }
         }
 
-        // 5. Price band check
+        // 5. Price band check (limit-priced orders only).
         if config.price_band_bps > 0
             && config.reference_price.is_positive()
             && matches!(order.order_type, OrderType::Limit | OrderType::StopLimit)
         {
             let ref_price = config.reference_price.raw();
-            let band = (ref_price as u128) * (config.price_band_bps as u128) / 10_000;
-            let lower = ref_price.saturating_sub(band as i64);
-            let upper = ref_price.saturating_add(band as i64);
+            // Clamp band to i64 range so an extreme bps cannot overflow the
+            // cast and invert the bounds (which would let everything through).
+            let band = ((ref_price as u128) * (config.price_band_bps as u128) / 10_000)
+                .min(i64::MAX as u128) as i64;
+            let lower = ref_price.saturating_sub(band);
+            let upper = ref_price.saturating_add(band);
 
             if order.price.raw() < lower || order.price.raw() > upper {
                 return Err(RiskRejectReason::PriceBandViolation);
@@ -268,6 +306,38 @@ mod tests {
 
         engine.on_order_removed(btc_symbol());
         assert!(engine.check_order(&order).is_ok());
+    }
+
+    #[test]
+    fn test_market_order_notional_enforced() {
+        let mut engine = RiskEngine::new();
+        let mut cfg = risk_config(); // ref=50000
+        cfg.max_order_notional = 100_000 * SCALE_U64; // $100k cap
+        engine.add_symbol(cfg);
+        // Market buy of 10 BTC ≈ $500k at ref 50000 → exceeds notional.
+        let order = Order::new_market(
+            2,
+            btc_symbol(),
+            Side::Buy,
+            TimeInForce::IOC,
+            FixedQty::from_f64(10.0),
+            1000,
+        );
+        assert_eq!(
+            engine.check_order(&order),
+            Err(RiskRejectReason::ExceedsMaxNotional)
+        );
+    }
+
+    #[test]
+    fn test_reference_price_clamped_to_one_band() {
+        let mut engine = RiskEngine::new();
+        engine.add_symbol(risk_config()); // ref=50000, band=5%
+                                          // A trade far above the band should only move the reference by one
+                                          // band-width (5% → 52500), not jump to 90000.
+        engine.update_reference_price(btc_symbol(), FixedPrice::from_f64(90000.0));
+        let ref_after = engine.config(btc_symbol()).unwrap().reference_price;
+        assert_eq!(ref_after, FixedPrice::from_f64(52500.0));
     }
 
     #[test]

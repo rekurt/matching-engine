@@ -1,5 +1,22 @@
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+/// Upper bound on how long a caller waits for a shard to reply before treating
+/// the command as failed. Bounds the blast radius of a wedged shard (e.g. a
+/// stalled disk during WAL fsync) so it cannot hang every client thread.
+const SHARD_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Maximum number of commands a Pre-mode shard accumulates before forcing a
+/// group-commit fsync. Bounds how long a reply can be deferred and how much
+/// memory pending replies hold. Under load the queue rarely drains, so most
+/// fsyncs amortize across a full batch; under light load the queue empties and
+/// the batch commits immediately (no added latency).
+const MAX_GROUP_BATCH: usize = 4096;
+
+/// A processed command awaiting durable commit: (reply channel, order id for an
+/// InternalError reply if the commit fsync fails, the success events).
+type PendingReply = (Sender<Vec<MatchEvent>>, OrderId, Vec<MatchEvent>);
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -11,7 +28,8 @@ use me_core::events::{MatchEvent, RejectReason};
 use me_core::symbol::SymbolConfig;
 use me_core::types::{FixedQty, OrderId, SymbolId};
 use me_metrics::EngineMetrics;
-use me_persist::wal::{WalCommand, WalWriter};
+use me_persist::snapshot::SnapshotManager;
+use me_persist::wal::{WalCommand, WalEntry, WalReader, WalWriter};
 use me_risk::config::RiskConfig;
 use me_risk::engine::RiskEngine;
 
@@ -19,22 +37,29 @@ use crate::command::Command;
 use crate::engine::Engine;
 
 /// WAL mode: when to write the write-ahead log relative to matching.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum WalMode {
     /// Write WAL before matching (full durability, slightly higher latency).
     Pre,
     /// Write WAL after matching (lower latency, may lose last commands on crash).
     Post,
     /// WAL disabled.
+    #[default]
     Disabled,
 }
 
 /// WAL configuration for the router.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct WalConfig {
     pub mode: WalMode,
     pub path: String,
     pub sync_interval: u64,
+    /// Directory for periodic book snapshots. `None` disables snapshotting
+    /// (recovery then replays the entire WAL from genesis).
+    pub snapshot_dir: Option<String>,
+    /// Take a snapshot of all symbols on the shard every N processed commands,
+    /// then truncate the WAL. `0` disables periodic snapshots.
+    pub snapshot_interval: u64,
 }
 
 /// Thread affinity configuration.
@@ -278,22 +303,26 @@ impl Router {
                 timestamp: ts,
             }];
         }
-        reply_rx.recv().unwrap_or_else(|_| {
-            // Reply channel dropped — shard may have processed the order
-            // AND crashed before replying. Client sees InternalError and
-            // must reconcile (may need to check GetOrderStatus / resume).
-            tracing::error!(
-                shard_idx,
-                symbol = ?symbol,
-                order_id,
-                "REPLY DROPPED: shard may have partially processed, returning InternalError"
-            );
-            vec![MatchEvent::OrderRejected {
-                order_id,
-                reason: RejectReason::InternalError,
-                timestamp: ts,
-            }]
-        })
+        reply_rx
+            .recv_timeout(SHARD_REPLY_TIMEOUT)
+            .unwrap_or_else(|_| {
+                // Reply not received in time: the shard crashed before replying, OR
+                // it is stuck (e.g. blocked on a stalled disk during WAL fsync).
+                // Bound the wait so a single wedged shard can't hang every caller
+                // forever. Client sees InternalError and must reconcile (e.g.
+                // GetOrderStatus / resume).
+                tracing::error!(
+                    shard_idx,
+                    symbol = ?symbol,
+                    order_id,
+                    "REPLY TIMEOUT/DROPPED: shard stuck or crashed, returning InternalError"
+                );
+                vec![MatchEvent::OrderRejected {
+                    order_id,
+                    reason: RejectReason::InternalError,
+                    timestamp: ts,
+                }]
+            })
     }
 
     /// Halt trading for a symbol (circuit breaker).
@@ -373,19 +402,21 @@ impl Router {
                 timestamp: 0,
             }];
         }
-        reply_rx.recv().unwrap_or_else(|_| {
-            tracing::error!(
-                shard_idx,
-                symbol = ?symbol,
-                order_id,
-                "REPLY DROPPED: query_order, returning InternalError"
-            );
-            vec![MatchEvent::OrderRejected {
-                order_id,
-                reason: RejectReason::InternalError,
-                timestamp: 0,
-            }]
-        })
+        reply_rx
+            .recv_timeout(SHARD_REPLY_TIMEOUT)
+            .unwrap_or_else(|_| {
+                tracing::error!(
+                    shard_idx,
+                    symbol = ?symbol,
+                    order_id,
+                    "REPLY TIMEOUT/DROPPED: query_order, returning InternalError"
+                );
+                vec![MatchEvent::OrderRejected {
+                    order_id,
+                    reason: RejectReason::InternalError,
+                    timestamp: 0,
+                }]
+            })
     }
 
     /// Get all open (resting) orders for a client session.
@@ -487,39 +518,15 @@ fn shard_worker_loop(
     let mut symbol_names: FxHashMap<SymbolId, String> = FxHashMap::default();
     let mut risk: RiskEngine = RiskEngine::new();
 
-    // Initialize WAL if configured
-    let wal_mode = wal_config
-        .as_ref()
-        .map_or(WalMode::Disabled, |c| c.mode.clone());
-    let mut wal: Option<WalWriter> = wal_config.and_then(|cfg| {
-        if cfg.mode == WalMode::Disabled {
-            return None;
-        }
-        let wal_path = format!("{}/shard_{}.wal", cfg.path, shard_id);
-        // Ensure directory exists. Log the error directly so operators see
-        // the root cause ("permission denied creating /var/wal") instead of
-        // only the downstream "Failed to open WAL" error.
-        if let Some(parent) = std::path::Path::new(&wal_path).parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                tracing::error!(
-                    shard_id,
-                    parent = %parent.display(),
-                    error = %e,
-                    "Failed to create WAL parent directory — WAL open will also fail"
-                );
-            }
-        }
-        match WalWriter::open(&wal_path, cfg.sync_interval) {
-            Ok(w) => {
-                debug!(shard_id, path = %wal_path, "WAL initialized");
-                Some(w)
-            }
-            Err(e) => {
-                tracing::error!(shard_id, error = %e, "Failed to open WAL");
-                None
-            }
-        }
-    });
+    // Initialize WAL + recover prior state (snapshot + WAL replay) if configured.
+    let snapshot_interval = wal_config.as_ref().map_or(0, |c| c.snapshot_interval);
+    let WalInit {
+        mut wal,
+        replay_entries,
+        snapshot_mgr,
+        wal_mode,
+    } = init_wal_and_recover(shard_id, wal_config);
+
     let wal_pre_open_failed = wal_mode == WalMode::Pre && wal.is_none();
     if wal_pre_open_failed {
         tracing::error!(
@@ -527,11 +534,24 @@ fn shard_worker_loop(
             "WAL pre-mode configured but writer is unavailable; shard will reject all commands to preserve durability"
         );
     }
+    let mut commands_since_snapshot: u64 = 0;
+
+    // Group commit applies only to Pre-mode (the mode that must fsync before
+    // acknowledging). Post/Disabled keep their existing immediate-reply path.
+    let group_commit = wal_mode == WalMode::Pre && wal.is_some();
+    let mut pending: Vec<PendingReply> = Vec::new();
 
     while let Ok(msg) = rx.recv() {
+        // Flush any deferred group-commit batch before handling a control
+        // message, so replies stay ordered and durability is committed at
+        // message boundaries.
+        if !matches!(msg, ShardMsg::Command { .. }) && !pending.is_empty() {
+            commit_and_flush(shard_id, &mut wal, &mut engines, &mut pending);
+        }
         match msg {
             ShardMsg::Command { cmd, reply } => {
                 let symbol = cmd.symbol();
+                let reply_order_id = cmd_order_id(&cmd);
                 let sym_name = symbol_names
                     .get(&symbol)
                     .map(|s| s.as_str())
@@ -582,7 +602,9 @@ fn shard_worker_loop(
                 if wal_mode == WalMode::Pre {
                     if let Some(ref mut w) = wal {
                         let wal_cmd = command_to_wal(&cmd);
-                        if let Err(e) = w.append(&wal_cmd) {
+                        // Buffered append only; the batch is fsynced once in
+                        // commit_and_flush before any reply is released.
+                        if let Err(e) = w.append_nosync(&wal_cmd) {
                             tracing::error!(
                                 shard_id, error = %e,
                                 "WAL PRE-WRITE FAILED — rejecting order (durability violated)"
@@ -660,6 +682,29 @@ fn shard_worker_loop(
                         timestamp: ts,
                     }]
                 } else if let Some(engine) = engines.get_mut(&symbol) {
+                    // 1.5. Lazy GTD expiry sweep for this symbol. Expiry
+                    // cancellations are audited, metered, and decrement the
+                    // open-order count, but are NOT returned in this command's
+                    // reply — they belong to other orders, not this caller.
+                    let expired = engine.expire_gtd_now();
+                    if !expired.is_empty() {
+                        for ev in &expired {
+                            if matches!(ev, MatchEvent::OrderCancelled { .. }) {
+                                risk.on_order_removed(symbol);
+                            }
+                        }
+                        if let Some(ref a) = audit {
+                            for ev in &expired {
+                                if let Some(entry) = match_event_to_entry(ev, symbol) {
+                                    a.log_entry(entry);
+                                }
+                            }
+                        }
+                        if let Some(ref m) = metrics {
+                            m.record_events(&expired, sym_name, std::time::Duration::ZERO);
+                        }
+                    }
+
                     // 2. Matching
                     let events = engine.process(cmd).to_vec();
 
@@ -674,16 +719,15 @@ fn shard_worker_loop(
 
                     for event in &events {
                         match event {
-                            MatchEvent::OrderAccepted { order_id, .. } => {
-                                // Stop orders are accepted once when inserted into stop_book,
-                                // then accepted again when triggered into the live book.
-                                // Count only the original client order acceptance (current cmd)
-                                // and skip synthetic acceptances produced by stop triggers.
+                            // Stop orders are accepted once when inserted into stop_book,
+                            // then accepted again when triggered into the live book.
+                            // Count only the original client order acceptance (current cmd)
+                            // and skip synthetic acceptances produced by stop triggers.
+                            MatchEvent::OrderAccepted { order_id, .. }
                                 if Some(*order_id) == incoming_order_id
-                                    && !triggered_order_ids.contains(order_id)
-                                {
-                                    risk.on_order_added(symbol);
-                                }
+                                    && !triggered_order_ids.contains(order_id) =>
+                            {
+                                risk.on_order_added(symbol);
                             }
                             MatchEvent::OrderFilled { .. } | MatchEvent::OrderCancelled { .. } => {
                                 risk.on_order_removed(symbol);
@@ -761,14 +805,42 @@ fn shard_worker_loop(
                     "command processed"
                 );
 
-                if reply.send(events).is_err() {
-                    // Caller timed out / dropped receiver. Events were
-                    // applied to state (book updated, WAL written, audit
-                    // logged) — risk of client-server inconsistency.
-                    tracing::warn!(
+                commands_since_snapshot += 1;
+
+                if group_commit {
+                    // Defer the reply until the batch is fsynced. Commit when
+                    // the batch is full or the inbound queue has drained (so a
+                    // lone command under light load still acks immediately).
+                    pending.push((reply, reply_order_id, events));
+                    if pending.len() >= MAX_GROUP_BATCH || rx.is_empty() {
+                        commit_and_flush(shard_id, &mut wal, &mut engines, &mut pending);
+                        maybe_snapshot(
+                            shard_id,
+                            snapshot_interval,
+                            &mut commands_since_snapshot,
+                            &engines,
+                            &mut wal,
+                            &snapshot_mgr,
+                        );
+                    }
+                } else {
+                    if reply.send(events).is_err() {
+                        // Caller timed out / dropped receiver. Events were
+                        // applied to state (book updated, WAL written, audit
+                        // logged) — risk of client-server inconsistency.
+                        tracing::warn!(
+                            shard_id,
+                            symbol = sym_name,
+                            "reply dropped: caller lost response AFTER state mutation"
+                        );
+                    }
+                    maybe_snapshot(
                         shard_id,
-                        symbol = sym_name,
-                        "reply dropped: caller lost response AFTER state mutation"
+                        snapshot_interval,
+                        &mut commands_since_snapshot,
+                        &engines,
+                        &mut wal,
+                        &snapshot_mgr,
                     );
                 }
             }
@@ -835,10 +907,29 @@ fn shard_worker_loop(
                 let id = config.id;
                 let name = format!("{}/{}", config.base, config.quote);
                 symbol_names.insert(id, name);
+                let stp = risk_config
+                    .as_ref()
+                    .map(|rc| rc.self_trade_prevention)
+                    .unwrap_or(false);
                 if let Some(rc) = risk_config {
                     risk.add_symbol(rc);
                 }
-                engines.insert(id, Engine::new(config));
+                // Recover this symbol's state from the latest snapshot plus any
+                // WAL records written after the snapshot watermark, before the
+                // engine starts accepting live commands.
+                let mut engine = Engine::new(config);
+                engine.set_self_trade_prevention(stp);
+                let open = recover_symbol(
+                    shard_id,
+                    id,
+                    &mut engine,
+                    &replay_entries,
+                    snapshot_mgr.as_ref(),
+                );
+                if open > 0 {
+                    risk.set_open_order_count(id, open);
+                }
+                engines.insert(id, engine);
             }
             ShardMsg::HaltSymbol(symbol) => {
                 if let Some(engine) = engines.get_mut(&symbol) {
@@ -856,6 +947,12 @@ fn shard_worker_loop(
             }
             ShardMsg::Shutdown => break,
         }
+    }
+
+    // Commit any deferred group-commit batch before exiting so in-flight
+    // callers get their replies and the records are made durable.
+    if !pending.is_empty() {
+        commit_and_flush(shard_id, &mut wal, &mut engines, &mut pending);
     }
 
     // Flush WAL on shutdown
@@ -877,6 +974,293 @@ fn cmd_order_id(cmd: &Command) -> OrderId {
         Command::PlaceOrder(order) => order.id,
         Command::CancelOrder { order_id, .. } => *order_id,
         Command::AmendOrder { order_id, .. } => *order_id,
+    }
+}
+
+// ─── WAL recovery / snapshotting (startup + periodic) ────────────────────────
+
+/// Result of initializing the WAL and scanning prior records for replay.
+struct WalInit {
+    wal: Option<WalWriter>,
+    replay_entries: Vec<WalEntry>,
+    snapshot_mgr: Option<SnapshotManager>,
+    wal_mode: WalMode,
+}
+
+/// Open the shard's WAL, crash-tolerantly scan any existing records (truncating
+/// a torn tail), and prepare the snapshot manager. The scanned entries are
+/// returned for per-symbol replay as engines are added.
+fn init_wal_and_recover(shard_id: usize, wal_config: Option<WalConfig>) -> WalInit {
+    let empty = |wal_mode| WalInit {
+        wal: None,
+        replay_entries: Vec::new(),
+        snapshot_mgr: None,
+        wal_mode,
+    };
+
+    let Some(cfg) = wal_config else {
+        return empty(WalMode::Disabled);
+    };
+    if cfg.mode == WalMode::Disabled {
+        return empty(WalMode::Disabled);
+    }
+    let wal_mode = cfg.mode.clone();
+
+    let wal_path = format!("{}/shard_{}.wal", cfg.path, shard_id);
+    if let Some(parent) = std::path::Path::new(&wal_path).parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::error!(
+                shard_id,
+                parent = %parent.display(),
+                error = %e,
+                "Failed to create WAL parent directory — WAL open will also fail"
+            );
+        }
+    }
+
+    // Crash-tolerant recovery scan of any existing WAL.
+    let mut replay_entries = Vec::new();
+    let mut resume_seq = 0u64;
+    if std::path::Path::new(&wal_path).exists() {
+        match WalReader::open(&wal_path) {
+            Ok(mut reader) => {
+                let result = reader.read_recoverable();
+                if let Some(reason) = &result.truncated {
+                    tracing::warn!(
+                        shard_id,
+                        reason = %reason,
+                        valid_bytes = result.valid_bytes,
+                        "WAL torn/corrupt tail; truncating to last good record"
+                    );
+                    if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&wal_path) {
+                        if let Err(e) = f.set_len(result.valid_bytes) {
+                            tracing::error!(shard_id, error = %e, "WAL tail truncation failed");
+                        }
+                    }
+                }
+                resume_seq = result.entries.last().map_or(0, |e| e.sequence);
+                replay_entries = result.entries;
+                tracing::info!(
+                    shard_id,
+                    records = replay_entries.len(),
+                    resume_seq,
+                    "WAL recovery scan complete"
+                );
+            }
+            Err(e) => tracing::error!(shard_id, error = %e, "Failed to open WAL for recovery"),
+        }
+    }
+
+    let wal = match WalWriter::open(&wal_path, cfg.sync_interval) {
+        Ok(mut w) => {
+            w.set_sequence(resume_seq);
+            debug!(shard_id, path = %wal_path, "WAL writer ready");
+            Some(w)
+        }
+        Err(e) => {
+            tracing::error!(shard_id, error = %e, "Failed to open WAL writer");
+            None
+        }
+    };
+
+    let snapshot_mgr = cfg
+        .snapshot_dir
+        .as_ref()
+        .and_then(|dir| match SnapshotManager::new(dir) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                tracing::error!(shard_id, dir = %dir, error = %e, "Failed to init snapshot manager");
+                None
+            }
+        });
+
+    WalInit {
+        wal,
+        replay_entries,
+        snapshot_mgr,
+        wal_mode,
+    }
+}
+
+/// Restore one symbol's engine from its latest snapshot, then replay WAL
+/// records written after the snapshot watermark. Returns the resulting open
+/// order count (resting + pending stop) so the risk engine can be re-seeded.
+fn recover_symbol(
+    shard_id: usize,
+    id: SymbolId,
+    engine: &mut Engine,
+    replay_entries: &[WalEntry],
+    snapshot_mgr: Option<&SnapshotManager>,
+) -> u32 {
+    let mut watermark = 0u64;
+    if let Some(mgr) = snapshot_mgr {
+        match mgr.load_latest(id) {
+            Ok(Some(snap)) => {
+                watermark = snap.wal_sequence;
+                engine.apply_snapshot(snap);
+                tracing::info!(shard_id, symbol = ?id, watermark, "restored snapshot");
+            }
+            Ok(None) => {}
+            Err(e) => tracing::error!(
+                shard_id,
+                symbol = ?id,
+                error = %e,
+                "snapshot load failed; replaying full WAL for this symbol"
+            ),
+        }
+    }
+
+    let mut replayed = 0u64;
+    for entry in replay_entries {
+        if entry.sequence > watermark && entry.command.symbol() == id {
+            engine.process(wal_to_command(&entry.command));
+            replayed += 1;
+        }
+    }
+    if replayed > 0 {
+        tracing::info!(shard_id, symbol = ?id, replayed, "replayed WAL records");
+    }
+
+    (engine.book().order_count() + engine.stop_book().len()) as u32
+}
+
+/// Group-commit: fsync the WAL once for the whole pending batch, then release
+/// all deferred replies. The Pre-mode durability contract holds because a
+/// success reply is only sent AFTER its record is durable.
+///
+/// If the fsync fails the batch is NOT durable even though the books were
+/// already mutated in memory. We fail every pending command with
+/// `InternalError` (so clients retry rather than assume success) and halt all
+/// engines on the shard so no further un-journaled trades occur until an
+/// operator intervenes. On restart, recovery rebuilds state from the durable
+/// WAL/snapshot only — consistent with the InternalError the clients saw.
+fn commit_and_flush(
+    shard_id: usize,
+    wal: &mut Option<WalWriter>,
+    engines: &mut FxHashMap<SymbolId, Engine>,
+    pending: &mut Vec<PendingReply>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+
+    let durable = match wal.as_mut() {
+        Some(w) => match w.sync() {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!(
+                    shard_id,
+                    error = %e,
+                    batch = pending.len(),
+                    "GROUP COMMIT FSYNC FAILED — failing batch and halting shard engines"
+                );
+                false
+            }
+        },
+        None => true, // WAL disabled: nothing to fsync.
+    };
+
+    if durable {
+        for (reply, _order_id, events) in pending.drain(..) {
+            if reply.send(events).is_err() {
+                tracing::warn!(shard_id, "reply dropped after durable commit");
+            }
+        }
+    } else {
+        for engine in engines.values_mut() {
+            engine.halt_trading();
+        }
+        for (reply, order_id, _events) in pending.drain(..) {
+            let _ = reply.send(vec![MatchEvent::OrderRejected {
+                order_id,
+                reason: RejectReason::InternalError,
+                timestamp: 0,
+            }]);
+        }
+    }
+}
+
+/// Periodic snapshot trigger shared by the group-commit and immediate-reply
+/// paths. Snapshots all symbols and truncates the WAL once the command counter
+/// reaches the configured interval.
+fn maybe_snapshot(
+    shard_id: usize,
+    snapshot_interval: u64,
+    commands_since_snapshot: &mut u64,
+    engines: &FxHashMap<SymbolId, Engine>,
+    wal: &mut Option<WalWriter>,
+    snapshot_mgr: &Option<SnapshotManager>,
+) {
+    if snapshot_interval == 0 {
+        return;
+    }
+    if let Some(mgr) = snapshot_mgr {
+        if *commands_since_snapshot >= snapshot_interval {
+            take_shard_snapshot(shard_id, engines, wal, mgr);
+            *commands_since_snapshot = 0;
+        }
+    }
+}
+
+/// Snapshot every symbol on the shard at the current WAL watermark, then (only
+/// if all snapshots succeeded) truncate the WAL. Truncating only on full
+/// success avoids dropping un-snapshotted records for a symbol whose save failed.
+fn take_shard_snapshot(
+    shard_id: usize,
+    engines: &FxHashMap<SymbolId, Engine>,
+    wal: &mut Option<WalWriter>,
+    mgr: &SnapshotManager,
+) {
+    let wal_seq = wal.as_ref().map_or(0, |w| w.sequence());
+    let mut all_ok = true;
+    for (id, engine) in engines {
+        let mut snap = engine.snapshot();
+        snap.wal_sequence = wal_seq;
+        match mgr.save(&snap) {
+            Ok(_) => {
+                let _ = mgr.cleanup(*id, 3);
+            }
+            Err(e) => {
+                tracing::error!(shard_id, symbol = ?id, error = %e, "snapshot save failed");
+                all_ok = false;
+            }
+        }
+    }
+    if all_ok {
+        if let Some(w) = wal.as_mut() {
+            if let Err(e) = w.rotate_truncate() {
+                tracing::error!(shard_id, error = %e, "WAL truncate after snapshot failed");
+            }
+        }
+    }
+}
+
+/// Convert a persistence `WalCommand` back into an engine `Command` for replay.
+fn wal_to_command(cmd: &WalCommand) -> Command {
+    match cmd {
+        WalCommand::PlaceOrder(order) => Command::PlaceOrder(*order),
+        WalCommand::CancelOrder {
+            order_id,
+            symbol,
+            timestamp,
+        } => Command::CancelOrder {
+            order_id: *order_id,
+            symbol: *symbol,
+            timestamp: *timestamp,
+        },
+        WalCommand::AmendOrder {
+            order_id,
+            symbol,
+            new_price,
+            new_qty,
+            timestamp,
+        } => Command::AmendOrder {
+            order_id: *order_id,
+            symbol: *symbol,
+            new_price: *new_price,
+            new_qty: *new_qty,
+            timestamp: *timestamp,
+        },
     }
 }
 

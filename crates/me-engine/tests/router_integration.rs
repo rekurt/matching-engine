@@ -290,3 +290,75 @@ fn test_router_query_order() {
         .iter()
         .any(|e| matches!(e, MatchEvent::OrderNotFound { .. })));
 }
+
+#[test]
+fn test_self_trade_prevention_rejects_same_session_cross() {
+    use me_core::events::RejectReason;
+    use me_core::SessionId;
+
+    let mut router = Router::new(1);
+    let mut risk = RiskConfig::default_for(SymbolId(0));
+    risk.max_orders_per_second = 1_000_000;
+    risk.self_trade_prevention = true;
+    router.add_symbol_with_risk(btc_config(), Some(risk));
+
+    let session_a = SessionId::from_bytes([0xA1u8; 16]);
+    let session_b = SessionId::from_bytes([0xB2u8; 16]);
+
+    // Session A rests a sell at 100.
+    let mut sell = Order::new_limit(
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_f64(1.0),
+        1000,
+    );
+    sell.client_session_id = session_a;
+    router.process(Command::PlaceOrder(sell));
+
+    // Session A buy that crosses its own resting sell → rejected by STP.
+    let mut self_buy = Order::new_limit(
+        2,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_f64(1.0),
+        2000,
+    );
+    self_buy.client_session_id = session_a;
+    let events = router.process(Command::PlaceOrder(self_buy));
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            MatchEvent::OrderRejected {
+                reason: RejectReason::SelfTradePrevented,
+                ..
+            }
+        )),
+        "same-session crossing order must be rejected by STP"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, MatchEvent::Trade(_))),
+        "no trade should occur on self-trade"
+    );
+
+    // Session B buy crossing the same resting sell → trades normally.
+    let mut other_buy = Order::new_limit(
+        3,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_f64(1.0),
+        3000,
+    );
+    other_buy.client_session_id = session_b;
+    let events = router.process(Command::PlaceOrder(other_buy));
+    assert!(
+        events.iter().any(|e| matches!(e, MatchEvent::Trade(_))),
+        "different-session order must trade"
+    );
+}

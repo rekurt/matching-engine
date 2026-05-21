@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # me-metrics — Prometheus Metrics
 //!
 //! Provides 50+ Prometheus metrics for monitoring the matching engine:

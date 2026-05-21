@@ -376,6 +376,63 @@ impl OrderBook {
         total
     }
 
+    /// Returns true if an incoming order from `session` on `taker_side` would
+    /// match against a resting order belonging to the same session, considering
+    /// only price levels it could actually cross. `limit_price` bounds the scan
+    /// for limit orders; `None` (market order) scans the entire opposite side.
+    ///
+    /// Used for self-trade prevention. Only the crossing region is scanned, so
+    /// this is cheap for the common non-self-trade case.
+    pub fn would_self_trade(
+        &self,
+        taker_side: Side,
+        limit_price: Option<FixedPrice>,
+        session: &me_core::SessionId,
+    ) -> bool {
+        match taker_side {
+            // Buy taker crosses asks at price <= limit.
+            Side::Buy => {
+                for (price, level) in &self.asks {
+                    if let Some(limit) = limit_price {
+                        if *price > limit {
+                            break;
+                        }
+                    }
+                    if self.level_has_session(level, session) {
+                        return true;
+                    }
+                }
+                false
+            }
+            // Sell taker crosses bids at price >= limit.
+            Side::Sell => {
+                for (Reverse(price), level) in &self.bids {
+                    if let Some(limit) = limit_price {
+                        if *price < limit {
+                            break;
+                        }
+                    }
+                    if self.level_has_session(level, session) {
+                        return true;
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    fn level_has_session(&self, level: &PriceLevel, session: &me_core::SessionId) -> bool {
+        let mut iter = crate::price_level::PriceLevelIter::new(level);
+        while let Some(key) = iter.next_key(&self.order_slab) {
+            if let Some(node) = self.order_slab.get(key) {
+                if node.order.client_session_id == *session {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     // ─── Best price management ───────────────────────────────────────────
 
     fn update_best_after_insert(&mut self, side: Side, price: FixedPrice) {

@@ -301,11 +301,21 @@ fn reference_price_update_shifts_band_center() {
         Err(RiskRejectReason::PriceBandViolation)
     );
 
-    // After a trade at 200, reference moves to 200
+    // A single trade printed at 200 must NOT teleport the reference to 200
+    // (that is exactly the band-walking attack). It moves at most one
+    // band-width: 100 → 105.
     engine.update_reference_price(s, FixedPrice::from_f64(200.0));
-
-    // Now 200 is within ±5% of 200
-    assert!(engine.check_order(&limit_buy(s, 200.0, 1.0)).is_ok());
+    assert_eq!(
+        engine.config(s).unwrap().reference_price,
+        FixedPrice::from_f64(105.0),
+        "reference movement must be clamped to one band-width per trade"
+    );
+    // 200 is still rejected; 105 is now the new center so ~110 is allowed.
+    assert_eq!(
+        engine.check_order(&limit_buy(s, 200.0, 1.0)),
+        Err(RiskRejectReason::PriceBandViolation)
+    );
+    assert!(engine.check_order(&limit_buy(s, 105.0, 1.0)).is_ok());
 }
 
 // ---------- Unknown symbol ----------

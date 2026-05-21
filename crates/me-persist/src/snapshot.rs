@@ -13,6 +13,11 @@ pub struct BookSnapshot {
     pub symbol: SymbolId,
     pub sequence: u64,
     pub trade_id_gen: u64,
+    /// Shard-wide WAL append sequence at the moment this snapshot was taken.
+    /// On recovery, only WAL records with a strictly greater sequence are
+    /// replayed for this symbol, making replay idempotent regardless of when
+    /// the crash occurred relative to WAL truncation.
+    pub wal_sequence: u64,
     pub resting_orders: Vec<Order>,
     pub stop_orders: Vec<Order>,
 }
@@ -23,11 +28,13 @@ pub struct BookSnapshot {
 /// [symbol_id: u16]
 /// [sequence: u64]
 /// [trade_id_gen: u64]
+/// [wal_sequence: u64]
 /// [resting_count: u32][resting_orders...]
 /// [stop_count: u32][stop_orders...]
 /// [crc: u32] (of everything above)
 const SNAPSHOT_MAGIC: u32 = 0x4D45534E; // "MESN"
-const SNAPSHOT_VERSION: u16 = 1;
+/// v2: encoded order layout gained a `flags` byte (see codec::ORDER_ENCODED_SIZE).
+const SNAPSHOT_VERSION: u16 = 2;
 
 /// Manager for saving and loading order book snapshots.
 pub struct SnapshotManager {
@@ -57,6 +64,7 @@ impl SnapshotManager {
         data.extend_from_slice(&snapshot.symbol.0.to_le_bytes());
         data.extend_from_slice(&snapshot.sequence.to_le_bytes());
         data.extend_from_slice(&snapshot.trade_id_gen.to_le_bytes());
+        data.extend_from_slice(&snapshot.wal_sequence.to_le_bytes());
 
         // Resting orders
         let resting_count = snapshot.resting_orders.len() as u32;
@@ -76,12 +84,19 @@ impl SnapshotManager {
         let crc = crc32fast::hash(&data);
         data.extend_from_slice(&crc.to_le_bytes());
 
-        // Write atomically: write to temp, then rename
+        // Write atomically: write to temp, fsync the temp file, rename, then
+        // fsync the directory so the rename itself is durable. Without the
+        // directory fsync a crash can leave the new name unpersisted while the
+        // WAL has already been advanced/truncated against this snapshot.
         let tmp_path = path.with_extension("tmp");
         let mut file = File::create(&tmp_path)?;
         file.write_all(&data)?;
         file.sync_all()?;
         fs::rename(&tmp_path, &path)?;
+        // Best-effort durability of the rename: fsync the containing directory.
+        if let Ok(dir) = File::open(&self.snapshot_dir) {
+            let _ = dir.sync_all();
+        }
 
         Ok(path)
     }
@@ -167,6 +182,10 @@ impl SnapshotManager {
         let trade_id_gen = u64::from_le_bytes(payload[offset..offset + 8].try_into().unwrap());
         offset += 8;
 
+        // WAL sequence watermark
+        let wal_sequence = u64::from_le_bytes(payload[offset..offset + 8].try_into().unwrap());
+        offset += 8;
+
         // Resting orders
         let resting_count =
             u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
@@ -195,6 +214,7 @@ impl SnapshotManager {
             symbol,
             sequence,
             trade_id_gen,
+            wal_sequence,
             resting_orders,
             stop_orders,
         })
@@ -264,6 +284,7 @@ mod tests {
             symbol: SymbolId(0),
             sequence: 100,
             trade_id_gen: 50,
+            wal_sequence: 4242,
             resting_orders: vec![order1],
             stop_orders: vec![order2],
         };
@@ -275,6 +296,7 @@ mod tests {
         assert_eq!(loaded.symbol, SymbolId(0));
         assert_eq!(loaded.sequence, 100);
         assert_eq!(loaded.trade_id_gen, 50);
+        assert_eq!(loaded.wal_sequence, 4242);
         assert_eq!(loaded.resting_orders.len(), 1);
         assert_eq!(loaded.resting_orders[0].id, 1);
         assert_eq!(loaded.stop_orders.len(), 1);
@@ -292,6 +314,7 @@ mod tests {
             symbol: SymbolId(0),
             sequence: 0,
             trade_id_gen: 0,
+            wal_sequence: 0,
             resting_orders: vec![],
             stop_orders: vec![],
         };

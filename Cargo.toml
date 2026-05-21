@@ -43,7 +43,9 @@ tokio = { version = "1", features = ["net", "rt-multi-thread", "io-util", "macro
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
 bytes = "1"
-prometheus = "0.13"
+# default features pull in `protobuf` (RUSTSEC-2024-0437); we only use the text
+# exposition format (TextEncoder), so disable defaults to drop that dependency.
+prometheus = { version = "0.13", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 axum = "0.8"

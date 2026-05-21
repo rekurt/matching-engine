@@ -109,9 +109,11 @@ pub struct SymbolEntry {
     #[serde(default = "default_price_step")]
     pub price_step: String,
     /// Invariant-violation policy for this symbol. One of
-    /// `"strict"` (default), `"halt_symbol"`, or `"continue"`.
+    /// `"strict"`, `"halt_symbol"` (default), or `"continue"`.
+    /// The server defaults to `halt_symbol` so an internal invariant violation
+    /// isolates the affected symbol instead of panicking the whole process.
     /// See `me_core::invariant::InvariantPolicy` for semantics.
-    #[serde(default)]
+    #[serde(default = "default_invariant_policy")]
     pub invariant_policy: me_core::invariant::InvariantPolicy,
 }
 
@@ -129,6 +131,15 @@ pub struct WalConfig {
     /// Flush WAL to disk every N commands (0 = every command)
     #[serde(default = "default_wal_sync_interval")]
     pub sync_interval: u64,
+    /// Directory for periodic book snapshots. Empty string = derive from
+    /// `{path}/snapshots`. Snapshots bound recovery time and WAL growth.
+    #[serde(default)]
+    pub snapshot_dir: String,
+    /// Take a snapshot of all symbols on a shard every N processed commands,
+    /// then truncate that shard's WAL. 0 disables periodic snapshots (recovery
+    /// then replays the entire WAL).
+    #[serde(default = "default_snapshot_interval")]
+    pub snapshot_interval: u64,
 }
 
 impl Default for WalConfig {
@@ -138,6 +149,8 @@ impl Default for WalConfig {
             mode: default_wal_mode(),
             path: default_wal_path(),
             sync_interval: default_wal_sync_interval(),
+            snapshot_dir: String::new(),
+            snapshot_interval: default_snapshot_interval(),
         }
     }
 }
@@ -150,6 +163,14 @@ fn default_wal_path() -> String {
 }
 fn default_wal_sync_interval() -> u64 {
     100
+}
+fn default_snapshot_interval() -> u64 {
+    100_000
+}
+
+fn default_invariant_policy() -> me_core::invariant::InvariantPolicy {
+    // Production default: isolate the affected symbol rather than panic.
+    me_core::invariant::InvariantPolicy::HaltSymbol
 }
 
 fn default_clock() -> String {
@@ -244,6 +265,7 @@ const FIXED_SCALE: u64 = 100_000_000; // 10^8
 
 fn parse_decimal_to_raw(s: &str) -> Result<u64, String> {
     let s = s.trim();
+    let oob = || "value out of range for fixed-point u64".to_string();
     if let Some(dot_pos) = s.find('.') {
         let int_part: u64 = s[..dot_pos]
             .parse()
@@ -253,42 +275,70 @@ fn parse_decimal_to_raw(s: &str) -> Result<u64, String> {
         if frac_digits > 8 {
             return Err(format!("too many decimal places: {frac_digits} (max 8)"));
         }
-        let frac_part: u64 = frac_str
-            .parse()
-            .map_err(|e| format!("invalid fractional part: {e}"))?;
+        let frac_part: u64 = if frac_str.is_empty() {
+            0
+        } else {
+            frac_str
+                .parse()
+                .map_err(|e| format!("invalid fractional part: {e}"))?
+        };
         let scale_factor = 10u64.pow(8 - frac_digits as u32);
-        Ok(int_part * FIXED_SCALE + frac_part * scale_factor)
+        // Checked arithmetic: a large integer part must not silently wrap.
+        int_part
+            .checked_mul(FIXED_SCALE)
+            .and_then(|hi| frac_part.checked_mul(scale_factor).map(|lo| (hi, lo)))
+            .and_then(|(hi, lo)| hi.checked_add(lo))
+            .ok_or_else(oob)
     } else {
         let int_part: u64 = s.parse().map_err(|e| format!("invalid number: {e}"))?;
-        Ok(int_part * FIXED_SCALE)
+        int_part.checked_mul(FIXED_SCALE).ok_or_else(oob)
     }
 }
 
 impl SymbolEntry {
     pub fn to_symbol_config(&self) -> Result<SymbolConfig, String> {
+        let id = self.id;
+        if self.price_scale > 8 {
+            return Err(format!("symbol {id}: price_scale {} > 8", self.price_scale));
+        }
+        if self.qty_scale > 8 {
+            return Err(format!("symbol {id}: qty_scale {} > 8", self.qty_scale));
+        }
+        let min_qty = FixedQty::from_raw(
+            parse_decimal_to_raw(&self.min_qty)
+                .map_err(|e| format!("symbol {id}: min_qty: {e}"))?,
+        );
+        let max_qty = FixedQty::from_raw(
+            parse_decimal_to_raw(&self.max_qty)
+                .map_err(|e| format!("symbol {id}: max_qty: {e}"))?,
+        );
+        let qty_step = FixedQty::from_raw(
+            parse_decimal_to_raw(&self.qty_step)
+                .map_err(|e| format!("symbol {id}: qty_step: {e}"))?,
+        );
+        let price_step = FixedPrice::from_raw(
+            parse_decimal_to_raw(&self.price_step)
+                .map_err(|e| format!("symbol {id}: price_step: {e}"))? as i64,
+        );
+        if min_qty.raw() > max_qty.raw() {
+            return Err(format!("symbol {id}: min_qty > max_qty"));
+        }
+        if qty_step.is_zero() {
+            return Err(format!("symbol {id}: qty_step must be > 0"));
+        }
+        if price_step.raw() <= 0 {
+            return Err(format!("symbol {id}: price_step must be > 0"));
+        }
         Ok(SymbolConfig {
             id: SymbolId(self.id),
             base: self.base.clone(),
             quote: self.quote.clone(),
             price_scale: self.price_scale,
             qty_scale: self.qty_scale,
-            min_qty: FixedQty::from_raw(
-                parse_decimal_to_raw(&self.min_qty)
-                    .map_err(|e| format!("symbol {}: min_qty: {e}", self.id))?,
-            ),
-            max_qty: FixedQty::from_raw(
-                parse_decimal_to_raw(&self.max_qty)
-                    .map_err(|e| format!("symbol {}: max_qty: {e}", self.id))?,
-            ),
-            qty_step: FixedQty::from_raw(
-                parse_decimal_to_raw(&self.qty_step)
-                    .map_err(|e| format!("symbol {}: qty_step: {e}", self.id))?,
-            ),
-            price_step: FixedPrice::from_raw(
-                parse_decimal_to_raw(&self.price_step)
-                    .map_err(|e| format!("symbol {}: price_step: {e}", self.id))?
-                    as i64,
-            ),
+            min_qty,
+            max_qty,
+            qty_step,
+            price_step,
             invariant_policy: self.invariant_policy,
         })
     }
@@ -318,7 +368,7 @@ pub fn default_config() -> Config {
                 max_qty: "10000.0".into(),
                 qty_step: "0.00001".into(),
                 price_step: "0.01".into(),
-                invariant_policy: me_core::invariant::InvariantPolicy::default(),
+                invariant_policy: default_invariant_policy(),
             },
             SymbolEntry {
                 id: 1,
@@ -330,7 +380,7 @@ pub fn default_config() -> Config {
                 max_qty: "100000.0".into(),
                 qty_step: "0.0001".into(),
                 price_step: "0.01".into(),
-                invariant_policy: me_core::invariant::InvariantPolicy::default(),
+                invariant_policy: default_invariant_policy(),
             },
             SymbolEntry {
                 id: 2,
@@ -342,7 +392,7 @@ pub fn default_config() -> Config {
                 max_qty: "100000.0".into(),
                 qty_step: "0.001".into(),
                 price_step: "0.0001".into(),
-                invariant_policy: me_core::invariant::InvariantPolicy::default(),
+                invariant_policy: default_invariant_policy(),
             },
         ],
     }
@@ -372,6 +422,42 @@ mod tests {
     #[test]
     fn parse_decimal_too_many_digits() {
         assert!(parse_decimal_to_raw("0.000000001").is_err());
+    }
+
+    #[test]
+    fn parse_decimal_overflow_is_error_not_wrap() {
+        // ~1.8e11 * 1e8 overflows u64 — must error, not silently wrap.
+        assert!(parse_decimal_to_raw("200000000000").is_err());
+    }
+
+    #[test]
+    fn invalid_scale_rejected() {
+        let mut e = default_config().symbols.remove(0);
+        e.price_scale = 9;
+        assert!(e.to_symbol_config().is_err());
+    }
+
+    #[test]
+    fn min_greater_than_max_rejected() {
+        let mut e = default_config().symbols.remove(0);
+        e.min_qty = "10.0".into();
+        e.max_qty = "1.0".into();
+        assert!(e.to_symbol_config().is_err());
+    }
+
+    #[test]
+    fn server_default_invariant_policy_is_halt_symbol() {
+        use me_core::invariant::InvariantPolicy;
+        let cfg: Config = toml::from_str(
+            r#"
+[[symbols]]
+id = 0
+base = "BTC"
+quote = "USDT"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.symbols[0].invariant_policy, InvariantPolicy::HaltSymbol);
     }
 
     #[test]

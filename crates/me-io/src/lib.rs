@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # me-io — Wire Protocol and Network Servers
 //!
 //! This crate implements the binary wire protocol and async network servers

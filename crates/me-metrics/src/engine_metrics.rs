@@ -1041,6 +1041,7 @@ fn tif_label(tif: me_core::order::TimeInForce) -> &'static str {
         me_core::order::TimeInForce::GTC => "gtc",
         me_core::order::TimeInForce::IOC => "ioc",
         me_core::order::TimeInForce::FOK => "fok",
+        me_core::order::TimeInForce::GTD => "gtd",
     }
 }
 
@@ -1058,6 +1059,8 @@ fn reject_reason_label(reason: RejectReason) -> &'static str {
         RejectReason::TradingHalted => "trading_halted",
         RejectReason::RiskCheckFailed => "risk_check_failed",
         RejectReason::WouldTakeMarket => "would_take_market",
+        RejectReason::SelfTradePrevented => "self_trade_prevented",
+        RejectReason::InvalidExpiry => "invalid_expiry",
         RejectReason::InternalError => "internal_error",
     }
 }
