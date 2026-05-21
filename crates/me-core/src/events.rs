@@ -34,6 +34,8 @@ pub enum RejectReason {
     /// Order would match against the submitter's own resting order
     /// (self-trade prevention).
     SelfTradePrevented,
+    /// GTD order has a missing or already-past expiry timestamp.
+    InvalidExpiry,
     /// Engine internal error (WAL write failure, shard dead, etc.).
     /// Distinct from business-logic rejections — indicates server-side fault.
     InternalError,

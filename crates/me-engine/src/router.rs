@@ -682,6 +682,29 @@ fn shard_worker_loop(
                         timestamp: ts,
                     }]
                 } else if let Some(engine) = engines.get_mut(&symbol) {
+                    // 1.5. Lazy GTD expiry sweep for this symbol. Expiry
+                    // cancellations are audited, metered, and decrement the
+                    // open-order count, but are NOT returned in this command's
+                    // reply — they belong to other orders, not this caller.
+                    let expired = engine.expire_gtd_now();
+                    if !expired.is_empty() {
+                        for ev in &expired {
+                            if matches!(ev, MatchEvent::OrderCancelled { .. }) {
+                                risk.on_order_removed(symbol);
+                            }
+                        }
+                        if let Some(ref a) = audit {
+                            for ev in &expired {
+                                if let Some(entry) = match_event_to_entry(ev, symbol) {
+                                    a.log_entry(entry);
+                                }
+                            }
+                        }
+                        if let Some(ref m) = metrics {
+                            m.record_events(&expired, sym_name, std::time::Duration::ZERO);
+                        }
+                    }
+
                     // 2. Matching
                     let events = engine.process(cmd).to_vec();
 

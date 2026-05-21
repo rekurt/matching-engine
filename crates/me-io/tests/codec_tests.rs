@@ -152,6 +152,58 @@ fn test_handshake_ack_encode() {
     assert_eq!(buf[FRAME_HEADER_SIZE], PROTOCOL_VERSION);
 }
 
+// ─── GTD orders ──────────────────────────────────────────────────────────────
+
+#[test]
+fn test_decode_gtd_place_order() {
+    let mut conn = active_conn();
+    let price_raw = FixedPrice::from_f64(100.0).raw();
+    let qty_raw = FixedQty::from_f64(1.0).raw();
+    // base(37) + flags(1) + expire_at(8) = 46 bytes; tif byte = 3 (GTD).
+    let mut payload = place_order_payload(7, 1, 0, 0, 3, price_raw, 0, qty_raw);
+    payload.push(0u8); // flags
+    payload.extend_from_slice(&1_700_000_000_000_000_000u64.to_le_bytes()); // expire_at
+    let frame = make_frame(0x01, 2, &payload);
+    let (decoded, _) = decode_frame(&frame, &mut conn, &SYS_CLK).expect("gtd place");
+    match decoded {
+        DecodedFrame::Command(Command::PlaceOrder(o), ..) => {
+            assert_eq!(o.tif, me_core::order::TimeInForce::GTD);
+            assert_eq!(o.expire_at, 1_700_000_000_000_000_000);
+        }
+        _ => panic!("expected PlaceOrder"),
+    }
+}
+
+#[test]
+fn test_decode_gtd_without_expiry_rejected() {
+    let mut conn = active_conn();
+    let price_raw = FixedPrice::from_f64(100.0).raw();
+    let qty_raw = FixedQty::from_f64(1.0).raw();
+    // tif=GTD (3) but only base 37 bytes → expire_at defaults to 0 → reject.
+    let payload = place_order_payload(7, 1, 0, 0, 3, price_raw, 0, qty_raw);
+    let frame = make_frame(0x01, 2, &payload);
+    assert!(decode_frame(&frame, &mut conn, &SYS_CLK).is_err());
+}
+
+#[test]
+fn test_decode_legacy_payload_defaults_no_expiry() {
+    // A legacy 37-byte GTC payload must still decode, expire_at = 0.
+    let mut conn = active_conn();
+    let price_raw = FixedPrice::from_f64(100.0).raw();
+    let qty_raw = FixedQty::from_f64(1.0).raw();
+    let payload = place_order_payload(7, 1, 0, 0, 0, price_raw, 0, qty_raw);
+    assert_eq!(payload.len(), 37);
+    let frame = make_frame(0x01, 2, &payload);
+    let (decoded, _) = decode_frame(&frame, &mut conn, &SYS_CLK).expect("legacy place");
+    match decoded {
+        DecodedFrame::Command(Command::PlaceOrder(o), ..) => {
+            assert_eq!(o.expire_at, 0);
+            assert_eq!(o.tif, me_core::order::TimeInForce::GTC);
+        }
+        _ => panic!("expected PlaceOrder"),
+    }
+}
+
 // ─── BatchPlaceOrder ─────────────────────────────────────────────────────────
 
 #[test]

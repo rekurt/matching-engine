@@ -467,8 +467,12 @@ pub fn decode_frame(
     Ok((frame, total_size))
 }
 
-/// PlaceOrder payload (37 or 38 bytes):
-/// OrderId(8) + SymbolId(2) + Side(1) + OrderType(1) + TIF(1) + Price(8) + StopPrice(8) + Qty(8) [+ Flags(1)]
+/// PlaceOrder payload, backward-compatible by length:
+/// OrderId(8) + SymbolId(2) + Side(1) + OrderType(1) + TIF(1) + Price(8) +
+/// StopPrice(8) + Qty(8)  = 37 bytes (base)
+///   [+ Flags(1)]         = 38 bytes
+///   [+ ExpireAt(8)]      = 46 bytes (GTD expiry, unix nanoseconds)
+/// Older clients send 37/38 bytes; the extra fields default to 0.
 fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Command, DecodeError> {
     if payload.len() < 37 {
         return Err(DecodeError::InvalidPayload("PlaceOrder too short".into()));
@@ -502,6 +506,7 @@ fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Com
         0 => TimeInForce::GTC,
         1 => TimeInForce::IOC,
         2 => TimeInForce::FOK,
+        3 => TimeInForce::GTD,
         v => return Err(DecodeError::InvalidPayload(format!("Invalid TIF: {v}"))),
     };
     let price = FixedPrice::from_raw(i64::from_le_bytes(
@@ -525,6 +530,18 @@ fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Com
         0u8
     };
 
+    // Backward-compatible GTD expiry: bytes 38..46 if present, else 0.
+    let expire_at = if payload.len() >= 46 {
+        u64::from_le_bytes(payload[38..46].try_into().expect("PlaceOrder: expire_at"))
+    } else {
+        0u64
+    };
+    if matches!(tif, TimeInForce::GTD) && expire_at == 0 {
+        return Err(DecodeError::InvalidPayload(
+            "GTD order requires a non-zero expire_at".into(),
+        ));
+    }
+
     if matches!(order_type, OrderType::Limit | OrderType::StopLimit) && !price.is_positive() {
         return Err(DecodeError::InvalidPayload(
             "Limit/StopLimit order requires positive price".into(),
@@ -547,6 +564,7 @@ fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Com
         qty,
         remaining_qty: qty,
         cumulative_qty: FixedQty::ZERO,
+        expire_at,
         timestamp,
         sequence: 0,
         symbol,
@@ -986,5 +1004,6 @@ fn reject_reason_to_u8(reason: &me_core::events::RejectReason) -> u8 {
         RejectReason::WouldTakeMarket => 11,
         RejectReason::InternalError => 12,
         RejectReason::SelfTradePrevented => 13,
+        RejectReason::InvalidExpiry => 14,
     }
 }

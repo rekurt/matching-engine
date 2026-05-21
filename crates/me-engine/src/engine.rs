@@ -1,8 +1,10 @@
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use me_core::events::{EventBuffer, MatchEvent, RejectReason};
 use me_core::symbol::SymbolConfig;
-use me_core::types::FixedPrice;
+use me_core::types::{FixedPrice, OrderId};
 
 use me_book::book::OrderBook;
 use me_book::matching;
@@ -37,6 +39,11 @@ pub struct Engine {
     /// When true, reject incoming orders that would match against a resting
     /// order from the same client session (self-trade prevention, cancel-newest).
     self_trade_prevention: bool,
+    /// Min-heap of `(expire_at, order_id)` for GTD orders, soonest expiry first.
+    /// Entries are lazy: a popped id is only cancelled if it is still resting
+    /// with a matching expiry, so stale entries (filled/cancelled/reused) are
+    /// harmlessly skipped.
+    gtd_expiry: BinaryHeap<Reverse<(u64, OrderId)>>,
 }
 
 impl Engine {
@@ -53,6 +60,7 @@ impl Engine {
             trading_state: TradingState::Active,
             clock,
             self_trade_prevention: false,
+            gtd_expiry: BinaryHeap::new(),
         }
     }
 
@@ -78,6 +86,12 @@ impl Engine {
                         timestamp: order.timestamp,
                     });
                     return self.events.events();
+                }
+
+                // Track GTD expiry before the order is moved into a book.
+                if order.is_gtd() && order.expire_at != 0 {
+                    self.gtd_expiry
+                        .push(Reverse((order.expire_at, order.id)));
                 }
 
                 if order.is_stop() {
@@ -217,6 +231,33 @@ impl Engine {
         })
     }
 
+    /// Cancel any GTD orders whose expiry has passed (lazy sweep).
+    ///
+    /// Returns the resulting events (typically `OrderCancelled`). These are NOT
+    /// part of any single command's reply — the caller (router) audits and
+    /// meters them and updates risk counters, but does not return them to the
+    /// client that happened to trigger the sweep.
+    pub fn expire_gtd_now(&mut self) -> Vec<MatchEvent> {
+        let now = self.clock.now_ns();
+        let mut buf = EventBuffer::default();
+        while let Some(&Reverse((exp, id))) = self.gtd_expiry.peek() {
+            if exp > now {
+                break;
+            }
+            self.gtd_expiry.pop();
+            // Live book: cancel only if still resting with the same expiry,
+            // guarding against an id that was reused by a newer order.
+            if let Some(order) = self.book.get_order(id).copied() {
+                if order.is_gtd() && order.expire_at == exp {
+                    matching::cancel_order(&mut self.book, id, now, &mut buf);
+                }
+            } else if self.stop_book.contains(id) {
+                self.stop_book.cancel(id, now, &mut buf);
+            }
+        }
+        buf.drain()
+    }
+
     /// Halt trading — only cancel orders will be processed.
     pub fn halt_trading(&mut self) {
         self.trading_state = TradingState::Halted;
@@ -324,11 +365,20 @@ impl Engine {
         self.book = OrderBook::new(cfg);
         self.stop_book = StopBook::new();
 
+        self.gtd_expiry.clear();
         for order in snapshot.resting_orders {
+            if order.is_gtd() && order.expire_at != 0 {
+                self.gtd_expiry
+                    .push(Reverse((order.expire_at, order.id)));
+            }
             self.book.insert_order(order);
         }
         let mut scratch = EventBuffer::default();
         for order in snapshot.stop_orders {
+            if order.is_gtd() && order.expire_at != 0 {
+                self.gtd_expiry
+                    .push(Reverse((order.expire_at, order.id)));
+            }
             self.stop_book.insert(order, &mut scratch);
         }
         // Discard the synthetic OrderAccepted events produced by

@@ -59,6 +59,11 @@ pub fn validate_order(order: &Order, config: &SymbolConfig) -> Option<RejectReas
         return Some(RejectReason::InvalidPrice);
     }
 
+    // GTD orders must carry a non-zero expiry.
+    if matches!(order.tif, TimeInForce::GTD) && order.expire_at == 0 {
+        return Some(RejectReason::InvalidExpiry);
+    }
+
     None
 }
 
@@ -189,8 +194,10 @@ fn match_limit(book: &mut OrderBook, order: &mut Order, events: &mut EventBuffer
                     timestamp: order.timestamp,
                 });
             }
-            TimeInForce::GTC => {
-                // Rest on book
+            TimeInForce::GTC | TimeInForce::GTD => {
+                // Rest on book. GTD additionally carries an expiry that the
+                // engine layer enforces (lazy expiry sweep) — the book itself
+                // treats GTD identically to GTC.
                 book.insert_order(*order);
             }
         }
