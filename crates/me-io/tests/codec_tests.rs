@@ -152,6 +152,57 @@ fn test_handshake_ack_encode() {
     assert_eq!(buf[FRAME_HEADER_SIZE], PROTOCOL_VERSION);
 }
 
+// ─── BatchPlaceOrder ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_decode_batch_place_fixed_38_byte_entries() {
+    // Regression: batch entries are fixed at 38 bytes (flags mandatory). A run
+    // of entries must each decode to the correct order id — the old size-guess
+    // logic shifted every entry after the first by one byte.
+    let mut conn = active_conn();
+    let price_raw = FixedPrice::from_f64(100.0).raw();
+    let qty_raw = FixedQty::from_f64(1.0).raw();
+
+    let mut payload = vec![3u8]; // count = 3
+    for id in 1..=3u64 {
+        // 37-byte base + mandatory flags byte = 38 bytes per entry.
+        payload.extend_from_slice(&place_order_payload(id, 1, 0, 0, 0, price_raw, 0, qty_raw));
+        payload.push(0u8); // flags
+    }
+    assert_eq!(payload.len(), 1 + 3 * 38);
+
+    let frame = make_frame(0x0B, 2, &payload);
+    let (decoded, consumed) = decode_frame(&frame, &mut conn, &SYS_CLK).expect("batch place");
+    assert_eq!(consumed, frame.len());
+    match decoded {
+        DecodedFrame::Batch(cmds, seq, _) => {
+            assert_eq!(seq, 2);
+            assert_eq!(cmds.len(), 3);
+            for (i, cmd) in cmds.iter().enumerate() {
+                match cmd {
+                    Command::PlaceOrder(o) => assert_eq!(o.id, (i + 1) as u64),
+                    _ => panic!("expected PlaceOrder in batch"),
+                }
+            }
+        }
+        _ => panic!("expected Batch"),
+    }
+}
+
+#[test]
+fn test_decode_batch_place_rejects_misaligned_payload() {
+    // A payload that is not count + N*38 must be rejected, not silently
+    // mis-parsed.
+    let mut conn = active_conn();
+    let price_raw = FixedPrice::from_f64(100.0).raw();
+    let qty_raw = FixedQty::from_f64(1.0).raw();
+    let mut payload = vec![2u8]; // claims 2 entries
+    payload.extend_from_slice(&place_order_payload(1, 1, 0, 0, 0, price_raw, 0, qty_raw));
+    payload.push(0u8); // one full 38-byte entry, second missing
+    let frame = make_frame(0x0B, 2, &payload);
+    assert!(decode_frame(&frame, &mut conn, &SYS_CLK).is_err());
+}
+
 // ─── PlaceOrder roundtrip ────────────────────────────────────────────────────
 
 #[test]

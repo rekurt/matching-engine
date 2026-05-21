@@ -165,6 +165,12 @@ pub const MAX_WRITE_BUFFER_SIZE: usize = 256 * 1024;
 /// Maximum orders in a BatchPlaceOrder frame.
 pub const MAX_BATCH_PLACE: u8 = 20;
 
+/// Fixed size of one BatchPlaceOrder entry. Unlike a standalone PlaceOrder
+/// (where the trailing flags byte is optional → 37 or 38 bytes), batch entries
+/// are fixed-size so the decoder can split them without a per-entry length
+/// prefix: OrderId(8)+SymbolId(2)+Side(1)+Type(1)+TIF(1)+Price(8)+StopPrice(8)+Qty(8)+Flags(1).
+pub const BATCH_PLACE_ENTRY_SIZE: usize = 38;
+
 /// Maximum orders in a BatchCancelOrder frame.
 pub const MAX_BATCH_CANCEL: u8 = 50;
 

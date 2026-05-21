@@ -29,6 +29,7 @@ pub struct UdsServer {
     heartbeat_interval_ms: u32,
     heartbeat_timeout_ms: u64,
     clock: Arc<dyn Clock>,
+    max_connections: usize,
 }
 
 impl UdsServer {
@@ -69,7 +70,14 @@ impl UdsServer {
             heartbeat_interval_ms,
             heartbeat_timeout_ms,
             clock,
+            max_connections: crate::tcp_server::DEFAULT_MAX_CONNECTIONS,
         }
+    }
+
+    /// Override the maximum number of concurrent connections.
+    pub fn with_max_connections(mut self, max: usize) -> Self {
+        self.max_connections = max.max(1);
+        self
     }
 
     /// Start listening on the given Unix socket path.
@@ -98,6 +106,8 @@ impl UdsServer {
             | CAP_EXACTLY_ONCE
             | CAP_SNAPSHOT;
 
+        let conn_limiter = Arc::new(tokio::sync::Semaphore::new(self.max_connections));
+
         loop {
             tokio::select! {
                 biased;
@@ -114,6 +124,14 @@ impl UdsServer {
 
                 result = listener.accept() => {
                     let (stream, _) = result?;
+                    let permit = match Arc::clone(&conn_limiter).try_acquire_owned() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            warn!(max = self.max_connections, "UDS connection limit reached; rejecting");
+                            drop(stream);
+                            continue;
+                        }
+                    };
                     let router = Arc::clone(&self.router);
                     let metrics = self.metrics.clone();
                     let conn_shutdown = shutdown_rx.clone();
@@ -124,6 +142,7 @@ impl UdsServer {
 
                     let span = info_span!("uds_conn");
                     tokio::spawn(async move {
+                        let _permit = permit;
                         if let Err(e) = handle_uds_connection(stream, router, conn_shutdown, metrics, session_store, hb_interval, hb_timeout, caps, clock).await {
                             warn!(error = %e, "connection error");
                         }

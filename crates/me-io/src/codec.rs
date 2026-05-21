@@ -7,9 +7,9 @@ use me_core::types::*;
 use me_engine::command::Command;
 
 use crate::protocol::{
-    ConnectionState, ErrorCode, MessageType, FRAME_HEADER_SIZE, MAX_BATCH_CANCEL, MAX_BATCH_PLACE,
-    MAX_PAYLOAD_SIZE, MAX_PAYLOAD_SIZE_BATCH, PROTOCOL_VERSION, TLV_CAPABILITIES, TLV_HEARTBEAT_MS,
-    TLV_SESSION_ID,
+    ConnectionState, ErrorCode, MessageType, BATCH_PLACE_ENTRY_SIZE, FRAME_HEADER_SIZE,
+    MAX_BATCH_CANCEL, MAX_BATCH_PLACE, MAX_PAYLOAD_SIZE, MAX_PAYLOAD_SIZE_BATCH, PROTOCOL_VERSION,
+    TLV_CAPABILITIES, TLV_HEARTBEAT_MS, TLV_SESSION_ID,
 };
 use crate::session_store::SessionId;
 
@@ -418,18 +418,23 @@ pub fn decode_frame(
             let mut cmds = Vec::with_capacity(count as usize);
             let mut offset = 1usize;
             for _ in 0..count {
-                if payload.len() < offset + 37 {
+                // Batch entries are FIXED at 38 bytes (flags mandatory). The
+                // single-order format allows an optional flags byte (37 or 38),
+                // but inside a batch a variable size is unparseable: with no
+                // per-entry length prefix the decoder cannot tell where one
+                // entry ends. Guessing the size from the remaining buffer (the
+                // previous behaviour) silently corrupted every entry after the
+                // first whenever a 37-byte entry was followed by another entry.
+                if payload.len() < offset + BATCH_PLACE_ENTRY_SIZE {
                     return Err(DecodeError::InvalidPayload(
                         "BatchPlaceOrder truncated".into(),
                     ));
                 }
-                // Each sub-payload is 37 or 38 bytes.
-                let sub_len = if payload.len() >= offset + 38 { 38 } else { 37 };
                 cmds.push(decode_place_order(
-                    &payload[offset..offset + sub_len],
+                    &payload[offset..offset + BATCH_PLACE_ENTRY_SIZE],
                     clock,
                 )?);
-                offset += sub_len;
+                offset += BATCH_PLACE_ENTRY_SIZE;
             }
             DecodedFrame::Batch(cmds, seq, request_id)
         }

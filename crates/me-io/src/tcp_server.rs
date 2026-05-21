@@ -21,6 +21,11 @@ use crate::session_store::SessionStore;
 #[cfg(feature = "tls")]
 use tokio_rustls::TlsAcceptor;
 
+/// Default cap on concurrent client connections. Bounds memory/session
+/// amplification from a connection-flood (each connection holds a read buffer
+/// and a session entry). Override with [`TcpServer::with_max_connections`].
+pub const DEFAULT_MAX_CONNECTIONS: usize = 10_000;
+
 /// TCP server for the binary protocol.
 ///
 /// Architecture:
@@ -35,6 +40,7 @@ pub struct TcpServer {
     heartbeat_interval_ms: u32,
     heartbeat_timeout_ms: u64,
     clock: Arc<dyn Clock>,
+    max_connections: usize,
     #[cfg(feature = "tls")]
     tls_acceptor: Option<TlsAcceptor>,
 }
@@ -77,9 +83,16 @@ impl TcpServer {
             heartbeat_interval_ms,
             heartbeat_timeout_ms,
             clock,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
             #[cfg(feature = "tls")]
             tls_acceptor: None,
         }
+    }
+
+    /// Override the maximum number of concurrent connections.
+    pub fn with_max_connections(mut self, max: usize) -> Self {
+        self.max_connections = max.max(1);
+        self
     }
 
     #[cfg(feature = "tls")]
@@ -107,6 +120,10 @@ impl TcpServer {
 
         let caps = build_capabilities(tls_active);
 
+        // Bound concurrent connections. A permit is acquired per accepted
+        // connection and released when its task ends.
+        let conn_limiter = Arc::new(tokio::sync::Semaphore::new(self.max_connections));
+
         loop {
             tokio::select! {
                 biased;
@@ -120,6 +137,18 @@ impl TcpServer {
 
                 result = listener.accept() => {
                     let (stream, peer) = result?;
+
+                    // Reject (close) the connection if we are at capacity,
+                    // rather than unboundedly spawning tasks/sessions.
+                    let permit = match Arc::clone(&conn_limiter).try_acquire_owned() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            warn!(peer = %peer, max = self.max_connections, "connection limit reached; rejecting");
+                            drop(stream);
+                            continue;
+                        }
+                    };
+
                     let router = Arc::clone(&self.router);
                     let metrics = self.metrics.clone();
                     let conn_shutdown = shutdown_rx.clone();
@@ -133,6 +162,8 @@ impl TcpServer {
 
                     let span = info_span!("tcp_conn", peer = %peer);
                     tokio::spawn(async move {
+                        // Hold the permit for the lifetime of the connection.
+                        let _permit = permit;
                         #[cfg(feature = "tls")]
                         let result = if let Some(acceptor) = tls_acceptor {
                             match acceptor.accept(stream).await {
