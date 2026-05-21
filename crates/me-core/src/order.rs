@@ -55,7 +55,7 @@ pub enum OrderStatus {
 
 // ─── Order ───────────────────────────────────────────────────────────────────
 
-/// Core order struct. 104 bytes.
+/// Core order struct. 112 bytes.
 ///
 /// ## Layout rationale
 /// Fields ordered to minimize padding. Hot-path fields (price/qty/status)
@@ -69,7 +69,10 @@ pub struct Order {
     pub id: OrderId,
     pub price: FixedPrice,
     pub stop_price: FixedPrice,
+    /// Total order quantity (for an iceberg, the full size including hidden).
     pub qty: FixedQty,
+    /// Currently visible/working quantity. For an iceberg this is the visible
+    /// slice; the hidden reserve is `qty - cumulative_qty - remaining_qty`.
     pub remaining_qty: FixedQty,
     pub cumulative_qty: FixedQty,
     /// GTD expiry as unix nanoseconds. `0` means no expiry (GTC/IOC/FOK).
@@ -78,6 +81,9 @@ pub struct Order {
     /// When non-zero on a stop order, `stop_price` ratchets toward the market
     /// as it moves favorably, staying `trail_offset` away from the extreme.
     pub trail_offset: FixedPrice,
+    /// Iceberg display size: the maximum quantity shown on the book at once.
+    /// `0` means fully visible (not an iceberg).
+    pub display_qty: FixedQty,
     pub timestamp: u64,
     pub sequence: SequenceId,
     pub symbol: SymbolId,
@@ -95,10 +101,10 @@ pub struct Order {
 }
 
 /// Compile-time size guard: if someone adds a field that changes Order layout,
-/// the docstring above says "104 bytes" — this fails the build loudly instead
+/// the docstring above says "112 bytes" — this fails the build loudly instead
 /// of silently drifting. Update both this assert and the docstring together.
 const _: () = assert!(
-    std::mem::size_of::<Order>() == 104,
+    std::mem::size_of::<Order>() == 112,
     "Order struct size changed — update docstring and this assert"
 );
 
@@ -122,6 +128,7 @@ impl Order {
             cumulative_qty: FixedQty::ZERO,
             expire_at: 0,
             trail_offset: FixedPrice::ZERO,
+            display_qty: FixedQty::ZERO,
             timestamp,
             sequence: 0,
             symbol,
@@ -153,6 +160,7 @@ impl Order {
             cumulative_qty: FixedQty::ZERO,
             expire_at: 0,
             trail_offset: FixedPrice::ZERO,
+            display_qty: FixedQty::ZERO,
             timestamp,
             sequence: 0,
             symbol,
@@ -187,6 +195,7 @@ impl Order {
             cumulative_qty: FixedQty::ZERO,
             expire_at: 0,
             trail_offset: FixedPrice::ZERO,
+            display_qty: FixedQty::ZERO,
             timestamp,
             sequence: 0,
             symbol,
@@ -219,6 +228,7 @@ impl Order {
             cumulative_qty: FixedQty::ZERO,
             expire_at: 0,
             trail_offset: FixedPrice::ZERO,
+            display_qty: FixedQty::ZERO,
             timestamp,
             sequence: 0,
             symbol,
@@ -268,6 +278,22 @@ impl Order {
     #[inline]
     pub fn is_trailing_stop(&self) -> bool {
         self.is_stop() && self.trail_offset.raw() > 0
+    }
+
+    /// Builder: make this a limit iceberg order showing `display_qty` at a time.
+    #[inline]
+    pub fn with_display_qty(mut self, display_qty: FixedQty) -> Self {
+        self.display_qty = display_qty;
+        self
+    }
+
+    /// Whether this is an iceberg limit order (a display size smaller than the
+    /// total quantity).
+    #[inline]
+    pub fn is_iceberg(&self) -> bool {
+        matches!(self.order_type, OrderType::Limit)
+            && self.display_qty.raw() > 0
+            && self.display_qty < self.qty
     }
 
     /// Whether this order has expired at the given time (unix nanoseconds).

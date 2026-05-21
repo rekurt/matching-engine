@@ -2,9 +2,12 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
 
+use rustc_hash::FxHashMap;
+
 use me_core::events::{EventBuffer, MatchEvent, RejectReason};
+use me_core::order::{Order, TimeInForce};
 use me_core::symbol::SymbolConfig;
-use me_core::types::{FixedPrice, OrderId};
+use me_core::types::{FixedPrice, FixedQty, OrderId};
 
 use me_book::book::OrderBook;
 use me_book::matching;
@@ -44,6 +47,12 @@ pub struct Engine {
     /// with a matching expiry, so stale entries (filled/cancelled/reused) are
     /// harmlessly skipped.
     gtd_expiry: BinaryHeap<Reverse<(u64, OrderId)>>,
+    /// Active iceberg orders, keyed by order id. The value is the template
+    /// (qty = total, display_qty = visible slice size) with `cumulative_qty`
+    /// tracking the total filled across all slices. When a visible slice fully
+    /// fills and a hidden reserve remains, the next slice is re-inserted at the
+    /// back of the queue.
+    icebergs: FxHashMap<OrderId, Order>,
 }
 
 impl Engine {
@@ -61,6 +70,7 @@ impl Engine {
             clock,
             self_trade_prevention: false,
             gtd_expiry: BinaryHeap::new(),
+            icebergs: FxHashMap::default(),
         }
     }
 
@@ -118,7 +128,20 @@ impl Engine {
                             return self.events.events();
                         }
                     }
-                    matching::process_order(&mut self.book, order, &mut self.events);
+
+                    // Iceberg: only the display slice is visible on the book; the
+                    // hidden reserve is replenished as slices fill. Applies to
+                    // resting tifs only (GTC/GTD); IOC/FOK ignore display_qty.
+                    if order.is_iceberg()
+                        && matches!(order.tif, TimeInForce::GTC | TimeInForce::GTD)
+                    {
+                        self.icebergs.insert(order.id, order);
+                        let mut slice = order;
+                        slice.remaining_qty = order.display_qty; // visible slice
+                        matching::process_order(&mut self.book, slice, &mut self.events);
+                    } else {
+                        matching::process_order(&mut self.book, order, &mut self.events);
+                    }
                     self.check_stop_triggers();
                 }
             }
@@ -129,6 +152,8 @@ impl Engine {
             } => {
                 // Cancels ALWAYS allowed, even when halted
                 if self.book.contains_order(order_id) {
+                    // Drop any iceberg reserve so it is not replenished after cancel.
+                    self.icebergs.remove(&order_id);
                     matching::cancel_order(&mut self.book, order_id, timestamp, &mut self.events);
                 } else if self.stop_book.contains(order_id) {
                     self.stop_book.cancel(order_id, timestamp, &mut self.events);
@@ -169,7 +194,75 @@ impl Engine {
             }
         }
 
+        // Replenish any iceberg whose visible slice fully filled this command.
+        self.replenish_icebergs();
+
         self.events.events()
+    }
+
+    /// Iceberg maintenance, run after matching:
+    /// 1. Accumulate this command's fills into each iceberg template's
+    ///    `cumulative_qty`, and drop fully-filled icebergs.
+    /// 2. For any iceberg whose visible slice left the book with a hidden
+    ///    reserve remaining, insert the next visible slice at the back of the
+    ///    queue and rewrite its `OrderFilled` into `OrderPartiallyFilled` (the
+    ///    order is not actually done while a reserve remains).
+    fn replenish_icebergs(&mut self) {
+        if self.icebergs.is_empty() {
+            return;
+        }
+
+        // 1. Fold incremental fills into the templates.
+        let mut fills: Vec<(OrderId, FixedQty)> = Vec::new();
+        for ev in self.events.events() {
+            match ev {
+                MatchEvent::OrderFilled {
+                    order_id,
+                    filled_qty,
+                    ..
+                }
+                | MatchEvent::OrderPartiallyFilled {
+                    order_id,
+                    filled_qty,
+                    ..
+                } if self.icebergs.contains_key(order_id) => {
+                    fills.push((*order_id, *filled_qty));
+                }
+                _ => {}
+            }
+        }
+        for (id, f) in fills {
+            if let Some(t) = self.icebergs.get_mut(&id) {
+                t.cumulative_qty += f;
+            }
+        }
+        // Done icebergs: the final slice fully filled — keep the OrderFilled.
+        self.icebergs.retain(|_, t| t.cumulative_qty < t.qty);
+
+        // 2. Replenish slices whose visible portion left the book.
+        let candidates: Vec<OrderId> = self
+            .icebergs
+            .iter()
+            .filter(|(id, _)| !self.book.contains_order(**id))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in candidates {
+            let template = match self.icebergs.get(&id) {
+                Some(t) => *t,
+                None => continue,
+            };
+            let hidden = template.qty.saturating_sub(template.cumulative_qty);
+            if hidden.is_zero() {
+                self.icebergs.remove(&id);
+                continue;
+            }
+            let next = template.display_qty.min(hidden);
+            let mut slice = template;
+            slice.remaining_qty = next;
+            // back of queue: insert_order assigns a fresh sequence.
+            self.book.insert_order(slice);
+            transform_fill_to_partial(self.events.events_mut(), id, next);
+        }
     }
 
     /// Check if any stop orders should be triggered based on recent trades.
@@ -248,6 +341,8 @@ impl Engine {
             // guarding against an id that was reused by a newer order.
             if let Some(order) = self.book.get_order(id).copied() {
                 if order.is_gtd() && order.expire_at == exp {
+                    // Drop iceberg reserve so an expired iceberg is not replenished.
+                    self.icebergs.remove(&id);
                     matching::cancel_order(&mut self.book, id, now, &mut buf);
                 }
             } else if self.stop_book.contains(id) {
@@ -365,9 +460,16 @@ impl Engine {
         self.stop_book = StopBook::new();
 
         self.gtd_expiry.clear();
+        self.icebergs.clear();
         for order in snapshot.resting_orders {
             if order.is_gtd() && order.expire_at != 0 {
                 self.gtd_expiry.push(Reverse((order.expire_at, order.id)));
+            }
+            // Rebuild iceberg tracking: a resting slice with display_qty>0 and a
+            // hidden reserve remaining is an active iceberg. The restored order
+            // carries qty/display/cumulative, so it is its own template.
+            if order.display_qty.raw() > 0 && order.cumulative_qty < order.qty {
+                self.icebergs.insert(order.id, order);
             }
             self.book.insert_order(order);
         }
@@ -385,5 +487,38 @@ impl Engine {
 
         self.book.sequence = snapshot.sequence;
         self.book.trade_id_gen = snapshot.trade_id_gen;
+    }
+}
+
+/// Rewrite the first `OrderFilled` for `order_id` into an `OrderPartiallyFilled`
+/// with the given `remaining_qty`. Used when an iceberg's visible slice fully
+/// fills but a hidden reserve remains, so the client does not see the order as
+/// complete prematurely.
+fn transform_fill_to_partial(
+    events: &mut [MatchEvent],
+    order_id: OrderId,
+    remaining_qty: FixedQty,
+) {
+    for ev in events.iter_mut() {
+        let MatchEvent::OrderFilled {
+            order_id: id,
+            filled_qty,
+            price,
+            timestamp,
+        } = *ev
+        else {
+            continue;
+        };
+        if id != order_id {
+            continue;
+        }
+        *ev = MatchEvent::OrderPartiallyFilled {
+            order_id: id,
+            filled_qty,
+            remaining_qty,
+            price,
+            timestamp,
+        };
+        return;
     }
 }

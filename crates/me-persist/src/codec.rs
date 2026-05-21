@@ -124,7 +124,8 @@ pub fn decode_wal_command(data: &[u8]) -> Result<WalCommand, String> {
 /// Size of encoded order in bytes.
 /// v2: +16 bytes for client_session_id. v3: +1 byte for `flags`.
 /// v4: +8 bytes for `expire_at` (GTD). v5: +8 bytes for `trail_offset`.
-pub const ORDER_ENCODED_SIZE: usize = 103;
+/// v6: +8 bytes for `display_qty` (iceberg).
+pub const ORDER_ENCODED_SIZE: usize = 111;
 
 /// Encode an order into a buffer (public, used by snapshot).
 pub fn encode_order_to(order: &Order, buf: &mut Vec<u8>) {
@@ -145,6 +146,7 @@ fn encode_order(order: &Order, buf: &mut Vec<u8>) {
     buf.extend_from_slice(&order.cumulative_qty.raw().to_le_bytes());
     buf.extend_from_slice(&order.expire_at.to_le_bytes());
     buf.extend_from_slice(&order.trail_offset.raw().to_le_bytes());
+    buf.extend_from_slice(&order.display_qty.raw().to_le_bytes());
     buf.extend_from_slice(&order.timestamp.to_le_bytes());
     buf.extend_from_slice(&order.sequence.to_le_bytes());
     buf.extend_from_slice(&order.symbol.0.to_le_bytes());
@@ -175,29 +177,30 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
     let cumulative_qty = FixedQty::from_raw(u64::from_le_bytes(data[40..48].try_into().unwrap()));
     let expire_at = u64::from_le_bytes(data[48..56].try_into().unwrap());
     let trail_offset = FixedPrice::from_raw(i64::from_le_bytes(data[56..64].try_into().unwrap()));
-    let timestamp = u64::from_le_bytes(data[64..72].try_into().unwrap());
-    let sequence = u64::from_le_bytes(data[72..80].try_into().unwrap());
-    let symbol = SymbolId(u16::from_le_bytes(data[80..82].try_into().unwrap()));
-    let side = match data[82] {
+    let display_qty = FixedQty::from_raw(u64::from_le_bytes(data[64..72].try_into().unwrap()));
+    let timestamp = u64::from_le_bytes(data[72..80].try_into().unwrap());
+    let sequence = u64::from_le_bytes(data[80..88].try_into().unwrap());
+    let symbol = SymbolId(u16::from_le_bytes(data[88..90].try_into().unwrap()));
+    let side = match data[90] {
         0 => Side::Buy,
         1 => Side::Sell,
         v => return Err(format!("Invalid side: {v}")),
     };
-    let order_type = match data[83] {
+    let order_type = match data[91] {
         0 => OrderType::Limit,
         1 => OrderType::Market,
         2 => OrderType::StopLimit,
         3 => OrderType::StopMarket,
         v => return Err(format!("Invalid order type: {v}")),
     };
-    let tif = match data[84] {
+    let tif = match data[92] {
         0 => TimeInForce::GTC,
         1 => TimeInForce::IOC,
         2 => TimeInForce::FOK,
         3 => TimeInForce::GTD,
         v => return Err(format!("Invalid TIF: {v}")),
     };
-    let status = match data[85] {
+    let status = match data[93] {
         0 => OrderStatus::New,
         1 => OrderStatus::PartiallyFilled,
         2 => OrderStatus::Filled,
@@ -206,9 +209,9 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
         5 => OrderStatus::Triggered,
         v => return Err(format!("Invalid status: {v}")),
     };
-    let flags = data[86];
+    let flags = data[94];
     let mut session_bytes = [0u8; 16];
-    session_bytes.copy_from_slice(&data[87..103]);
+    session_bytes.copy_from_slice(&data[95..111]);
     let client_session_id = me_core::SessionId::from_bytes(session_bytes);
 
     Ok(Order {
@@ -220,6 +223,7 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
         cumulative_qty,
         expire_at,
         trail_offset,
+        display_qty,
         timestamp,
         sequence,
         symbol,
@@ -307,6 +311,27 @@ mod tests {
             WalCommand::PlaceOrder(o) => {
                 assert_eq!(o.tif, TimeInForce::GTD);
                 assert_eq!(o.expire_at, 1_700_000_000_000_000_000);
+            }
+            _ => panic!("Expected PlaceOrder"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_preserves_iceberg_and_trail() {
+        let order = Order::new_limit(
+            11,
+            SymbolId(3),
+            Side::Sell,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(100.0),
+            FixedQty::from_f64(10.0),
+            55,
+        )
+        .with_display_qty(FixedQty::from_f64(2.0));
+        match decode_wal_command(&encode_wal_command(&WalCommand::PlaceOrder(order))).unwrap() {
+            WalCommand::PlaceOrder(o) => {
+                assert_eq!(o.display_qty, FixedQty::from_f64(2.0));
+                assert!(o.is_iceberg());
             }
             _ => panic!("Expected PlaceOrder"),
         }

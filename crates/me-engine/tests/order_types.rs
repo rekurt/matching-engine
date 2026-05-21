@@ -848,3 +848,94 @@ fn test_gtd_future_expiry_not_swept() {
     assert!(expired.is_empty(), "future GTD must not be swept");
     assert_eq!(e.book().order_count(), 1);
 }
+
+// ─── Iceberg ─────────────────────────────────────────────────────────────────
+
+fn iceberg_sell(id: OrderId, price: f64, total: f64, display: f64) -> Command {
+    Command::PlaceOrder(
+        Order::new_limit(
+            id,
+            SymbolId(0),
+            Side::Sell,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(price),
+            FixedQty::from_f64(total),
+            id * 1000,
+        )
+        .with_display_qty(FixedQty::from_f64(display)),
+    )
+}
+
+#[test]
+fn test_iceberg_shows_only_display_and_replenishes() {
+    let mut e = setup();
+
+    // Iceberg sell: total 6, display 2 at price 100.
+    e.process(iceberg_sell(1, 100.0, 6.0, 2.0));
+    let resting = e.book().get_order(1).copied().expect("iceberg rests");
+    assert_eq!(
+        resting.remaining_qty,
+        FixedQty::from_f64(2.0),
+        "only the display slice is visible"
+    );
+    // Only the visible slice counts toward book liquidity at the price.
+    assert_eq!(
+        e.book().available_ask_qty(None),
+        FixedQty::from_f64(2.0),
+        "hidden reserve is not visible on the book"
+    );
+
+    // Buy 2 → fully fills the visible slice; engine replenishes the next slice.
+    let events = e.process(limit_buy(2, 100.0, 2.0)).to_vec();
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::OrderPartiallyFilled { order_id: 1, .. })),
+        "filled slice must report PartiallyFilled while a reserve remains"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::OrderFilled { order_id: 1, .. })),
+        "iceberg must not report Filled until the reserve is exhausted"
+    );
+    assert_eq!(
+        e.book().get_order(1).unwrap().remaining_qty,
+        FixedQty::from_f64(2.0),
+        "next slice replenished to display size"
+    );
+
+    // Two more buys of 2 exhaust the reserve (2 + 2 + 2 = 6).
+    e.process(limit_buy(3, 100.0, 2.0));
+    let events = e.process(limit_buy(4, 100.0, 2.0)).to_vec();
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::OrderFilled { order_id: 1, .. })),
+        "final slice fully fills → OrderFilled"
+    );
+    assert!(e.book().get_order(1).is_none(), "iceberg fully consumed");
+}
+
+#[test]
+fn test_iceberg_survives_snapshot_restore() {
+    use me_engine::engine::Engine;
+    let mut e = setup();
+    e.process(iceberg_sell(1, 100.0, 6.0, 2.0));
+    // Consume one slice so cumulative=2, reserve=4.
+    e.process(limit_buy(2, 100.0, 2.0));
+
+    // Snapshot + restore into a fresh engine.
+    let snap = e.snapshot();
+    let mut e2 = Engine::restore_from_snapshot(SymbolConfig::default_btc_usdt(), snap);
+    assert_eq!(
+        e2.book().get_order(1).unwrap().remaining_qty,
+        FixedQty::from_f64(2.0)
+    );
+
+    // Reserve must still replenish after restore.
+    e2.process(limit_buy(3, 100.0, 2.0)); // cumulative 4
+    assert!(e2.book().get_order(1).is_some(), "still replenishing");
+    e2.process(limit_buy(4, 100.0, 2.0)); // cumulative 6 → done
+    assert!(e2.book().get_order(1).is_none(), "exhausted after restore");
+}

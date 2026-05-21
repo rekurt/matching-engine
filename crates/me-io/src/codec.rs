@@ -473,6 +473,7 @@ pub fn decode_frame(
 ///   [+ Flags(1)]         = 38 bytes
 ///   [+ ExpireAt(8)]      = 46 bytes (GTD expiry, unix nanoseconds)
 ///   [+ TrailOffset(8)]   = 54 bytes (trailing-stop trail distance)
+///   [+ DisplayQty(8)]    = 62 bytes (iceberg visible slice)
 /// Older clients send 37/38 bytes; the extra fields default to 0.
 fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Command, DecodeError> {
     if payload.len() < 37 {
@@ -560,6 +561,20 @@ fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Com
         ));
     }
 
+    // Backward-compatible iceberg display size: bytes 54..62 if present, else 0.
+    let display_qty = if payload.len() >= 62 {
+        FixedQty::from_raw(u64::from_le_bytes(
+            payload[54..62].try_into().expect("PlaceOrder: display_qty"),
+        ))
+    } else {
+        FixedQty::ZERO
+    };
+    if display_qty.raw() > 0 && !matches!(order_type, OrderType::Limit) {
+        return Err(DecodeError::InvalidPayload(
+            "display_qty (iceberg) is only valid on limit orders".into(),
+        ));
+    }
+
     if matches!(order_type, OrderType::Limit | OrderType::StopLimit) && !price.is_positive() {
         return Err(DecodeError::InvalidPayload(
             "Limit/StopLimit order requires positive price".into(),
@@ -584,6 +599,7 @@ fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Com
         cumulative_qty: FixedQty::ZERO,
         expire_at,
         trail_offset,
+        display_qty,
         timestamp,
         sequence: 0,
         symbol,

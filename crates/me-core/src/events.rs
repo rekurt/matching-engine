@@ -132,6 +132,14 @@ impl EventBuffer {
         &self.events
     }
 
+    /// Mutable view of the buffered events. Used by the engine to rewrite a
+    /// fully-filled iceberg slice's `OrderFilled` into `OrderPartiallyFilled`
+    /// when a hidden reserve remains.
+    #[inline]
+    pub fn events_mut(&mut self) -> &mut [MatchEvent] {
+        &mut self.events
+    }
+
     #[inline]
     pub fn drain(&mut self) -> Vec<MatchEvent> {
         std::mem::take(&mut self.events)
