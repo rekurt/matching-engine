@@ -140,6 +140,13 @@ impl EventBuffer {
         &mut self.events
     }
 
+    /// Mutable access to the underlying vector — lets the engine remove and
+    /// re-summarize per-slice iceberg status events into a single event.
+    #[inline]
+    pub fn vec_mut(&mut self) -> &mut Vec<MatchEvent> {
+        &mut self.events
+    }
+
     #[inline]
     pub fn drain(&mut self) -> Vec<MatchEvent> {
         std::mem::take(&mut self.events)

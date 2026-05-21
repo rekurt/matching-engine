@@ -138,6 +138,15 @@ pub fn process_order(book: &mut OrderBook, mut order: Order, events: &mut EventB
 
 // ─── Limit order matching ────────────────────────────────────────────────────
 
+/// Match a replenished iceberg slice against the book and rest the remainder,
+/// WITHOUT emitting `OrderAccepted` or re-validating (the parent order was
+/// already accepted at submission). Routes through the same matching path as a
+/// normal limit order so a crossing slice executes instead of resting into a
+/// crossed book. Used by the engine's iceberg replenishment.
+pub fn rematch_limit(book: &mut OrderBook, order: &mut Order, events: &mut EventBuffer) {
+    match_limit(book, order, events);
+}
+
 fn match_limit(book: &mut OrderBook, order: &mut Order, events: &mut EventBuffer) {
     // FOK: check if we can fill entirely before doing anything
     if order.tif == TimeInForce::FOK {

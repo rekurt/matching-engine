@@ -135,10 +135,19 @@ impl Engine {
                     if order.is_iceberg()
                         && matches!(order.tif, TimeInForce::GTC | TimeInForce::GTD)
                     {
-                        self.icebergs.insert(order.id, order);
+                        let mark = self.events.len();
                         let mut slice = order;
                         slice.remaining_qty = order.display_qty; // visible slice
                         matching::process_order(&mut self.book, slice, &mut self.events);
+                        // Register the iceberg ONLY if the slice was accepted —
+                        // a validation rejection must not leave a tracked
+                        // template that replenish would later rest on the book.
+                        let rejected = self.events.events()[mark..].iter().any(|e| {
+                            matches!(e, MatchEvent::OrderRejected { order_id, .. } if *order_id == order.id)
+                        });
+                        if !rejected {
+                            self.icebergs.insert(order.id, order);
+                        }
                     } else {
                         matching::process_order(&mut self.book, order, &mut self.events);
                     }
@@ -200,68 +209,154 @@ impl Engine {
         self.events.events()
     }
 
-    /// Iceberg maintenance, run after matching:
-    /// 1. Accumulate this command's fills into each iceberg template's
-    ///    `cumulative_qty`, and drop fully-filled icebergs.
-    /// 2. For any iceberg whose visible slice left the book with a hidden
-    ///    reserve remaining, insert the next visible slice at the back of the
-    ///    queue and rewrite its `OrderFilled` into `OrderPartiallyFilled` (the
-    ///    order is not actually done while a reserve remains).
+    /// Iceberg maintenance, run after matching.
+    ///
+    /// Loop: fold this command's incremental fills into each tracked template's
+    /// `cumulative_qty`; for any iceberg whose visible slice has left the book
+    /// with a hidden reserve remaining, build the next slice and route it
+    /// through matching (`rematch_limit`) — NOT a bare insert — so a crossing
+    /// slice executes against remaining opposite liquidity instead of resting
+    /// into a crossed book. Repeat until every iceberg is resting or exhausted.
+    ///
+    /// Finally, collapse the per-slice maker/taker status events for each
+    /// touched iceberg id into a single summary event (`OrderPartiallyFilled`
+    /// if still resting, `OrderFilled` if fully done) so the client sees one
+    /// coherent status, not premature `OrderFilled`s per slice. `Trade` events
+    /// (the real executions) are preserved.
     fn replenish_icebergs(&mut self) {
         if self.icebergs.is_empty() {
             return;
         }
 
-        // 1. Fold incremental fills into the templates.
-        let mut fills: Vec<(OrderId, FixedQty)> = Vec::new();
-        for ev in self.events.events() {
-            match ev {
-                MatchEvent::OrderFilled {
-                    order_id,
-                    filled_qty,
-                    ..
-                }
-                | MatchEvent::OrderPartiallyFilled {
-                    order_id,
-                    filled_qty,
-                    ..
-                } if self.icebergs.contains_key(order_id) => {
-                    fills.push((*order_id, *filled_qty));
-                }
-                _ => {}
-            }
-        }
-        for (id, f) in fills {
-            if let Some(t) = self.icebergs.get_mut(&id) {
-                t.cumulative_qty += f;
-            }
-        }
-        // Done icebergs: the final slice fully filled — keep the OrderFilled.
-        self.icebergs.retain(|_, t| t.cumulative_qty < t.qty);
+        let mut touched: rustc_hash::FxHashSet<OrderId> = rustc_hash::FxHashSet::default();
+        let mut folded = 0usize;
 
-        // 2. Replenish slices whose visible portion left the book.
-        let candidates: Vec<OrderId> = self
-            .icebergs
+        loop {
+            // Fold only events appended since the last pass (avoid double count).
+            let mut fills: Vec<(OrderId, FixedQty)> = Vec::new();
+            {
+                let evs = self.events.events();
+                for ev in &evs[folded..] {
+                    match ev {
+                        MatchEvent::OrderFilled {
+                            order_id,
+                            filled_qty,
+                            ..
+                        }
+                        | MatchEvent::OrderPartiallyFilled {
+                            order_id,
+                            filled_qty,
+                            ..
+                        } if self.icebergs.contains_key(order_id) => {
+                            fills.push((*order_id, *filled_qty));
+                        }
+                        _ => {}
+                    }
+                }
+                folded = evs.len();
+            }
+            for (id, f) in fills {
+                if let Some(t) = self.icebergs.get_mut(&id) {
+                    t.cumulative_qty += f;
+                }
+                touched.insert(id);
+            }
+            // Drop fully-exhausted icebergs (final slice consumed).
+            self.icebergs.retain(|_, t| t.cumulative_qty < t.qty);
+
+            // Replenish slices whose visible portion left the book.
+            let candidates: Vec<OrderId> = self
+                .icebergs
+                .iter()
+                .filter(|(id, _)| !self.book.contains_order(**id))
+                .map(|(id, _)| *id)
+                .collect();
+            if candidates.is_empty() {
+                break;
+            }
+            for id in candidates {
+                let template = match self.icebergs.get(&id) {
+                    Some(t) => *t,
+                    None => continue,
+                };
+                let hidden = template.qty.saturating_sub(template.cumulative_qty);
+                if hidden.is_zero() {
+                    self.icebergs.remove(&id);
+                    continue;
+                }
+                let next = template.display_qty.min(hidden);
+                let mut slice = template;
+                slice.remaining_qty = next; // qty=total, cumulative=so-far preserved
+                touched.insert(id);
+                matching::rematch_limit(&mut self.book, &mut slice, &mut self.events);
+            }
+        }
+
+        self.reconcile_iceberg_events(&touched);
+    }
+
+    /// Collapse per-slice `OrderFilled`/`OrderPartiallyFilled` events for each
+    /// touched iceberg id into one summary event reflecting the final state.
+    fn reconcile_iceberg_events(&mut self, ids: &rustc_hash::FxHashSet<OrderId>) {
+        if ids.is_empty() {
+            return;
+        }
+        // Snapshot book state first to avoid borrowing self.book and the event
+        // vec simultaneously.
+        let book_state: rustc_hash::FxHashMap<OrderId, Option<FixedQty>> = ids
             .iter()
-            .filter(|(id, _)| !self.book.contains_order(**id))
-            .map(|(id, _)| *id)
+            .map(|id| (*id, self.book.get_order(*id).map(|o| o.remaining_qty)))
             .collect();
-        for id in candidates {
-            let template = match self.icebergs.get(&id) {
-                Some(t) => *t,
-                None => continue,
-            };
-            let hidden = template.qty.saturating_sub(template.cumulative_qty);
-            if hidden.is_zero() {
-                self.icebergs.remove(&id);
+
+        let evs = self.events.vec_mut();
+        // Aggregate (sum filled this command, last price, last timestamp) per id
+        // while removing the per-slice status events.
+        let mut agg: rustc_hash::FxHashMap<OrderId, (FixedQty, FixedPrice, u64)> =
+            rustc_hash::FxHashMap::default();
+        evs.retain(|e| match e {
+            MatchEvent::OrderFilled {
+                order_id,
+                filled_qty,
+                price,
+                timestamp,
+            }
+            | MatchEvent::OrderPartiallyFilled {
+                order_id,
+                filled_qty,
+                price,
+                timestamp,
+                ..
+            } if ids.contains(order_id) => {
+                let entry = agg
+                    .entry(*order_id)
+                    .or_insert((FixedQty::ZERO, *price, *timestamp));
+                entry.0 += *filled_qty;
+                entry.1 = *price;
+                entry.2 = *timestamp;
+                false
+            }
+            _ => true,
+        });
+
+        for (id, (sum, price, ts)) in agg {
+            if sum.is_zero() {
                 continue;
             }
-            let next = template.display_qty.min(hidden);
-            let mut slice = template;
-            slice.remaining_qty = next;
-            // back of queue: insert_order assigns a fresh sequence.
-            self.book.insert_order(slice);
-            transform_fill_to_partial(self.events.events_mut(), id, next);
+            match book_state.get(&id).copied().flatten() {
+                Some(remaining) => evs.push(MatchEvent::OrderPartiallyFilled {
+                    order_id: id,
+                    filled_qty: sum,
+                    remaining_qty: remaining,
+                    price,
+                    timestamp: ts,
+                }),
+                None => evs.push(MatchEvent::OrderFilled {
+                    order_id: id,
+                    filled_qty: sum,
+                    price,
+                    timestamp: ts,
+                }),
+            }
         }
     }
 
@@ -487,38 +582,5 @@ impl Engine {
 
         self.book.sequence = snapshot.sequence;
         self.book.trade_id_gen = snapshot.trade_id_gen;
-    }
-}
-
-/// Rewrite the first `OrderFilled` for `order_id` into an `OrderPartiallyFilled`
-/// with the given `remaining_qty`. Used when an iceberg's visible slice fully
-/// fills but a hidden reserve remains, so the client does not see the order as
-/// complete prematurely.
-fn transform_fill_to_partial(
-    events: &mut [MatchEvent],
-    order_id: OrderId,
-    remaining_qty: FixedQty,
-) {
-    for ev in events.iter_mut() {
-        let MatchEvent::OrderFilled {
-            order_id: id,
-            filled_qty,
-            price,
-            timestamp,
-        } = *ev
-        else {
-            continue;
-        };
-        if id != order_id {
-            continue;
-        }
-        *ev = MatchEvent::OrderPartiallyFilled {
-            order_id: id,
-            filled_qty,
-            remaining_qty,
-            price,
-            timestamp,
-        };
-        return;
     }
 }

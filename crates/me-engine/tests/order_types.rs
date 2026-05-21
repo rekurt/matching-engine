@@ -939,3 +939,72 @@ fn test_iceberg_survives_snapshot_restore() {
     e2.process(limit_buy(4, 100.0, 2.0)); // cumulative 6 → done
     assert!(e2.book().get_order(1).is_none(), "exhausted after restore");
 }
+
+#[test]
+fn test_rejected_iceberg_does_not_rest() {
+    let mut e = setup();
+    // qty 0.000015 is not a multiple of the 0.00001 lot step → InvalidLotSize.
+    let bad = Order::new_limit(
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_raw(1_500),
+        1000,
+    )
+    .with_display_qty(FixedQty::from_raw(1_000));
+    let events = e.process(Command::PlaceOrder(bad)).to_vec();
+    assert!(events
+        .iter()
+        .any(|ev| matches!(ev, MatchEvent::OrderRejected { .. })));
+    assert_eq!(e.book().order_count(), 0, "rejected iceberg must not rest");
+
+    // A follow-up command must not resurrect a phantom slice.
+    e.process(limit_sell(2, 101.0, 1.0));
+    assert!(e.book().get_order(1).is_none());
+}
+
+#[test]
+fn test_aggressive_iceberg_fully_crosses_without_crossed_book() {
+    let mut e = setup();
+    // Resting ask of 5 @ 100.
+    e.process(limit_sell(1, 100.0, 5.0));
+
+    // Iceberg BUY that crosses: total 5, display 1, limit 100. It must fully
+    // execute against the ask via re-matched slices, not rest into a crossed book.
+    let ice = Order::new_limit(
+        2,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_f64(5.0),
+        2000,
+    )
+    .with_display_qty(FixedQty::from_f64(1.0));
+    let events = e.process(Command::PlaceOrder(ice)).to_vec();
+
+    let traded: f64 = events
+        .iter()
+        .filter_map(|ev| match ev {
+            MatchEvent::Trade(t) => Some(t.qty.raw() as f64),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(
+        traded,
+        FixedQty::from_f64(5.0).raw() as f64,
+        "all 5 execute"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::OrderFilled { order_id: 2, .. })),
+        "iceberg reports a single terminal OrderFilled"
+    );
+    // No crossed book — everything matched.
+    assert_eq!(e.book().order_count(), 0);
+    assert_eq!(e.book().best_bid(), None);
+    assert_eq!(e.book().best_ask(), None);
+}
