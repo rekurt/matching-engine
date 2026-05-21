@@ -104,6 +104,29 @@ impl WalWriter {
         Ok(seq)
     }
 
+    /// Append a command WITHOUT fsyncing. The record is written into the OS
+    /// page cache only; the caller is responsible for calling [`sync`] to make
+    /// it durable. Used by the shard's group-commit path, which batches many
+    /// records and fsyncs once per batch.
+    ///
+    /// [`sync`]: WalWriter::sync
+    pub fn append_nosync(&mut self, command: &WalCommand) -> io::Result<u64> {
+        self.sequence += 1;
+        let seq = self.sequence;
+
+        let cmd_bytes = codec::encode_wal_command(command);
+        let crc = crc32fast::hash(&cmd_bytes);
+        let len = cmd_bytes.len() as u32;
+
+        self.writer.write_all(&len.to_le_bytes())?;
+        self.writer.write_all(&crc.to_le_bytes())?;
+        self.writer.write_all(&seq.to_le_bytes())?;
+        self.writer.write_all(&cmd_bytes)?;
+        self.writes_since_sync += 1;
+
+        Ok(seq)
+    }
+
     /// Flush the buffer AND fsync to physical storage.
     ///
     /// `BufWriter::flush` alone only pushes bytes into the OS page cache; a

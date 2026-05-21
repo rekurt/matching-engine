@@ -7,6 +7,17 @@ use std::time::Duration;
 /// stalled disk during WAL fsync) so it cannot hang every client thread.
 const SHARD_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Maximum number of commands a Pre-mode shard accumulates before forcing a
+/// group-commit fsync. Bounds how long a reply can be deferred and how much
+/// memory pending replies hold. Under load the queue rarely drains, so most
+/// fsyncs amortize across a full batch; under light load the queue empties and
+/// the batch commits immediately (no added latency).
+const MAX_GROUP_BATCH: usize = 4096;
+
+/// A processed command awaiting durable commit: (reply channel, order id for an
+/// InternalError reply if the commit fsync fails, the success events).
+type PendingReply = (Sender<Vec<MatchEvent>>, OrderId, Vec<MatchEvent>);
+
 use crossbeam_channel::{bounded, Receiver, Sender};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, info_span, trace};
@@ -525,10 +536,22 @@ fn shard_worker_loop(
     }
     let mut commands_since_snapshot: u64 = 0;
 
+    // Group commit applies only to Pre-mode (the mode that must fsync before
+    // acknowledging). Post/Disabled keep their existing immediate-reply path.
+    let group_commit = wal_mode == WalMode::Pre && wal.is_some();
+    let mut pending: Vec<PendingReply> = Vec::new();
+
     while let Ok(msg) = rx.recv() {
+        // Flush any deferred group-commit batch before handling a control
+        // message, so replies stay ordered and durability is committed at
+        // message boundaries.
+        if !matches!(msg, ShardMsg::Command { .. }) && !pending.is_empty() {
+            commit_and_flush(shard_id, &mut wal, &mut engines, &mut pending);
+        }
         match msg {
             ShardMsg::Command { cmd, reply } => {
                 let symbol = cmd.symbol();
+                let reply_order_id = cmd_order_id(&cmd);
                 let sym_name = symbol_names
                     .get(&symbol)
                     .map(|s| s.as_str())
@@ -579,7 +602,9 @@ fn shard_worker_loop(
                 if wal_mode == WalMode::Pre {
                     if let Some(ref mut w) = wal {
                         let wal_cmd = command_to_wal(&cmd);
-                        if let Err(e) = w.append(&wal_cmd) {
+                        // Buffered append only; the batch is fsynced once in
+                        // commit_and_flush before any reply is released.
+                        if let Err(e) = w.append_nosync(&wal_cmd) {
                             tracing::error!(
                                 shard_id, error = %e,
                                 "WAL PRE-WRITE FAILED — rejecting order (durability violated)"
@@ -757,27 +782,43 @@ fn shard_worker_loop(
                     "command processed"
                 );
 
-                if reply.send(events).is_err() {
-                    // Caller timed out / dropped receiver. Events were
-                    // applied to state (book updated, WAL written, audit
-                    // logged) — risk of client-server inconsistency.
-                    tracing::warn!(
-                        shard_id,
-                        symbol = sym_name,
-                        "reply dropped: caller lost response AFTER state mutation"
-                    );
-                }
+                commands_since_snapshot += 1;
 
-                // Periodic snapshot of all symbols on this shard, then WAL
-                // truncation to bound replay time and file growth.
-                if snapshot_interval > 0 {
-                    if let Some(ref mgr) = snapshot_mgr {
-                        commands_since_snapshot += 1;
-                        if commands_since_snapshot >= snapshot_interval {
-                            take_shard_snapshot(shard_id, &engines, &mut wal, mgr);
-                            commands_since_snapshot = 0;
-                        }
+                if group_commit {
+                    // Defer the reply until the batch is fsynced. Commit when
+                    // the batch is full or the inbound queue has drained (so a
+                    // lone command under light load still acks immediately).
+                    pending.push((reply, reply_order_id, events));
+                    if pending.len() >= MAX_GROUP_BATCH || rx.is_empty() {
+                        commit_and_flush(shard_id, &mut wal, &mut engines, &mut pending);
+                        maybe_snapshot(
+                            shard_id,
+                            snapshot_interval,
+                            &mut commands_since_snapshot,
+                            &engines,
+                            &mut wal,
+                            &snapshot_mgr,
+                        );
                     }
+                } else {
+                    if reply.send(events).is_err() {
+                        // Caller timed out / dropped receiver. Events were
+                        // applied to state (book updated, WAL written, audit
+                        // logged) — risk of client-server inconsistency.
+                        tracing::warn!(
+                            shard_id,
+                            symbol = sym_name,
+                            "reply dropped: caller lost response AFTER state mutation"
+                        );
+                    }
+                    maybe_snapshot(
+                        shard_id,
+                        snapshot_interval,
+                        &mut commands_since_snapshot,
+                        &engines,
+                        &mut wal,
+                        &snapshot_mgr,
+                    );
                 }
             }
             ShardMsg::QueryOrder {
@@ -883,6 +924,12 @@ fn shard_worker_loop(
             }
             ShardMsg::Shutdown => break,
         }
+    }
+
+    // Commit any deferred group-commit batch before exiting so in-flight
+    // callers get their replies and the records are made durable.
+    if !pending.is_empty() {
+        commit_and_flush(shard_id, &mut wal, &mut engines, &mut pending);
     }
 
     // Flush WAL on shutdown
@@ -1052,6 +1099,84 @@ fn recover_symbol(
     }
 
     (engine.book().order_count() + engine.stop_book().len()) as u32
+}
+
+/// Group-commit: fsync the WAL once for the whole pending batch, then release
+/// all deferred replies. The Pre-mode durability contract holds because a
+/// success reply is only sent AFTER its record is durable.
+///
+/// If the fsync fails the batch is NOT durable even though the books were
+/// already mutated in memory. We fail every pending command with
+/// `InternalError` (so clients retry rather than assume success) and halt all
+/// engines on the shard so no further un-journaled trades occur until an
+/// operator intervenes. On restart, recovery rebuilds state from the durable
+/// WAL/snapshot only — consistent with the InternalError the clients saw.
+fn commit_and_flush(
+    shard_id: usize,
+    wal: &mut Option<WalWriter>,
+    engines: &mut FxHashMap<SymbolId, Engine>,
+    pending: &mut Vec<PendingReply>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+
+    let durable = match wal.as_mut() {
+        Some(w) => match w.sync() {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!(
+                    shard_id,
+                    error = %e,
+                    batch = pending.len(),
+                    "GROUP COMMIT FSYNC FAILED — failing batch and halting shard engines"
+                );
+                false
+            }
+        },
+        None => true, // WAL disabled: nothing to fsync.
+    };
+
+    if durable {
+        for (reply, _order_id, events) in pending.drain(..) {
+            if reply.send(events).is_err() {
+                tracing::warn!(shard_id, "reply dropped after durable commit");
+            }
+        }
+    } else {
+        for engine in engines.values_mut() {
+            engine.halt_trading();
+        }
+        for (reply, order_id, _events) in pending.drain(..) {
+            let _ = reply.send(vec![MatchEvent::OrderRejected {
+                order_id,
+                reason: RejectReason::InternalError,
+                timestamp: 0,
+            }]);
+        }
+    }
+}
+
+/// Periodic snapshot trigger shared by the group-commit and immediate-reply
+/// paths. Snapshots all symbols and truncates the WAL once the command counter
+/// reaches the configured interval.
+fn maybe_snapshot(
+    shard_id: usize,
+    snapshot_interval: u64,
+    commands_since_snapshot: &mut u64,
+    engines: &FxHashMap<SymbolId, Engine>,
+    wal: &mut Option<WalWriter>,
+    snapshot_mgr: &Option<SnapshotManager>,
+) {
+    if snapshot_interval == 0 {
+        return;
+    }
+    if let Some(mgr) = snapshot_mgr {
+        if *commands_since_snapshot >= snapshot_interval {
+            take_shard_snapshot(shard_id, engines, wal, mgr);
+            *commands_since_snapshot = 0;
+        }
+    }
 }
 
 /// Snapshot every symbol on the shard at the current WAL watermark, then (only
