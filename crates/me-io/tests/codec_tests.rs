@@ -280,6 +280,22 @@ fn test_decode_display_qty_on_non_limit_rejected() {
     assert!(decode_frame(&frame, &mut conn, &SYS_CLK).is_err());
 }
 
+#[test]
+fn test_decode_negative_trail_offset_rejected() {
+    let mut conn = active_conn();
+    let stop_raw = FixedPrice::from_f64(95.0).raw();
+    let qty_raw = FixedQty::from_f64(1.0).raw();
+    // StopMarket (type=3) with a NEGATIVE trail_offset → rejected. A negative
+    // trail is nonsensical and would otherwise be silently treated as a fixed
+    // stop (is_trailing_stop only checks > 0).
+    let mut payload = place_order_payload(8, 1, 1, 3, 0, 0, stop_raw, qty_raw);
+    payload.push(0u8); // flags
+    payload.extend_from_slice(&0u64.to_le_bytes()); // expire_at
+    payload.extend_from_slice(&(-5_00000000i64).to_le_bytes()); // negative trail
+    let frame = make_frame(0x01, 2, &payload);
+    assert!(decode_frame(&frame, &mut conn, &SYS_CLK).is_err());
+}
+
 // ─── BatchPlaceOrder ─────────────────────────────────────────────────────────
 
 #[test]

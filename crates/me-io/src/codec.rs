@@ -554,6 +554,13 @@ fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Com
     } else {
         FixedPrice::ZERO
     };
+    // A negative trail is nonsensical and would otherwise be silently treated
+    // as a fixed stop (is_trailing_stop only checks > 0).
+    if trail_offset.raw() < 0 {
+        return Err(DecodeError::InvalidPayload(
+            "trail_offset must be non-negative".into(),
+        ));
+    }
     let is_trailing = trail_offset.raw() > 0;
     if is_trailing && !matches!(order_type, OrderType::StopLimit | OrderType::StopMarket) {
         return Err(DecodeError::InvalidPayload(
