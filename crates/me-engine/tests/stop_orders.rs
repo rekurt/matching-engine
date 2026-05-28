@@ -269,3 +269,84 @@ fn test_trailing_sell_stop_ratchets_and_fills() {
     );
     assert_eq!(e.stop_book().len(), 0);
 }
+
+fn trailing_buy_stop(id: OrderId, init_stop: f64, trail: f64, qty: f64) -> Command {
+    Command::PlaceOrder(
+        Order::new_stop_market(
+            id,
+            SymbolId(0),
+            Side::Buy,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(init_stop),
+            FixedQty::from_f64(qty),
+            id * 1000,
+        )
+        .with_trail_offset(FixedPrice::from_f64(trail)),
+    )
+}
+
+#[test]
+fn test_trailing_buy_stop_ratchets_and_fills() {
+    let mut e = setup();
+
+    // Trailing buy stop (protective for a short): initial stop 105, trail 5.
+    e.process(trailing_buy_stop(1, 105.0, 5.0, 1.0));
+    assert_eq!(e.stop_book().len(), 1);
+
+    // Trade at 90 → stop ratchets DOWN to min(105, 90+5) = 95.
+    e.process(limit_buy(2, 90.0, 1.0));
+    e.process(limit_sell(3, 90.0, 1.0));
+    assert_eq!(e.stop_book().len(), 1, "no trigger while market falls");
+
+    // Rest an ask at 95, then a buy lifts it → trade at 95 reaches the ratcheted
+    // stop → trailing buy triggers, converts to a market buy, fills the rest.
+    e.process(limit_sell(4, 95.0, 2.0));
+    let events = e.process(limit_buy(5, 95.0, 1.0)).to_vec();
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::StopTriggered { order_id: 1, .. })),
+        "trailing buy stop must trigger at the ratcheted level"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::Trade(t) if t.taker_order_id == 1)),
+        "triggered trailing buy stop must trade"
+    );
+    assert_eq!(e.stop_book().len(), 0);
+}
+
+#[test]
+fn test_trailing_stop_survives_snapshot_with_ratcheted_price() {
+    let mut e = setup();
+    e.process(trailing_sell_stop(1, 95.0, 5.0, 1.0));
+    // Ratchet the stop up to 105 via a trade at 110.
+    e.process(limit_sell(2, 110.0, 1.0));
+    e.process(limit_buy(3, 110.0, 1.0));
+
+    // Snapshot + restore into a fresh engine.
+    let snap = e.snapshot();
+    let mut e2 = Engine::restore_from_snapshot(SymbolConfig::default_btc_usdt(), snap);
+    assert_eq!(e2.stop_book().len(), 1, "trailing stop restored");
+
+    // The ratcheted level (105) must survive: a pullback to 106 does NOT trigger,
+    // but a drop to 105 does — proving stop_price == 105, not the initial 95.
+    e2.process(limit_buy(4, 106.0, 1.0));
+    e2.process(limit_sell(5, 106.0, 1.0)); // trade at 106
+    assert_eq!(
+        e2.stop_book().len(),
+        1,
+        "106 > ratcheted stop 105 → no trigger"
+    );
+
+    e2.process(limit_buy(6, 105.0, 2.0));
+    let events = e2.process(limit_sell(7, 105.0, 1.0)).to_vec(); // trade at 105
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::StopTriggered { order_id: 1, .. })),
+        "restored trailing stop triggers at the ratcheted 105, proving the ratchet survived"
+    );
+    assert_eq!(e2.stop_book().len(), 0);
+}

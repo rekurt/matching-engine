@@ -98,10 +98,10 @@ impl Engine {
                     return self.events.events();
                 }
 
-                // Track GTD expiry before the order is moved into a book.
-                if order.is_gtd() && order.expire_at != 0 {
-                    self.gtd_expiry.push(Reverse((order.expire_at, order.id)));
-                }
+                // Snapshot the event count so that, after processing, we can
+                // tell whether this order was rejected — the GTD expiry enqueue
+                // is deferred until acceptance (see the end of this arm).
+                let events_start = self.events.len();
 
                 if order.is_stop() {
                     // Route stop orders to stop book
@@ -152,6 +152,19 @@ impl Engine {
                         matching::process_order(&mut self.book, order, &mut self.events);
                     }
                     self.check_stop_triggers();
+                }
+
+                // Enqueue GTD expiry only after acceptance: a rejected
+                // submission (bad lot/tick, duplicate, self-trade) must not
+                // leave a stale heap entry, which would otherwise accumulate
+                // unbounded under repeated bad input with a far-future expiry.
+                if order.is_gtd() && order.expire_at != 0 {
+                    let rejected = self.events.events()[events_start..].iter().any(|e| {
+                        matches!(e, MatchEvent::OrderRejected { order_id, .. } if *order_id == order.id)
+                    });
+                    if !rejected {
+                        self.gtd_expiry.push(Reverse((order.expire_at, order.id)));
+                    }
                 }
             }
             Command::CancelOrder {
@@ -265,7 +278,7 @@ impl Engine {
             self.icebergs.retain(|_, t| t.cumulative_qty < t.qty);
 
             // Replenish slices whose visible portion left the book.
-            let candidates: Vec<OrderId> = self
+            let mut candidates: Vec<OrderId> = self
                 .icebergs
                 .iter()
                 .filter(|(id, _)| !self.book.contains_order(**id))
@@ -274,6 +287,10 @@ impl Engine {
             if candidates.is_empty() {
                 break;
             }
+            // Canonical order (by id) so simultaneous replenishment assigns queue
+            // priority deterministically across replicas and WAL replay, not by
+            // HashMap iteration order.
+            candidates.sort_unstable();
             for id in candidates {
                 let template = match self.icebergs.get(&id) {
                     Some(t) => *t,
@@ -301,11 +318,20 @@ impl Engine {
         if ids.is_empty() {
             return;
         }
-        // Snapshot book state first to avoid borrowing self.book and the event
-        // vec simultaneously.
-        let book_state: rustc_hash::FxHashMap<OrderId, Option<FixedQty>> = ids
+        // Snapshot the TRUE residual per iceberg first, to avoid borrowing the
+        // iceberg map and the event vec simultaneously. The residual is
+        // `qty - cumulative_qty` (visible slice + hidden reserve) — what the
+        // order owner is still working, NOT the visible slice on the book. An id
+        // no longer tracked has been fully exhausted (residual = None → Filled).
+        let true_remaining: rustc_hash::FxHashMap<OrderId, Option<FixedQty>> = ids
             .iter()
-            .map(|id| (*id, self.book.get_order(*id).map(|o| o.remaining_qty)))
+            .map(|id| {
+                let rem = self
+                    .icebergs
+                    .get(id)
+                    .map(|t| t.qty.saturating_sub(t.cumulative_qty));
+                (*id, rem)
+            })
             .collect();
 
         let evs = self.events.vec_mut();
@@ -338,11 +364,15 @@ impl Engine {
             _ => true,
         });
 
-        for (id, (sum, price, ts)) in agg {
+        // Emit summaries in canonical id order so the output event sequence is
+        // deterministic across replicas and WAL replay (HashMap iteration is not).
+        let mut summaries: Vec<(OrderId, (FixedQty, FixedPrice, u64))> = agg.into_iter().collect();
+        summaries.sort_unstable_by_key(|(id, _)| *id);
+        for (id, (sum, price, ts)) in summaries {
             if sum.is_zero() {
                 continue;
             }
-            match book_state.get(&id).copied().flatten() {
+            match true_remaining.get(&id).copied().flatten() {
                 Some(remaining) => evs.push(MatchEvent::OrderPartiallyFilled {
                     order_id: id,
                     filled_qty: sum,
@@ -485,6 +515,13 @@ impl Engine {
     /// Mutable access to the stop book (for recovery/restore).
     pub fn stop_book_mut(&mut self) -> &mut StopBook {
         &mut self.stop_book
+    }
+
+    /// Number of pending GTD expiry entries (for metrics/observability). May
+    /// include stale entries for orders that have since filled or cancelled;
+    /// those are skipped harmlessly by the sweep.
+    pub fn gtd_pending(&self) -> usize {
+        self.gtd_expiry.len()
     }
 
     /// Get the symbol config.

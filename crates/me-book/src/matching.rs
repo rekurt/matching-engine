@@ -36,6 +36,22 @@ pub fn validate_order(order: &Order, config: &SymbolConfig) -> Option<RejectReas
     if !order.qty.is_multiple_of(config.qty_step) {
         return Some(RejectReason::InvalidLotSize);
     }
+    // Iceberg display slice: when set it must be a strict slice (< total) that
+    // itself meets the symbol minimum — otherwise a sub-min or no-op "iceberg"
+    // would rest silently with the wrong intent. It also only makes sense on a
+    // resting TIF (GTC/GTD); on IOC/FOK there is no reserve to hide.
+    if order.display_qty.raw() > 0 {
+        if !matches!(order.tif, TimeInForce::GTC | TimeInForce::GTD) {
+            return Some(RejectReason::InvalidQuantity);
+        }
+        if order.display_qty < config.min_qty || order.display_qty >= order.qty {
+            return Some(RejectReason::InvalidQuantity);
+        }
+        // The visible slice rests on the book, so it must obey the lot step.
+        if !order.display_qty.is_multiple_of(config.qty_step) {
+            return Some(RejectReason::InvalidLotSize);
+        }
+    }
 
     // Price validations (only for limit and stop-limit orders)
     match order.order_type {

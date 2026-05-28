@@ -1008,3 +1008,277 @@ fn test_aggressive_iceberg_fully_crosses_without_crossed_book() {
     assert_eq!(e.book().best_bid(), None);
     assert_eq!(e.book().best_ask(), None);
 }
+
+#[test]
+fn test_iceberg_display_below_min_qty_rejected() {
+    // A visible slice below the symbol minimum would rest a sub-min order on the
+    // book. The order must be rejected, not silently rested.
+    let mut e = setup();
+    let bad = Order::new_limit(
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_f64(10.0),
+        1000,
+    )
+    .with_display_qty(FixedQty::from_raw(500)); // 0.000005 < min_qty (0.00001)
+    let events = e.process(Command::PlaceOrder(bad)).to_vec();
+    assert!(
+        has_reject(&events, RejectReason::InvalidQuantity),
+        "iceberg display slice below min_qty must be rejected"
+    );
+    assert_eq!(e.book().order_count(), 0, "rejected iceberg must not rest");
+}
+
+#[test]
+fn test_iceberg_display_off_lot_step_rejected() {
+    // The visible slice rests on the book, so it must obey the lot step like any
+    // resting order. total 10 (valid), display 0.000015 (1500 raw) is not a
+    // multiple of the 0.00001 step → reject, do not rest an off-step slice.
+    let mut e = setup();
+    let bad = Order::new_limit(
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_f64(10.0),
+        1000,
+    )
+    .with_display_qty(FixedQty::from_raw(1_500));
+    let events = e.process(Command::PlaceOrder(bad)).to_vec();
+    assert!(
+        has_reject(&events, RejectReason::InvalidLotSize),
+        "off-step display slice must be rejected"
+    );
+    assert_eq!(e.book().order_count(), 0);
+}
+
+#[test]
+fn test_iceberg_display_not_below_total_rejected() {
+    // display_qty must be a strict slice (< total). display == total is not an
+    // iceberg; reject rather than silently resting as a fully-visible order.
+    let mut e = setup();
+    let bad = Order::new_limit(
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_f64(5.0),
+        1000,
+    )
+    .with_display_qty(FixedQty::from_f64(5.0));
+    let events = e.process(Command::PlaceOrder(bad)).to_vec();
+    assert!(
+        has_reject(&events, RejectReason::InvalidQuantity),
+        "display_qty >= total must be rejected"
+    );
+    assert_eq!(e.book().order_count(), 0);
+}
+
+#[test]
+fn test_iceberg_partial_fill_reports_true_remaining() {
+    // The order owner's fill event must reflect the TRUE residual
+    // (qty - cumulative), including the hidden reserve — not just the visible
+    // slice. Reporting the slice size understates the owner's working quantity
+    // and breaks client-side position/risk tracking.
+    let mut e = setup();
+    e.process(iceberg_sell(1, 100.0, 6.0, 2.0)); // total 6, display 2
+
+    // Fill the first visible slice (2). 4 remain (2 re-shown + 2 hidden).
+    let events = e.process(limit_buy(2, 100.0, 2.0)).to_vec();
+    let remaining = events.iter().find_map(|ev| match ev {
+        MatchEvent::OrderPartiallyFilled {
+            order_id: 1,
+            remaining_qty,
+            ..
+        } => Some(*remaining_qty),
+        _ => None,
+    });
+    assert_eq!(
+        remaining,
+        Some(FixedQty::from_f64(4.0)),
+        "iceberg must report true remaining (qty - cumulative), not the visible slice"
+    );
+}
+
+#[test]
+fn test_rejected_gtd_does_not_leak_expiry_entry() {
+    // A GTD order that is rejected (here: off-step lot size) must NOT leave a
+    // stale entry in the expiry heap — otherwise repeated bad input with a
+    // far-future expiry grows the heap and sweep work unbounded (DoS).
+    let mut e = setup();
+    let bad = Order::new_limit(
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTD,
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_raw(1_500), // not a multiple of the 1000 lot step
+        1000,
+    )
+    .with_expiry(u64::MAX);
+    let events = e.process(Command::PlaceOrder(bad)).to_vec();
+    assert!(has_reject(&events, RejectReason::InvalidLotSize));
+    assert_eq!(
+        e.gtd_pending(),
+        0,
+        "rejected GTD must not enqueue an expiry entry"
+    );
+}
+
+#[test]
+fn test_accepted_gtd_enqueues_expiry_entry() {
+    // Guard against over-correction: an accepted GTD order must still be tracked.
+    let mut e = setup();
+    e.process(gtd_buy(1, 100.0, 1.0, u64::MAX));
+    assert_eq!(e.gtd_pending(), 1, "accepted GTD is tracked for expiry");
+}
+
+#[test]
+fn test_iceberg_display_on_ioc_rejected() {
+    // Iceberg semantics require a resting TIF (GTC/GTD): the hidden reserve
+    // replenishes over time. display_qty on an immediate-or-cancel order is
+    // meaningless and must be rejected, not silently ignored.
+    let mut e = setup();
+    let bad = Order::new_limit(
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::IOC,
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_f64(6.0),
+        1000,
+    )
+    .with_display_qty(FixedQty::from_f64(2.0));
+    let events = e.process(Command::PlaceOrder(bad)).to_vec();
+    assert!(
+        has_reject(&events, RejectReason::InvalidQuantity),
+        "display_qty on a non-resting TIF must be rejected"
+    );
+    assert_eq!(e.book().order_count(), 0);
+}
+
+#[test]
+fn test_iceberg_total_not_multiple_of_display() {
+    // total 5, display 2 → slices 2, 2, 1. The final short slice (min(display,
+    // hidden)) must fill and the iceberg must complete exactly.
+    let mut e = setup();
+    e.process(iceberg_sell(1, 100.0, 5.0, 2.0));
+    e.process(limit_buy(2, 100.0, 2.0)); // cum 2
+    e.process(limit_buy(3, 100.0, 2.0)); // cum 4, reserve 1
+    assert_eq!(
+        e.book().get_order(1).unwrap().remaining_qty,
+        FixedQty::from_f64(1.0),
+        "final slice is the 1-unit remainder, not a full display"
+    );
+    let events = e.process(limit_buy(4, 100.0, 1.0)).to_vec();
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::OrderFilled { order_id: 1, .. })),
+        "remainder slice fills → OrderFilled"
+    );
+    assert!(e.book().get_order(1).is_none(), "iceberg fully consumed");
+}
+
+#[test]
+fn test_iceberg_emits_single_status_with_correct_filled_qty() {
+    // Per-slice OrderFilled/PartiallyFilled events must be collapsed into ONE
+    // status event per command, carrying the correct aggregate filled_qty — no
+    // per-slice duplicates may leak to the client.
+    let mut e = setup();
+    e.process(iceberg_sell(1, 100.0, 6.0, 2.0));
+    let events = e.process(limit_buy(2, 100.0, 2.0)).to_vec();
+    let status: Vec<&MatchEvent> = events
+        .iter()
+        .filter(|ev| {
+            matches!(
+                ev,
+                MatchEvent::OrderFilled { order_id: 1, .. }
+                    | MatchEvent::OrderPartiallyFilled { order_id: 1, .. }
+            )
+        })
+        .collect();
+    assert_eq!(status.len(), 1, "exactly one status event per command");
+    match status[0] {
+        MatchEvent::OrderPartiallyFilled { filled_qty, .. } => {
+            assert_eq!(*filled_qty, FixedQty::from_f64(2.0), "aggregate filled_qty");
+        }
+        other => panic!("expected PartiallyFilled, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_iceberg_gtd_expiry_drops_reserve() {
+    // An iceberg that is also GTD must, on expiry, be cancelled AND have its
+    // hidden reserve dropped — a later trade must not resurrect a phantom slice.
+    let mut e = setup();
+    let ice = Order::new_limit(
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTD,
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_f64(6.0),
+        1000,
+    )
+    .with_expiry(1) // already-past expiry (SystemClock now > 1 ns)
+    .with_display_qty(FixedQty::from_f64(2.0));
+    e.process(Command::PlaceOrder(ice));
+    e.process(limit_buy(2, 100.0, 2.0)); // fill one slice → reserve 4 tracked
+    assert!(e.book().get_order(1).is_some());
+
+    let expired = e.expire_gtd_now();
+    assert!(
+        expired
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::OrderCancelled { order_id: 1, .. })),
+        "expired GTD iceberg must be cancelled"
+    );
+    assert!(e.book().get_order(1).is_none());
+
+    // No phantom replenishment after expiry.
+    e.process(limit_buy(3, 100.0, 2.0));
+    assert!(
+        e.book().get_order(1).is_none(),
+        "expired iceberg must not replenish"
+    );
+}
+
+#[test]
+fn test_two_icebergs_same_price_replenish_deterministically() {
+    // Two iceberg sells at the SAME price, each with a hidden reserve. One
+    // incoming buy sweeps both visible slices in a single command, forcing BOTH
+    // to replenish within that command. Replenishment order must be canonical
+    // (by order id), not HashMap-iteration order — otherwise two replicas or a
+    // WAL replay could assign different queue priority to the two replenished
+    // slices and diverge. The lower id must regain time priority.
+    let mut e = setup();
+    e.process(iceberg_sell(1, 100.0, 4.0, 2.0)); // total 4, display 2, reserve 2
+    e.process(iceberg_sell(2, 100.0, 4.0, 2.0));
+
+    // Sweep both visible slices (2 + 2 = 4) → both replenish their reserve.
+    e.process(limit_buy(10, 100.0, 4.0));
+    assert!(e.book().get_order(1).is_some(), "iceberg 1 replenished");
+    assert!(e.book().get_order(2).is_some(), "iceberg 2 replenished");
+
+    // A follow-up buy of exactly one display slice must hit the LOWER id first
+    // (canonical time priority after a simultaneous replenish).
+    let events = e.process(limit_buy(11, 100.0, 2.0)).to_vec();
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::Trade(t) if t.maker_order_id == 1)),
+        "lower-id iceberg must regain queue priority deterministically"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::Trade(t) if t.maker_order_id == 2)),
+        "higher-id iceberg must not match before the lower-id one"
+    );
+}
