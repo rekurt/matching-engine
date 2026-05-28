@@ -158,13 +158,25 @@ fn encode_order(order: &Order, buf: &mut Vec<u8>) {
     buf.extend_from_slice(order.client_session_id.as_bytes());
 }
 
+/// Size of the pre-trailing/iceberg encoded order (v4): expire_at present, but
+/// no trail_offset/display_qty. A WAL written by the previous release still
+/// carries these shorter records; decoding them by length (defaulting the two
+/// new fields to zero) lets recovery replay them instead of mistaking the
+/// shorter record for a torn tail and truncating the WAL.
+const ORDER_ENCODED_SIZE_V4: usize = 95;
+
 fn decode_order(data: &[u8]) -> Result<Order, String> {
     use me_core::order::{OrderStatus, OrderType, TimeInForce};
     use me_core::types::Side;
 
-    if data.len() < ORDER_ENCODED_SIZE {
+    // The v4 and current layouts share the byte 0..56 prefix (id..expire_at).
+    // The current layout then inserts trail_offset(8)+display_qty(8) before the
+    // tail (timestamp..session), so the tail is shifted by exactly 16 bytes.
+    // `tail` is where that common tail begins for the detected layout.
+    let extended = data.len() >= ORDER_ENCODED_SIZE;
+    if !extended && data.len() < ORDER_ENCODED_SIZE_V4 {
         return Err(format!(
-            "Order data too short: {} < {ORDER_ENCODED_SIZE}",
+            "Order data too short: {} < {ORDER_ENCODED_SIZE_V4}",
             data.len()
         ));
     }
@@ -176,31 +188,42 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
     let remaining_qty = FixedQty::from_raw(u64::from_le_bytes(data[32..40].try_into().unwrap()));
     let cumulative_qty = FixedQty::from_raw(u64::from_le_bytes(data[40..48].try_into().unwrap()));
     let expire_at = u64::from_le_bytes(data[48..56].try_into().unwrap());
-    let trail_offset = FixedPrice::from_raw(i64::from_le_bytes(data[56..64].try_into().unwrap()));
-    let display_qty = FixedQty::from_raw(u64::from_le_bytes(data[64..72].try_into().unwrap()));
-    let timestamp = u64::from_le_bytes(data[72..80].try_into().unwrap());
-    let sequence = u64::from_le_bytes(data[80..88].try_into().unwrap());
-    let symbol = SymbolId(u16::from_le_bytes(data[88..90].try_into().unwrap()));
-    let side = match data[90] {
+
+    let (trail_offset, display_qty, tail) = if extended {
+        (
+            FixedPrice::from_raw(i64::from_le_bytes(data[56..64].try_into().unwrap())),
+            FixedQty::from_raw(u64::from_le_bytes(data[64..72].try_into().unwrap())),
+            72usize,
+        )
+    } else {
+        (FixedPrice::ZERO, FixedQty::ZERO, 56usize)
+    };
+
+    let timestamp = u64::from_le_bytes(data[tail..tail + 8].try_into().unwrap());
+    let sequence = u64::from_le_bytes(data[tail + 8..tail + 16].try_into().unwrap());
+    let symbol = SymbolId(u16::from_le_bytes(
+        data[tail + 16..tail + 18].try_into().unwrap(),
+    ));
+    let side = match data[tail + 18] {
         0 => Side::Buy,
         1 => Side::Sell,
         v => return Err(format!("Invalid side: {v}")),
     };
-    let order_type = match data[91] {
+    let order_type = match data[tail + 19] {
         0 => OrderType::Limit,
         1 => OrderType::Market,
         2 => OrderType::StopLimit,
         3 => OrderType::StopMarket,
         v => return Err(format!("Invalid order type: {v}")),
     };
-    let tif = match data[92] {
+    let tif = match data[tail + 20] {
         0 => TimeInForce::GTC,
         1 => TimeInForce::IOC,
         2 => TimeInForce::FOK,
         3 => TimeInForce::GTD,
         v => return Err(format!("Invalid TIF: {v}")),
     };
-    let status = match data[93] {
+    let status = match data[tail + 21] {
         0 => OrderStatus::New,
         1 => OrderStatus::PartiallyFilled,
         2 => OrderStatus::Filled,
@@ -209,9 +232,9 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
         5 => OrderStatus::Triggered,
         v => return Err(format!("Invalid status: {v}")),
     };
-    let flags = data[94];
+    let flags = data[tail + 22];
     let mut session_bytes = [0u8; 16];
-    session_bytes.copy_from_slice(&data[95..111]);
+    session_bytes.copy_from_slice(&data[tail + 23..tail + 39]);
     let client_session_id = me_core::SessionId::from_bytes(session_bytes);
 
     Ok(Order {
@@ -267,6 +290,37 @@ mod tests {
             }
             _ => panic!("Expected PlaceOrder"),
         }
+    }
+
+    #[test]
+    fn test_decode_legacy_v4_order_defaults_trail_and_display() {
+        // The pre-trailing/iceberg encoded order (v4) was 95 bytes: it carried
+        // expire_at but no trail_offset/display_qty, so `timestamp` followed
+        // expire_at directly. A WAL written by the previous release must still
+        // replay after upgrade — otherwise recovery treats the shorter record
+        // as a torn tail and silently truncates the WAL (data loss).
+        const V4_SIZE: usize = 95;
+        // v4 offsets: id 0, price 8, stop 16, qty 24, remaining 32, cumulative
+        // 40, expire_at 48, timestamp 56, sequence 64, symbol 72, side 74,
+        // order_type 75, tif 76, status 77, flags 78, session 79..95. Unset
+        // fields (stop/cumulative/expire/sequence/type/tif/status/flags) stay 0.
+        let mut data = vec![0u8; V4_SIZE];
+        data[0..8].copy_from_slice(&7u64.to_le_bytes());
+        data[8..16].copy_from_slice(&FixedPrice::from_f64(100.0).raw().to_le_bytes());
+        data[24..32].copy_from_slice(&FixedQty::from_f64(2.0).raw().to_le_bytes());
+        data[32..40].copy_from_slice(&FixedQty::from_f64(2.0).raw().to_le_bytes());
+        data[56..64].copy_from_slice(&123u64.to_le_bytes()); // timestamp at the v4 offset
+        data[72..74].copy_from_slice(&3u16.to_le_bytes());
+        data[74] = 1; // side = Sell
+
+        let order = decode_order_from(&data).expect("legacy v4 order must still decode");
+        assert_eq!(order.id, 7);
+        assert_eq!(order.qty, FixedQty::from_f64(2.0));
+        assert_eq!(order.timestamp, 123);
+        assert_eq!(order.symbol, SymbolId(3));
+        assert_eq!(order.side, Side::Sell);
+        assert_eq!(order.trail_offset, FixedPrice::ZERO);
+        assert_eq!(order.display_qty, FixedQty::ZERO);
     }
 
     #[test]
