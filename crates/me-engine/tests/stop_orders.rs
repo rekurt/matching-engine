@@ -350,3 +350,97 @@ fn test_trailing_stop_survives_snapshot_with_ratcheted_price() {
     );
     assert_eq!(e2.stop_book().len(), 0);
 }
+
+#[test]
+fn test_reused_stop_id_not_cancelled_by_stale_gtd_entry() {
+    let mut e = setup();
+    // A GTD stop with an already-past expiry, cancelled before the sweep runs.
+    // Its heap entry (expire=1) is left stale.
+    let gtd_stop = Order::new_stop_market(
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTD,
+        FixedPrice::from_f64(90.0),
+        FixedQty::from_f64(1.0),
+        1000,
+    )
+    .with_expiry(1);
+    e.process(Command::PlaceOrder(gtd_stop));
+    e.process(Command::CancelOrder {
+        order_id: 1,
+        symbol: SymbolId(0),
+        timestamp: 1100,
+    });
+    assert!(!e.stop_book().contains(1));
+
+    // Reuse id 1 for a NEW non-GTD stop.
+    let new_stop = Order::new_stop_market(
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(80.0),
+        FixedQty::from_f64(1.0),
+        2000,
+    );
+    e.process(Command::PlaceOrder(new_stop));
+    assert!(e.stop_book().contains(1));
+
+    // The stale GTD heap entry must NOT cancel the reused non-GTD stop.
+    let swept = e.expire_gtd_now();
+    assert!(
+        !swept
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::OrderCancelled { order_id: 1, .. })),
+        "stale GTD entry must not cancel a reused non-GTD stop"
+    );
+    assert!(
+        e.stop_book().contains(1),
+        "reused non-GTD stop must survive the stale sweep"
+    );
+}
+
+#[test]
+fn test_iceberg_replenishment_trade_triggers_stop() {
+    let mut e = setup();
+    // Stop sell that should fire when the market trades at/below 99.
+    e.process(Command::PlaceOrder(Order::new_stop_market(
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(99.0),
+        FixedQty::from_f64(1.0),
+        1000,
+    )));
+    assert_eq!(e.stop_book().len(), 1);
+
+    // Resting bids: 100 (qty 1) then 99 (qty 3).
+    e.process(limit_buy(2, 100.0, 1.0));
+    e.process(limit_buy(3, 99.0, 3.0));
+
+    // Aggressive iceberg SELL (total 4, display 1, limit 99): the visible slice
+    // trades at 100 (checked per-command → no trigger), and the replenishment
+    // slices trade at 99. The stop is reached only by a replenishment trade, so
+    // it must still fire after replenishment.
+    let ice = Order::new_limit(
+        5,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(99.0),
+        FixedQty::from_f64(4.0),
+        5000,
+    )
+    .with_display_qty(FixedQty::from_f64(1.0));
+    let events = e.process(Command::PlaceOrder(ice)).to_vec();
+
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::StopTriggered { order_id: 1, .. })),
+        "a stop reached only by an iceberg replenishment trade must still fire"
+    );
+    assert_eq!(e.stop_book().len(), 0);
+}

@@ -216,40 +216,60 @@ impl Engine {
             }
         }
 
-        // Replenish any iceberg whose visible slice fully filled this command.
-        self.replenish_icebergs();
+        // Replenish any iceberg whose visible slice fully filled this command,
+        // then settle the replenish<->stop interaction: a replenished slice can
+        // trade at a price that triggers a stop, and a triggered stop's order can
+        // in turn consume an iceberg slice that needs replenishing. The
+        // per-command stop check ran before replenishment, so iterate here until
+        // no new events are produced (bounded by MAX_STOP_CASCADE).
+        // `folded` (events already folded into iceberg cumulatives) and `touched`
+        // persist across the settle loop so per-slice fills are counted exactly
+        // once; reconciliation that collapses per-slice events runs ONCE at the
+        // end, after the interaction has settled.
+        let mut folded = 0usize;
+        let mut touched: rustc_hash::FxHashSet<OrderId> = rustc_hash::FxHashSet::default();
+        self.replenish_iceberg_slices(&mut folded, &mut touched);
+        let mut settle = 0;
+        loop {
+            let before = self.events.len();
+            self.check_stop_triggers();
+            self.replenish_iceberg_slices(&mut folded, &mut touched);
+            if self.events.len() == before || settle >= MAX_STOP_CASCADE {
+                break;
+            }
+            settle += 1;
+        }
+        self.reconcile_iceberg_events(&touched);
 
         self.events.events()
     }
 
-    /// Iceberg maintenance, run after matching.
-    ///
-    /// Loop: fold this command's incremental fills into each tracked template's
-    /// `cumulative_qty`; for any iceberg whose visible slice has left the book
-    /// with a hidden reserve remaining, build the next slice and route it
+    /// Fold this command's incremental fills into each tracked iceberg's
+    /// `cumulative_qty`, then, for any iceberg whose visible slice has left the
+    /// book with a hidden reserve remaining, build the next slice and route it
     /// through matching (`rematch_limit`) — NOT a bare insert — so a crossing
     /// slice executes against remaining opposite liquidity instead of resting
-    /// into a crossed book. Repeat until every iceberg is resting or exhausted.
+    /// into a crossed book. Repeats until every iceberg is resting or exhausted.
     ///
-    /// Finally, collapse the per-slice maker/taker status events for each
-    /// touched iceberg id into a single summary event (`OrderPartiallyFilled`
-    /// if still resting, `OrderFilled` if fully done) so the client sees one
-    /// coherent status, not premature `OrderFilled`s per slice. `Trade` events
-    /// (the real executions) are preserved.
-    fn replenish_icebergs(&mut self) {
+    /// `folded` (events already folded) and `touched` are caller-owned so this
+    /// can run repeatedly — interleaved with stop-trigger checks — while counting
+    /// each per-slice fill exactly once. The caller collapses the per-slice status
+    /// events via `reconcile_iceberg_events` once the interaction has settled.
+    fn replenish_iceberg_slices(
+        &mut self,
+        folded: &mut usize,
+        touched: &mut rustc_hash::FxHashSet<OrderId>,
+    ) {
         if self.icebergs.is_empty() {
             return;
         }
-
-        let mut touched: rustc_hash::FxHashSet<OrderId> = rustc_hash::FxHashSet::default();
-        let mut folded = 0usize;
 
         loop {
             // Fold only events appended since the last pass (avoid double count).
             let mut fills: Vec<(OrderId, FixedQty)> = Vec::new();
             {
                 let evs = self.events.events();
-                for ev in &evs[folded..] {
+                for ev in &evs[*folded..] {
                     match ev {
                         MatchEvent::OrderFilled {
                             order_id,
@@ -266,7 +286,7 @@ impl Engine {
                         _ => {}
                     }
                 }
-                folded = evs.len();
+                *folded = evs.len();
             }
             for (id, f) in fills {
                 if let Some(t) = self.icebergs.get_mut(&id) {
@@ -308,8 +328,6 @@ impl Engine {
                 matching::rematch_limit(&mut self.book, &mut slice, &mut self.events);
             }
         }
-
-        self.reconcile_iceberg_events(&touched);
     }
 
     /// Collapse per-slice `OrderFilled`/`OrderPartiallyFilled` events for each
@@ -470,8 +488,16 @@ impl Engine {
                     self.icebergs.remove(&id);
                     matching::cancel_order(&mut self.book, id, now, &mut buf);
                 }
-            } else if self.stop_book.contains(id) {
-                self.stop_book.cancel(id, now, &mut buf);
+            } else if let Some((is_gtd, exp_at)) =
+                self.stop_book.get(id).map(|o| (o.is_gtd(), o.expire_at))
+            {
+                // Same guard as the live-book branch: only cancel a stop that is
+                // still the GTD order this heap entry was created for. Otherwise a
+                // stale entry would cancel a reused id (a non-GTD or differently-
+                // dated stop).
+                if is_gtd && exp_at == exp {
+                    self.stop_book.cancel(id, now, &mut buf);
+                }
             }
         }
         buf.drain()

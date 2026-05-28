@@ -288,6 +288,20 @@ impl StopBook {
         self.stop_index.contains_key(&order_id) || self.trailing.contains_key(&order_id)
     }
 
+    /// Borrow a pending stop order by id (fixed-price or trailing), for callers
+    /// that must inspect it (e.g. validate a GTD expiry) before acting.
+    pub fn get(&self, order_id: OrderId) -> Option<&Order> {
+        if let Some(order) = self.trailing.get(&order_id) {
+            return Some(order);
+        }
+        let loc = self.stop_index.get(&order_id)?;
+        let level = match loc.side {
+            Side::Buy => self.stop_buys.get(&loc.stop_price)?,
+            Side::Sell => self.stop_sells.get(&Reverse(loc.stop_price))?,
+        };
+        level.get(loc.index)
+    }
+
     /// Get all pending stop orders (for snapshots).
     pub fn all_stop_orders(&self) -> Vec<Order> {
         let mut orders = Vec::new();
