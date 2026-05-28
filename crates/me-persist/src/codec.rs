@@ -173,10 +173,17 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
     // The current layout then inserts trail_offset(8)+display_qty(8) before the
     // tail (timestamp..session), so the tail is shifted by exactly 16 bytes.
     // `tail` is where that common tail begins for the detected layout.
+    // `extended` (>= 111) stays lenient on length because the snapshot reader
+    // hands `decode_order` the remaining buffer (orders + trailing CRC), not a
+    // single record — it reads the first 111 bytes and strides on. A
+    // non-extended record, by contrast, must be EXACTLY the v4 size: a length
+    // in (95, 111) is not produced by any released encoder, so it is a torn or
+    // corrupt record (or the never-released intra-branch v5=103 layout) and is
+    // rejected loudly rather than mis-decoded against the v4 offsets.
     let extended = data.len() >= ORDER_ENCODED_SIZE;
-    if !extended && data.len() < ORDER_ENCODED_SIZE_V4 {
+    if !extended && data.len() != ORDER_ENCODED_SIZE_V4 {
         return Err(format!(
-            "Order data too short: {} < {ORDER_ENCODED_SIZE_V4}",
+            "Order data bad length {} (expected {ORDER_ENCODED_SIZE_V4} or >= {ORDER_ENCODED_SIZE})",
             data.len()
         ));
     }
@@ -321,6 +328,21 @@ mod tests {
         assert_eq!(order.side, Side::Sell);
         assert_eq!(order.trail_offset, FixedPrice::ZERO);
         assert_eq!(order.display_qty, FixedQty::ZERO);
+    }
+
+    #[test]
+    fn test_decode_gray_zone_length_rejected() {
+        // A non-extended record must be EXACTLY the v4 size. A length in
+        // (95, 111) — e.g. a torn WAL tail, or the never-released intra-branch
+        // v5=103 layout — must be rejected loudly, not silently mis-decoded
+        // against the v4 offsets (which would yield a garbage order).
+        for len in [96usize, 103, 110] {
+            let data = vec![0u8; len];
+            assert!(
+                decode_order_from(&data).is_err(),
+                "length {len} is between v4 (95) and current (111); must be rejected"
+            );
+        }
     }
 
     #[test]
