@@ -26,7 +26,7 @@ use me_audit::async_logger::AsyncAuditLogger;
 use me_audit::logger::{match_event_to_entry, order_to_entry};
 use me_core::events::{MatchEvent, RejectReason};
 use me_core::symbol::SymbolConfig;
-use me_core::types::{FixedQty, OrderId, SymbolId};
+use me_core::types::{OrderId, SymbolId};
 use me_metrics::EngineMetrics;
 use me_persist::snapshot::SnapshotManager;
 use me_persist::wal::{WalCommand, WalEntry, WalReader, WalWriter};
@@ -852,14 +852,14 @@ fn shard_worker_loop(
                 let events = if let Some(engine) = engines.get(&symbol) {
                     match engine.book().get_order(order_id) {
                         Some(order) => {
-                            let filled = FixedQty::from_raw(
-                                order.qty.raw().saturating_sub(order.remaining_qty.raw()),
-                            );
+                            // Use cumulative/open quantities so an iceberg reports
+                            // its true filled and open size, not the visible slice
+                            // (remaining_qty is only the displayed portion).
                             vec![MatchEvent::OrderStatus {
                                 order_id,
                                 status: order.status as u8,
-                                filled_qty: filled,
-                                remaining_qty: order.remaining_qty,
+                                filled_qty: order.cumulative_qty,
+                                remaining_qty: order.open_qty(),
                                 price: order.price,
                                 timestamp: order.timestamp,
                             }]

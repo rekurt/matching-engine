@@ -292,6 +292,41 @@ fn test_router_query_order() {
 }
 
 #[test]
+fn test_router_query_iceberg_reports_true_residual() {
+    let mut router = Router::new(1);
+    router.add_symbol(btc_config());
+
+    // Untouched iceberg sell: total 6, visible slice 2.
+    router.process(Command::PlaceOrder(
+        Order::new_limit(
+            1,
+            SymbolId(0),
+            Side::Sell,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(100.0),
+            FixedQty::from_f64(6.0),
+            1000,
+        )
+        .with_display_qty(FixedQty::from_f64(2.0)),
+    ));
+
+    let q = router.query_order(1, SymbolId(0));
+    let status = q.iter().find_map(|ev| match ev {
+        MatchEvent::OrderStatus {
+            filled_qty,
+            remaining_qty,
+            ..
+        } => Some((*filled_qty, *remaining_qty)),
+        _ => None,
+    });
+    assert_eq!(
+        status,
+        Some((FixedQty::ZERO, FixedQty::from_f64(6.0))),
+        "untouched iceberg must report filled 0 / open 6, not 4 filled / 2 remaining"
+    );
+}
+
+#[test]
 fn test_self_trade_prevention_rejects_same_session_cross() {
     use me_core::events::RejectReason;
     use me_core::SessionId;

@@ -993,7 +993,9 @@ pub fn encode_open_order(
     buf.put_i64_le(order.price.raw());
     buf.put_i64_le(order.stop_price.raw());
     buf.put_u64_le(order.qty.raw());
-    buf.put_u64_le(order.remaining_qty.raw());
+    // True open quantity (qty - cumulative); for an iceberg this is the full
+    // residual, not the visible slice, so a resync reports correct open size.
+    buf.put_u64_le(order.open_qty().raw());
     buf.put_u64_le(order.timestamp);
     buf.put_u8(order.flags);
     // Reserved padding to make payload aligned and future-proof
@@ -1047,5 +1049,6 @@ fn reject_reason_to_u8(reason: &me_core::events::RejectReason) -> u8 {
         RejectReason::InternalError => 12,
         RejectReason::SelfTradePrevented => 13,
         RejectReason::InvalidExpiry => 14,
+        RejectReason::AmendNotSupported => 15,
     }
 }

@@ -106,6 +106,7 @@ const (
 	RejectInternalError         RejectReason = 12
 	RejectSelfTradePrevented    RejectReason = 13
 	RejectInvalidExpiry         RejectReason = 14
+	RejectAmendNotSupported     RejectReason = 15
 )
 
 // String returns the human-readable name of the reject reason.
@@ -141,6 +142,8 @@ func (r RejectReason) String() string {
 		return "SelfTradePrevented"
 	case RejectInvalidExpiry:
 		return "InvalidExpiry"
+	case RejectAmendNotSupported:
+		return "AmendNotSupported"
 	default:
 		return fmt.Sprintf("RejectReason(%d)", r)
 	}

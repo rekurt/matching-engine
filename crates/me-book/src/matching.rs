@@ -674,7 +674,9 @@ pub fn cancel_order(
         Some(order) => {
             events.push(MatchEvent::OrderCancelled {
                 order_id,
-                remaining_qty: order.remaining_qty,
+                // True open quantity (qty - cumulative). Equals remaining_qty for
+                // a plain order; for an iceberg it includes the hidden reserve.
+                remaining_qty: order.open_qty(),
                 timestamp,
             });
         }

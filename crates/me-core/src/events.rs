@@ -45,6 +45,9 @@ pub enum RejectReason {
     SelfTradePrevented = 13,
     /// GTD order has a missing or already-past expiry timestamp.
     InvalidExpiry = 14,
+    /// Amend is not supported for this order (e.g. an iceberg, whose hidden
+    /// reserve cannot be consistently re-sized in place). Cancel and re-place.
+    AmendNotSupported = 15,
 }
 
 // ─── MatchEvent ──────────────────────────────────────────────────────────────
@@ -192,5 +195,6 @@ mod tests {
         assert_eq!(RejectReason::InternalError as u8, 12);
         assert_eq!(RejectReason::SelfTradePrevented as u8, 13);
         assert_eq!(RejectReason::InvalidExpiry as u8, 14);
+        assert_eq!(RejectReason::AmendNotSupported as u8, 15);
     }
 }

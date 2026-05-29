@@ -296,6 +296,15 @@ impl Order {
             && self.display_qty < self.qty
     }
 
+    /// Total quantity still open (unfilled): `qty - cumulative_qty`. For a plain
+    /// order this equals `remaining_qty`, but for an iceberg `remaining_qty` is
+    /// only the visible slice, so reporting/cancel/query paths must use this to
+    /// avoid understating the order's open size.
+    #[inline]
+    pub fn open_qty(&self) -> FixedQty {
+        self.qty.saturating_sub(self.cumulative_qty)
+    }
+
     /// Whether this order has expired at the given time (unix nanoseconds).
     /// Non-GTD orders and GTD orders with `expire_at == 0` never expire.
     #[inline]

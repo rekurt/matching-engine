@@ -1080,6 +1080,68 @@ fn test_iceberg_display_not_below_total_rejected() {
 }
 
 #[test]
+fn test_amend_iceberg_rejected_and_unchanged() {
+    // Amending an iceberg can't be applied consistently (amend only touches the
+    // visible slice, leaving the engine's hidden template stale). It must be
+    // rejected, leaving the iceberg fully intact and still replenishing.
+    let mut e = setup();
+    e.process(iceberg_sell(1, 100.0, 6.0, 2.0)); // total 6, visible 2
+    let events = e
+        .process(Command::AmendOrder {
+            order_id: 1,
+            symbol: SymbolId(0),
+            new_price: None,
+            new_qty: Some(FixedQty::from_f64(1.0)),
+            timestamp: 2000,
+        })
+        .to_vec();
+    assert!(
+        has_reject(&events, RejectReason::AmendNotSupported),
+        "amending an iceberg must be rejected"
+    );
+    assert_eq!(
+        e.book().get_order(1).unwrap().remaining_qty,
+        FixedQty::from_f64(2.0),
+        "iceberg visible slice unchanged after a rejected amend"
+    );
+    // Still replenishes: consume the visible slice, the next slice appears.
+    e.process(limit_buy(2, 100.0, 2.0));
+    assert!(
+        e.book().get_order(1).is_some(),
+        "iceberg still replenishes after a rejected amend"
+    );
+}
+
+#[test]
+fn test_cancel_iceberg_reports_true_remaining() {
+    // Cancelling an untouched iceberg must report the true open quantity
+    // (qty - cumulative), not the visible slice — otherwise a client/risk
+    // system under-credits the cancelled quantity.
+    let mut e = setup();
+    e.process(iceberg_sell(1, 100.0, 6.0, 2.0)); // total 6, visible slice 2
+    let events = e
+        .process(Command::CancelOrder {
+            order_id: 1,
+            symbol: SymbolId(0),
+            timestamp: 2000,
+        })
+        .to_vec();
+    let rem = events.iter().find_map(|ev| match ev {
+        MatchEvent::OrderCancelled {
+            order_id: 1,
+            remaining_qty,
+            ..
+        } => Some(*remaining_qty),
+        _ => None,
+    });
+    assert_eq!(
+        rem,
+        Some(FixedQty::from_f64(6.0)),
+        "cancel must report true open (qty - cumulative), not the visible slice"
+    );
+}
+
+#[test]
 fn test_iceberg_partial_fill_reports_true_remaining() {
     // The order owner's fill event must reflect the TRUE residual
     // (qty - cumulative), including the hidden reserve — not just the visible

@@ -1062,6 +1062,7 @@ fn reject_reason_label(reason: RejectReason) -> &'static str {
         RejectReason::SelfTradePrevented => "self_trade_prevented",
         RejectReason::InvalidExpiry => "invalid_expiry",
         RejectReason::InternalError => "internal_error",
+        RejectReason::AmendNotSupported => "amend_not_supported",
     }
 }
 

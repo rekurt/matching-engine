@@ -204,6 +204,20 @@ impl Engine {
                     return self.events.events();
                 }
 
+                // Amending an iceberg can't be applied consistently: amend only
+                // touches the visible slice on the book, leaving the engine's
+                // hidden template (qty/display/cumulative) stale, which would
+                // corrupt later replenishment. Reject; the client cancels and
+                // re-places to change an iceberg.
+                if self.icebergs.contains_key(&order_id) {
+                    self.events.push(MatchEvent::OrderRejected {
+                        order_id,
+                        reason: RejectReason::AmendNotSupported,
+                        timestamp,
+                    });
+                    return self.events.events();
+                }
+
                 matching::amend_order(
                     &mut self.book,
                     order_id,
