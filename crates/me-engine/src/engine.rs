@@ -130,6 +130,18 @@ impl Engine {
                     // Route stop orders to stop book
                     self.stop_book.insert(order, &mut self.events);
                 } else {
+                    // Reject a live order whose id is already pending in the stop
+                    // book — process_order's duplicate check only sees the live
+                    // book, so this is the symmetric half of the stop-side check
+                    // above, keeping ids unique across both books.
+                    if self.stop_book.contains(order.id) {
+                        self.events.push(MatchEvent::OrderRejected {
+                            order_id: order.id,
+                            reason: RejectReason::DuplicateOrderId,
+                            timestamp: order.timestamp,
+                        });
+                        return self.events.events();
+                    }
                     // Self-trade prevention (cancel-newest): reject before
                     // matching if the order would cross into a resting order
                     // from the same session.

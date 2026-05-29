@@ -306,6 +306,40 @@ fn test_two_trailing_stops_trigger_deterministically() {
 }
 
 #[test]
+fn test_live_order_reusing_pending_stop_id_rejected() {
+    // Symmetric to the stop-side check: a regular order whose id is already
+    // pending in the stop book must be rejected (process_order only sees the
+    // live book), so an id is unique across both books.
+    let mut e = setup();
+    e.process(Command::PlaceOrder(Order::new_stop_market(
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(95.0),
+        FixedQty::from_f64(1.0),
+        1000,
+    )));
+    assert!(e.stop_book().contains(1));
+
+    let events = e.process(limit_buy(1, 100.0, 1.0)).to_vec();
+    assert!(
+        events.iter().any(|ev| matches!(
+            ev,
+            MatchEvent::OrderRejected {
+                reason: RejectReason::DuplicateOrderId,
+                ..
+            }
+        )),
+        "a live order reusing a pending stop id must be rejected"
+    );
+    assert!(
+        e.book().get_order(1).is_none(),
+        "duplicate live order must not rest"
+    );
+}
+
+#[test]
 fn test_stop_with_duplicate_id_rejected() {
     // Stops bypass process_order, so the engine must apply the same uniqueness
     // invariant: a stop whose id collides with an existing stop OR a live order
