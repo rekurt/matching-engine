@@ -1481,3 +1481,36 @@ fn test_two_icebergs_same_price_replenish_deterministically() {
         "higher-id iceberg must not match before the lower-id one"
     );
 }
+
+#[test]
+fn test_stop_limit_with_display_qty_rejected() {
+    // display_qty (iceberg) is only meaningful on a plain Limit order. A
+    // StopLimit carrying display_qty would pass the slice-size/TIF checks, rest
+    // in the stop book, and on trigger convert_stop → Limit → process_order
+    // directly — bypassing the engine's iceberg registration. It would then rest
+    // untracked yet still flagged display_qty>0, which a later snapshot restore
+    // resurrects as a phantom iceberg. Reject it here, matching the wire
+    // decoder's constraint (display_qty only on OrderType::Limit).
+    let mut e = setup();
+    let bad = Order::new_stop_limit(
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(101.0), // limit
+        FixedPrice::from_f64(100.0), // stop/trigger
+        FixedQty::from_f64(10.0),
+        1000,
+    )
+    .with_display_qty(FixedQty::from_f64(2.0)); // valid slice size, wrong order type
+    let events = e.process(Command::PlaceOrder(bad)).to_vec();
+    assert!(
+        has_reject(&events, RejectReason::InvalidQuantity),
+        "display_qty on a non-Limit (StopLimit) order must be rejected: {events:?}"
+    );
+    assert_eq!(
+        e.stop_book().len(),
+        0,
+        "rejected stop-limit must not rest in the stop book"
+    );
+}

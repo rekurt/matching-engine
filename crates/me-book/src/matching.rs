@@ -43,6 +43,16 @@ pub fn validate_order(order: &Order, config: &SymbolConfig) -> Option<RejectReas
     // would rest silently with the wrong intent. It also only makes sense on a
     // resting TIF (GTC/GTD); on IOC/FOK there is no reserve to hide.
     if order.display_qty.raw() > 0 {
+        // Iceberg display only applies to a plain limit order. A StopLimit (or
+        // any non-Limit) carrying display_qty would pass the slice checks and
+        // rest in the stop book; once triggered, convert_stop turns it into a
+        // Limit fed straight to process_order, bypassing the engine's iceberg
+        // registration — so it rests untracked yet still flagged display_qty>0,
+        // which a later snapshot restore resurrects as a phantom iceberg. Reject
+        // it here, matching the wire decoder's constraint.
+        if order.order_type != OrderType::Limit {
+            return Some(RejectReason::InvalidQuantity);
+        }
         if !matches!(order.tif, TimeInForce::GTC | TimeInForce::GTD) {
             return Some(RejectReason::InvalidQuantity);
         }
