@@ -1,7 +1,7 @@
 /// Integration tests: IOC, FOK, Cancel, Amend, Validation
 /// Covers scenarios C (23-35), E (41-44), F (45-49), H (58-65), I (66-72), J (73-77)
 use me_core::events::{MatchEvent, RejectReason};
-use me_core::order::{Order, TimeInForce, ORDER_FLAG_MAKER_OR_CANCEL};
+use me_core::order::{Order, OrderStatus, TimeInForce, ORDER_FLAG_MAKER_OR_CANCEL};
 use me_core::symbol::SymbolConfig;
 use me_core::types::*;
 use me_engine::command::Command;
@@ -1167,6 +1167,31 @@ fn test_cancel_iceberg_reports_true_remaining() {
         rem,
         Some(FixedQty::from_f64(6.0)),
         "cancel must report true open (qty - cumulative), not the visible slice"
+    );
+}
+
+#[test]
+fn test_iceberg_refilled_slice_status_is_partially_filled() {
+    // After a slice fills and the reserve replenishes a new slice that rests
+    // WITHOUT trading, the resting book order must reflect partial-fill status
+    // (clients read status from the book via QueryOrder/OpenOrders) — not the
+    // template's stale New.
+    let mut e = setup();
+    e.process(iceberg_sell(1, 100.0, 6.0, 2.0)); // total 6, display 2
+    e.process(limit_buy(2, 100.0, 2.0)); // fill first slice; next slice rests, no trade
+    let resting = e
+        .book()
+        .get_order(1)
+        .copied()
+        .expect("iceberg still resting");
+    assert!(
+        resting.cumulative_qty.raw() > 0,
+        "iceberg has filled quantity"
+    );
+    assert_eq!(
+        resting.status,
+        OrderStatus::PartiallyFilled,
+        "refilled iceberg slice must rest as PartiallyFilled, not New"
     );
 }
 

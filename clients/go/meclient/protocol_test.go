@@ -220,7 +220,7 @@ func TestDecodeOrderRejected(t *testing.T) {
 }
 
 func TestDecodeTrade(t *testing.T) {
-	var p [51]byte
+	var p [59]byte
 	binary.LittleEndian.PutUint64(p[0:8], 1)  // trade_id
 	binary.LittleEndian.PutUint16(p[8:10], 0) // symbol
 	binary.LittleEndian.PutUint64(p[10:18], uint64(NewDecimal(100.0).Raw()))
@@ -228,13 +228,17 @@ func TestDecodeTrade(t *testing.T) {
 	binary.LittleEndian.PutUint64(p[26:34], 10) // maker
 	binary.LittleEndian.PutUint64(p[34:42], 20) // taker
 	p[42] = byte(SideSell)
-	binary.LittleEndian.PutUint64(p[43:51], 3000)
+	binary.LittleEndian.PutUint64(p[43:51], 3000) // timestamp
+	binary.LittleEndian.PutUint64(p[51:59], 77)   // trade sequence
 	ev := decodeFirst(t, mkFrame(0x12, 3, p[:]))
 	if ev.Trade == nil {
 		t.Fatal("nil")
 	}
 	if ev.Trade.MakerOrderId != 10 {
 		t.Fatal("maker")
+	}
+	if ev.Trade.Sequence != 77 {
+		t.Fatalf("sequence: got %d, want 77", ev.Trade.Sequence)
 	}
 }
 

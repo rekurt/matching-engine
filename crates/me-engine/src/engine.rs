@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use me_core::events::{EventBuffer, MatchEvent, RejectReason};
-use me_core::order::{Order, TimeInForce};
+use me_core::order::{Order, OrderStatus, TimeInForce};
 use me_core::symbol::SymbolConfig;
 use me_core::types::{FixedPrice, FixedQty, OrderId};
 
@@ -369,6 +369,11 @@ impl Engine {
                 let next = template.display_qty.min(hidden);
                 let mut slice = template;
                 slice.remaining_qty = next; // qty=total, cumulative=so-far preserved
+                                            // A refilled slice always carries prior fills (cumulative > 0), so it
+                                            // rests as PartiallyFilled, not the template's stale New — clients read
+                                            // status from the book. If the slice crosses, matching overwrites this
+                                            // with the matched status.
+                slice.status = OrderStatus::PartiallyFilled;
                 touched.insert(id);
                 matching::rematch_limit(&mut self.book, &mut slice, &mut self.events);
             }

@@ -56,7 +56,7 @@ const (
 
 	orderAcceptedPayloadSize        = 16
 	orderRejectedPayloadSize        = 17
-	tradePayloadSize                = 51
+	tradePayloadSize                = 59 // 51 base + 8-byte trade sequence (v2)
 	orderFilledPayloadSize          = 32
 	orderPartiallyFilledPayloadSize = 40
 	orderCancelledPayloadSize       = 24
@@ -415,8 +415,10 @@ func decodeOrderRejected(data []byte) (*OrderRejected, error) {
 }
 
 func decodeTrade(data []byte) (*Trade, error) {
-	if len(data) != tradePayloadSize {
-		return nil, fmt.Errorf("%w: Trade expected %d bytes, got %d", ErrInvalidPayloadSize, tradePayloadSize, len(data))
+	// Accept >= 59 (tolerate any future trailing fields) and decode the v2
+	// layout: 51-byte base + 8-byte trade sequence.
+	if len(data) < tradePayloadSize {
+		return nil, fmt.Errorf("%w: Trade expected at least %d bytes, got %d", ErrInvalidPayloadSize, tradePayloadSize, len(data))
 	}
 	return &Trade{
 		TradeId:      binary.LittleEndian.Uint64(data[0:8]),
@@ -427,6 +429,7 @@ func decodeTrade(data []byte) (*Trade, error) {
 		TakerOrderId: binary.LittleEndian.Uint64(data[34:42]),
 		MakerSide:    Side(data[42]),
 		Timestamp:    binary.LittleEndian.Uint64(data[43:51]),
+		Sequence:     binary.LittleEndian.Uint64(data[51:59]),
 	}, nil
 }
 

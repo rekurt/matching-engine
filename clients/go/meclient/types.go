@@ -215,6 +215,9 @@ type Trade struct {
 	TakerOrderId uint64
 	MakerSide    Side
 	Timestamp    uint64
+	// Sequence is the engine's monotonic trade sequence number (v2 appends it
+	// after the timestamp).
+	Sequence uint64
 }
 
 // OrderFilled is received when an order is completely filled.
