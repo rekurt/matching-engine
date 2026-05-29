@@ -98,11 +98,6 @@ impl Engine {
                     return self.events.events();
                 }
 
-                // Snapshot the event count so that, after processing, we can
-                // tell whether this order was rejected — the GTD expiry enqueue
-                // is deferred until acceptance (see the end of this arm).
-                let events_start = self.events.len();
-
                 if order.is_stop() {
                     // Stops bypass process_order, so validate them here (qty,
                     // stop price, GTD expiry, etc.) before they rest. Internal /
@@ -189,17 +184,17 @@ impl Engine {
                     self.check_stop_triggers();
                 }
 
-                // Enqueue GTD expiry only after acceptance: a rejected
-                // submission (bad lot/tick, duplicate, self-trade) must not
-                // leave a stale heap entry, which would otherwise accumulate
-                // unbounded under repeated bad input with a far-future expiry.
-                if order.is_gtd() && order.expire_at != 0 {
-                    let rejected = self.events.events()[events_start..].iter().any(|e| {
-                        matches!(e, MatchEvent::OrderRejected { order_id, .. } if *order_id == order.id)
-                    });
-                    if !rejected {
-                        self.gtd_expiry.push(Reverse((order.expire_at, order.id)));
-                    }
+                // Enqueue GTD expiry only if the order is actually resting after
+                // matching (live book or stop book). A GTD that was rejected,
+                // fully filled on arrival, or that never rests (e.g. a GTD market
+                // order) has no resting order for expire_gtd_now to cancel, so
+                // enqueuing it would leak a stale heap entry that accumulates
+                // under repeated such orders until their (far-future) expiry.
+                if order.is_gtd()
+                    && order.expire_at != 0
+                    && (self.book.contains_order(order.id) || self.stop_book.contains(order.id))
+                {
+                    self.gtd_expiry.push(Reverse((order.expire_at, order.id)));
                 }
             }
             Command::CancelOrder {

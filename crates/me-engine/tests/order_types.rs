@@ -1222,6 +1222,36 @@ fn test_rejected_gtd_does_not_leak_expiry_entry() {
 }
 
 #[test]
+fn test_fully_filled_gtd_does_not_enqueue_expiry() {
+    // A GTD order that is accepted but never rests (here: an aggressive GTD
+    // limit that fully fills on arrival) has no resting order for the sweep to
+    // cancel, so it must NOT leave a heap entry — otherwise such orders pile up
+    // stale entries until their (far-future) expiry.
+    let mut e = setup();
+    e.process(limit_sell(1, 100.0, 1.0)); // resting ask to cross
+    let gtd = Order::new_limit(
+        2,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTD,
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_f64(1.0),
+        2000,
+    )
+    .with_expiry(u64::MAX);
+    e.process(Command::PlaceOrder(gtd));
+    assert!(
+        e.book().get_order(2).is_none(),
+        "fully-filled GTD does not rest"
+    );
+    assert_eq!(
+        e.gtd_pending(),
+        0,
+        "a GTD that never rests must not enqueue an expiry entry"
+    );
+}
+
+#[test]
 fn test_accepted_gtd_enqueues_expiry_entry() {
     // Guard against over-correction: an accepted GTD order must still be tracked.
     let mut e = setup();
