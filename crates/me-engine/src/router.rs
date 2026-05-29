@@ -592,14 +592,90 @@ fn shard_worker_loop(
                     None
                 };
 
-                // 0. WAL pre-trade write (if mode == Pre).
+                // 0. Lazy GTD expiry sweep — runs BEFORE journaling/risk-checking
+                // this command. Two reasons:
+                //   1. An already-expired GTD frees its open-order slot so
+                //      max_open_orders does not spuriously reject this command.
+                //   2. DURABILITY/DETERMINISM: each expiry is journaled as a
+                //      CancelOrder *before* the triggering command, so crash
+                //      recovery replays the cancellation at the same log
+                //      position. Recovery never re-runs the wall-clock sweep, so
+                //      without this record replay would resurrect the expired GTD
+                //      and let it phantom-match a later order — diverging the
+                //      recovered book from the live one.
+                // The expiry cancellations are metered/audited and decrement the
+                // open-order count, but are not part of this command's reply.
+                let mut wal_pre_write_failed = false;
+                if let Some(engine) = engines.get_mut(&symbol) {
+                    let expired = engine.expire_gtd_now();
+                    if !expired.is_empty() {
+                        for ev in &expired {
+                            if let MatchEvent::OrderCancelled {
+                                order_id,
+                                timestamp,
+                                ..
+                            } = ev
+                            {
+                                // Journal the expiry as a durable cancel. Pre-mode
+                                // buffers it (group-committed alongside the
+                                // command); Post-mode appends immediately, ahead
+                                // of the command's own post-write. Either way the
+                                // expiry precedes the command in the log.
+                                if let Some(ref mut w) = wal {
+                                    let expiry_cmd = WalCommand::CancelOrder {
+                                        order_id: *order_id,
+                                        symbol,
+                                        timestamp: *timestamp,
+                                    };
+                                    let res = match wal_mode {
+                                        WalMode::Pre => w.append_nosync(&expiry_cmd),
+                                        WalMode::Post => w.append(&expiry_cmd),
+                                        // Unreachable: a present writer implies a
+                                        // non-Disabled mode. Treat as no-op.
+                                        WalMode::Disabled => Ok(0),
+                                    };
+                                    if let Err(e) = res {
+                                        tracing::error!(
+                                            shard_id, order_id, error = %e,
+                                            "WAL GTD-EXPIRY WRITE FAILED — recovery would diverge"
+                                        );
+                                        match wal_mode {
+                                            // Pre: reject the triggering command,
+                                            // same durability contract as a failed
+                                            // command pre-write below.
+                                            WalMode::Pre => wal_pre_write_failed = true,
+                                            // Post: the book is already mutated but
+                                            // not journaled — halt the symbol so no
+                                            // further un-journaled state accrues.
+                                            WalMode::Post => engine.halt_trading(),
+                                            WalMode::Disabled => {}
+                                        }
+                                    }
+                                }
+                                risk.on_order_removed(symbol);
+                            }
+                        }
+                        if let Some(ref a) = audit {
+                            for ev in &expired {
+                                if let Some(entry) = match_event_to_entry(ev, symbol) {
+                                    a.log_entry(entry);
+                                }
+                            }
+                        }
+                        if let Some(ref m) = metrics {
+                            m.record_events(&expired, sym_name, std::time::Duration::ZERO);
+                        }
+                    }
+                }
+
+                // 0.5. WAL pre-trade write of THIS command — AFTER the expiry
+                // cancels above, so any expiries precede it in the log.
                 //
                 // DURABILITY CONTRACT: Pre-mode guarantees that every accepted
                 // command is journaled BEFORE execution. If the write fails we
                 // MUST reject the order — otherwise a crash immediately after
                 // matching would lose the trade, violating the contract.
-                let mut wal_pre_write_failed = false;
-                if wal_mode == WalMode::Pre {
+                if wal_mode == WalMode::Pre && !wal_pre_write_failed {
                     if let Some(ref mut w) = wal {
                         let wal_cmd = command_to_wal(&cmd);
                         // Buffered append only; the batch is fsynced once in
@@ -617,34 +693,6 @@ fn shard_worker_loop(
                             "WAL PRE-WRITE SKIPPED — writer unavailable, rejecting order (durability violated)"
                         );
                         wal_pre_write_failed = true;
-                    }
-                }
-
-                // 0.5. Lazy GTD expiry sweep BEFORE the risk check, so an
-                // already-expired GTD frees its open-order slot and does not make
-                // max_open_orders spuriously reject this command. The expiry
-                // cancellations are metered/audited and decrement the open-order
-                // count, but are not part of this command's reply.
-                if !wal_pre_write_failed {
-                    if let Some(engine) = engines.get_mut(&symbol) {
-                        let expired = engine.expire_gtd_now();
-                        if !expired.is_empty() {
-                            for ev in &expired {
-                                if matches!(ev, MatchEvent::OrderCancelled { .. }) {
-                                    risk.on_order_removed(symbol);
-                                }
-                            }
-                            if let Some(ref a) = audit {
-                                for ev in &expired {
-                                    if let Some(entry) = match_event_to_entry(ev, symbol) {
-                                        a.log_entry(entry);
-                                    }
-                                }
-                            }
-                            if let Some(ref m) = metrics {
-                                m.record_events(&expired, sym_name, std::time::Duration::ZERO);
-                            }
-                        }
                     }
                 }
 
