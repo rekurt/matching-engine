@@ -466,71 +466,78 @@ impl Engine {
 
     /// Check if any stop orders should be triggered based on recent trades.
     /// Handles cascading triggers (bounded).
+    ///
+    /// Feeds the FULL trade-price path of this command (in execution order)
+    /// into the stop book, not just the final print. A single aggressor can
+    /// sweep several price levels; trailing stops must ratchet on the
+    /// intra-command extreme and fixed stops must see every threshold the path
+    /// crossed. Using only the last price loses both — e.g. a sell sweep trading
+    /// 105 then 95 would leave a sell trailing stop unratcheted and never fire.
     fn check_stop_triggers(&mut self) {
         if self.stop_book.is_empty() {
             return;
         }
 
-        // Find the last trade price from our events
-        let last_trade_price = self.find_last_trade_price();
-        let last_trade_price = match last_trade_price {
-            Some(p) => p,
-            None => return,
-        };
-
+        // `scanned` marks how far into the event buffer we have consumed trades.
+        // Each generation replays the trades appended since the last scan (the
+        // original sweep first, then any trades its triggered orders produce).
+        // Re-feeding an already-seen price is harmless: ratcheting is idempotent
+        // and a triggered stop is removed from the book, so it cannot re-fire.
+        let mut scanned = 0usize;
         let mut cascade_count = 0;
-        let mut trigger_price = last_trade_price;
 
         loop {
             if cascade_count >= MAX_STOP_CASCADE {
                 break;
             }
 
-            let timestamp = self.clock.now_ns();
+            let path: Vec<FixedPrice> = self.events.events()[scanned..]
+                .iter()
+                .filter_map(|e| match e {
+                    MatchEvent::Trade(t) => Some(t.price),
+                    _ => None,
+                })
+                .collect();
+            scanned = self.events.len();
 
-            let triggered =
-                self.stop_book
-                    .check_triggers(trigger_price, timestamp, &mut self.events);
-
-            if triggered.is_empty() {
+            if path.is_empty() {
                 break;
             }
 
-            cascade_count += 1;
+            let timestamp = self.clock.now_ns();
+            let mut triggered_any = false;
 
-            // Process each triggered order
-            for order in triggered {
-                // A triggered stop is the newest aggressor — honor STP just like
-                // the normal place path, cancelling it rather than self-matching
-                // a resting order from the same session.
-                if self.self_trade_blocked(&order) {
-                    self.events.push(MatchEvent::OrderRejected {
-                        order_id: order.id,
-                        reason: RejectReason::SelfTradePrevented,
-                        timestamp,
-                    });
+            for price in path {
+                let triggered = self
+                    .stop_book
+                    .check_triggers(price, timestamp, &mut self.events);
+                if triggered.is_empty() {
                     continue;
                 }
-                matching::process_order(&mut self.book, order, &mut self.events);
-            }
+                triggered_any = true;
 
-            // Check if new trades were generated that could trigger more stops
-            let new_price = self.find_last_trade_price();
-            match new_price {
-                Some(p) if p != trigger_price => {
-                    trigger_price = p;
+                // Process each triggered order
+                for order in triggered {
+                    // A triggered stop is the newest aggressor — honor STP just
+                    // like the normal place path, cancelling it rather than
+                    // self-matching a resting order from the same session.
+                    if self.self_trade_blocked(&order) {
+                        self.events.push(MatchEvent::OrderRejected {
+                            order_id: order.id,
+                            reason: RejectReason::SelfTradePrevented,
+                            timestamp,
+                        });
+                        continue;
+                    }
+                    matching::process_order(&mut self.book, order, &mut self.events);
                 }
-                _ => break,
             }
-        }
-    }
 
-    /// Find the last trade price from the current events buffer.
-    fn find_last_trade_price(&self) -> Option<FixedPrice> {
-        self.events.events().iter().rev().find_map(|e| match e {
-            MatchEvent::Trade(t) => Some(t.price),
-            _ => None,
-        })
+            if !triggered_any {
+                break;
+            }
+            cascade_count += 1;
+        }
     }
 
     /// Cancel any GTD orders whose expiry has passed (lazy sweep).

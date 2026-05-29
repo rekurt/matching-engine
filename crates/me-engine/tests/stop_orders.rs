@@ -847,3 +847,71 @@ fn test_triggered_stop_crossing_other_session_still_trades() {
         "B's resting sell #2 must be filled by the triggered stop: {events:?}"
     );
 }
+
+// ─── Intra-command trade path feeds stop triggers ───────────────────────────
+
+#[test]
+fn test_trailing_stop_ratchets_on_intra_command_high() {
+    // A single sell order that sweeps bids at 105 then 95 must ratchet a sell
+    // trailing stop (stop 90 / trail 10) up to 95 on the 105 print, then trigger
+    // it on the 95 print — even though both trades happen inside one command.
+    // Feeding only the final price (95) would leave the stop at 90 and miss it.
+    let mut e = setup();
+    e.process(trailing_sell_stop(1, 90.0, 10.0, 1.0));
+    assert_eq!(e.stop_book().len(), 1);
+
+    // Two resting bids at different prices (no trade yet → no ratchet).
+    e.process(limit_buy(2, 105.0, 1.0));
+    e.process(limit_buy(3, 95.0, 1.0));
+    assert_eq!(e.stop_book().len(), 1, "no trade yet → stop still pending");
+
+    // One sell sweeps both bids → trades at 105 then 95 within this command.
+    let events = e.process(limit_sell(4, 95.0, 2.0)).to_vec();
+
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::StopTriggered { order_id: 1, .. })),
+        "trailing stop must ratchet on the 105 print and trigger on the 95 print \
+         within one command: {events:?}"
+    );
+    assert_eq!(
+        e.stop_book().len(),
+        0,
+        "triggered trailing stop must leave the book"
+    );
+}
+
+#[test]
+fn test_fixed_stop_triggers_on_intra_command_extreme() {
+    // Same root cause for fixed stops: a sell sweep trading 105 then 100 must
+    // trigger a fixed stop-buy at 102 (price reached 105 ≥ 102), even though the
+    // final trade (100) is below the trigger.
+    let mut e = setup();
+    let stop = Order::new_stop_limit(
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(102.0), // limit
+        FixedPrice::from_f64(102.0), // stop/trigger
+        FixedQty::from_f64(1.0),
+        1000,
+    );
+    e.process(Command::PlaceOrder(stop));
+    assert_eq!(e.stop_book().len(), 1);
+
+    e.process(limit_buy(2, 105.0, 1.0));
+    e.process(limit_buy(3, 100.0, 1.0));
+
+    // Sell sweeps both bids → trades 105 then 100 in one command.
+    let events = e.process(limit_sell(4, 100.0, 2.0)).to_vec();
+
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::StopTriggered { order_id: 1, .. })),
+        "fixed stop-buy at 102 must trigger on the 105 print within the sweep: {events:?}"
+    );
+    assert_eq!(e.stop_book().len(), 0);
+}
