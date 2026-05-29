@@ -1514,3 +1514,26 @@ fn test_stop_limit_with_display_qty_rejected() {
         "rejected stop-limit must not rest in the stop book"
     );
 }
+
+#[test]
+fn test_stop_trigger_price_not_on_tick_rejected() {
+    // A stop's trigger price is a price level and must obey tick size, exactly
+    // like a limit price. An off-tick trigger (100.005 on a 0.01 tick) would
+    // otherwise be accepted and rest in the stop book at an invalid level.
+    let mut e = setup();
+    let order = Order::new_stop_market(
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
+        FixedPrice::from_raw(10_000_500_000), // stop/trigger 100.005 — off 0.01 tick
+        FixedQty::from_raw(100_000_000),      // 1.0
+        1000,
+    );
+    let events = e.process(Command::PlaceOrder(order)).to_vec();
+    assert!(
+        has_reject(&events, RejectReason::InvalidTickSize),
+        "off-tick stop trigger price must be rejected: {events:?}"
+    );
+    assert_eq!(e.stop_book().len(), 0, "rejected stop must not rest");
+}

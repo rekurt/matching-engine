@@ -78,13 +78,20 @@ pub fn validate_order(order: &Order, config: &SymbolConfig) -> Option<RejectReas
         _ => {}
     }
 
-    // Stop price validation for stop orders
+    // Stop price (trigger) validation for stop orders. The trigger is a price
+    // level, so it must be positive AND on-tick, exactly like a limit price —
+    // otherwise an off-tick trigger would rest in the stop book at an invalid
+    // level.
     if matches!(
         order.order_type,
         OrderType::StopLimit | OrderType::StopMarket
-    ) && !order.stop_price.is_positive()
-    {
-        return Some(RejectReason::InvalidPrice);
+    ) {
+        if !order.stop_price.is_positive() {
+            return Some(RejectReason::InvalidPrice);
+        }
+        if config.price_step.raw() > 0 && order.stop_price.raw() % config.price_step.raw() != 0 {
+            return Some(RejectReason::InvalidTickSize);
+        }
     }
 
     // GTD orders must carry a non-zero expiry.
