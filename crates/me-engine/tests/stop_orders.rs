@@ -982,3 +982,69 @@ fn test_iceberg_refill_does_not_self_trade_a_triggered_same_session_stop() {
         "A's triggered sell #1 must still rest (not consumed by a self-trade): {events:?}"
     );
 }
+
+#[test]
+fn test_stp_blocked_iceberg_is_cancelled_not_left_in_limbo() {
+    // STP-blocking an iceberg refill must not leave the order tracked-only
+    // (absent from both books): in that state a client CancelOrder returns
+    // OrderNotFound, GTD expiry can't find it, and a later command could
+    // resurrect it. The blocked iceberg's residual must be cancelled instead.
+    let mut e = setup();
+    e.set_self_trade_prevention(true);
+
+    let mut stop = Order::new_stop_limit(
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(100.0),
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_f64(1.0),
+        1000,
+    );
+    stop.client_session_id = SESSION_A;
+    e.process(Command::PlaceOrder(stop));
+
+    let mut iceberg = Order::new_limit(
+        2,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_f64(4.0),
+        2000,
+    )
+    .with_display_qty(FixedQty::from_f64(1.0));
+    iceberg.client_session_id = SESSION_A;
+    e.process(Command::PlaceOrder(iceberg));
+
+    // B's sell fills the visible slice → triggers A's sell stop → the refill is
+    // STP-blocked. The iceberg's residual must then be cancelled.
+    let events = e
+        .process(limit_sell_session(3, 100.0, 1.0, SESSION_B))
+        .to_vec();
+
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::OrderCancelled { order_id: 2, .. })),
+        "STP-blocked iceberg residual must be cancelled, not left tracked-only: {events:?}"
+    );
+    assert!(
+        e.book().get_order(2).is_none(),
+        "the cancelled iceberg must not rest in the book: {events:?}"
+    );
+
+    // Not resurrectable: freeing the blocking ask (#1) runs the replenish pass
+    // again; a still-tracked iceberg would re-rest a slice here. A cancelled one
+    // must stay gone.
+    e.process(Command::CancelOrder {
+        order_id: 1,
+        symbol: SymbolId(0),
+        timestamp: 4000,
+    });
+    assert!(
+        e.book().get_order(2).is_none(),
+        "cancelled iceberg must not resurrect once the blocking liquidity clears"
+    );
+}

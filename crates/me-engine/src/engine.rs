@@ -290,6 +290,10 @@ impl Engine {
             settle += 1;
         }
         self.reconcile_iceberg_events(&touched);
+        // STP may have blocked an iceberg's replenishment, leaving it tracked
+        // but absent from the book. Cancel such residuals so the order is never
+        // in an uncancellable / unexpirable / resurrectable limbo.
+        self.cancel_stp_blocked_icebergs();
 
         self.events.events()
     }
@@ -480,6 +484,45 @@ impl Engine {
                     timestamp: ts,
                 }),
             }
+        }
+    }
+
+    /// Cancel any iceberg that ends the command still tracked but absent from
+    /// the live book — i.e. self-trade prevention blocked its replenishment.
+    ///
+    /// Normally a tracked iceberg always has a visible slice resting (or has
+    /// been removed when exhausted); the only way it can be tracked-but-unrested
+    /// is an STP-blocked refill. Leaving it in that shadow-only state would make
+    /// it uncancellable (CancelOrder checks only the live/stop books → returns
+    /// OrderNotFound), unexpirable (GTD sweep also checks only those books), and
+    /// resurrectable (a later command could replenish it). Cancelling the
+    /// residual frees the reserve, notifies the client (OrderCancelled), and
+    /// restores the invariant that every tracked iceberg rests in the book.
+    ///
+    /// Runs AFTER reconcile so the fill summary (PartiallyFilled with the
+    /// residual) is emitted while the id is still tracked; this then appends the
+    /// terminal OrderCancelled for that residual.
+    fn cancel_stp_blocked_icebergs(&mut self) {
+        if self.icebergs.is_empty() {
+            return;
+        }
+        let blocked: Vec<(OrderId, FixedQty)> = self
+            .icebergs
+            .iter()
+            .filter(|(id, _)| !self.book.contains_order(**id))
+            .map(|(id, t)| (*id, t.qty.saturating_sub(t.cumulative_qty)))
+            .collect();
+        if blocked.is_empty() {
+            return;
+        }
+        let now = self.clock.now_ns();
+        for (id, remaining) in blocked {
+            self.icebergs.remove(&id);
+            self.events.push(MatchEvent::OrderCancelled {
+                order_id: id,
+                remaining_qty: remaining,
+                timestamp: now,
+            });
         }
     }
 
