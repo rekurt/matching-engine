@@ -457,28 +457,21 @@ fn match_taker_against_ask_level(
         }
     }
 
-    // Remove fully filled makers from book
-    for (maker_id, _, fully_filled) in &fills {
-        if *fully_filled {
-            book.remove_order(*maker_id);
-        }
-    }
-
-    // Update level qty for partially filled makers. Fully-filled makers are
-    // removed via remove_order (which adjusts total_qty in PriceLevel::remove);
-    // partial fills must be decremented here. Use checked subtraction so that
-    // a divergence between the level aggregate and the sum of its orders is
-    // surfaced as an invariant violation instead of silently saturating to 0.
+    // Decrement the level aggregate by EVERY fill (full and partial) while the
+    // level still exists. Fully-filled makers had their remaining zeroed above,
+    // so the subsequent remove_order subtracts 0 — the decrement must happen
+    // here, not be left to removal (which the previous code assumed but which
+    // subtracts the already-zeroed remaining), or the filled quantity would
+    // linger in total_qty and overcount available liquidity. Checked subtraction
+    // surfaces any aggregate/order divergence as an invariant violation.
     let mut total_qty_underflow = false;
     if let Some((_, level)) = book.best_ask_level_mut() {
-        for (_, fill_qty, fully_filled) in &fills {
-            if !fully_filled {
-                match level.total_qty.checked_sub(*fill_qty) {
-                    Some(v) => level.total_qty = v,
-                    None => {
-                        level.total_qty = FixedQty::ZERO;
-                        total_qty_underflow = true;
-                    }
+        for (_, fill_qty, _) in &fills {
+            match level.total_qty.checked_sub(*fill_qty) {
+                Some(v) => level.total_qty = v,
+                None => {
+                    level.total_qty = FixedQty::ZERO;
+                    total_qty_underflow = true;
                 }
             }
         }
@@ -488,6 +481,14 @@ fn match_taker_against_ask_level(
             InvariantKind::LevelTotalQtyUnderflow,
             "match_taker_against_ask_level::total_qty",
         );
+    }
+
+    // Remove fully-filled makers (remaining already 0 → PriceLevel::remove
+    // subtracts 0; their quantity left total_qty in the loop above).
+    for (maker_id, _, fully_filled) in &fills {
+        if *fully_filled {
+            book.remove_order(*maker_id);
+        }
     }
 
     // Emit taker fill events
@@ -621,22 +622,19 @@ fn match_taker_against_bid_level(
         }
     }
 
-    for (maker_id, _, fully_filled) in &fills {
-        if *fully_filled {
-            book.remove_order(*maker_id);
-        }
-    }
-
+    // Decrement the level aggregate by EVERY fill (full and partial) while the
+    // level still exists. Fully-filled makers had their remaining zeroed above,
+    // so the subsequent remove_order subtracts 0 — the decrement must happen
+    // here, not be left to removal, or the filled quantity would linger in
+    // total_qty and overcount available liquidity (breaking the FOK precheck).
     let mut total_qty_underflow = false;
     if let Some((_, level)) = book.best_bid_level_mut() {
-        for (_, fill_qty, fully_filled) in &fills {
-            if !fully_filled {
-                match level.total_qty.checked_sub(*fill_qty) {
-                    Some(v) => level.total_qty = v,
-                    None => {
-                        level.total_qty = FixedQty::ZERO;
-                        total_qty_underflow = true;
-                    }
+        for (_, fill_qty, _) in &fills {
+            match level.total_qty.checked_sub(*fill_qty) {
+                Some(v) => level.total_qty = v,
+                None => {
+                    level.total_qty = FixedQty::ZERO;
+                    total_qty_underflow = true;
                 }
             }
         }
@@ -646,6 +644,14 @@ fn match_taker_against_bid_level(
             InvariantKind::LevelTotalQtyUnderflow,
             "match_taker_against_bid_level::total_qty",
         );
+    }
+
+    // Remove fully-filled makers (remaining already 0 → PriceLevel::remove
+    // subtracts 0; their quantity left total_qty in the loop above).
+    for (maker_id, _, fully_filled) in &fills {
+        if *fully_filled {
+            book.remove_order(*maker_id);
+        }
     }
 
     let total_filled: FixedQty = fills
