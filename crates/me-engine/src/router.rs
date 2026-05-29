@@ -639,16 +639,16 @@ fn shard_worker_loop(
                                             shard_id, order_id, error = %e,
                                             "WAL GTD-EXPIRY WRITE FAILED — recovery would diverge"
                                         );
-                                        match wal_mode {
-                                            // Pre: reject the triggering command,
-                                            // same durability contract as a failed
-                                            // command pre-write below.
-                                            WalMode::Pre => wal_pre_write_failed = true,
-                                            // Post: the book is already mutated but
-                                            // not journaled — halt the symbol so no
-                                            // further un-journaled state accrues.
-                                            WalMode::Post => engine.halt_trading(),
-                                            WalMode::Disabled => {}
+                                        // The expiry already mutated the book and
+                                        // risk counters but is not journaled; the
+                                        // response depends on the WAL mode (see
+                                        // wal_expiry_failure_action).
+                                        let action = wal_expiry_failure_action(&wal_mode);
+                                        if action.reject_triggering_command {
+                                            wal_pre_write_failed = true;
+                                        }
+                                        if action.halt_symbol {
+                                            engine.halt_trading();
                                         }
                                     }
                                 }
@@ -1331,6 +1331,50 @@ fn wal_to_command(cmd: &WalCommand) -> Command {
     }
 }
 
+/// What to do when journaling a lazy GTD-expiry cancel fails mid-command.
+///
+/// The expiry has already cancelled the order in the live book and decremented
+/// the risk counters, but the cancel record is NOT durable — so the symbol's
+/// in-memory state has diverged from what WAL replay would reconstruct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExpiryJournalFailure {
+    /// Reject the command that triggered the sweep. In Pre mode that command
+    /// shares this group-commit batch and has not been journaled, so it must
+    /// not execute — otherwise replay (which never saw it) would diverge.
+    reject_triggering_command: bool,
+    /// Halt the symbol so no further commands are processed against the
+    /// un-journaled post-expiry book. Subsequent commands would match different
+    /// liquidity on replay (which lacks the expiry cancel and so still has the
+    /// expired order resting), diverging the recovered book from the live one.
+    /// Mirrors the group-commit fsync-failure handling.
+    halt_symbol: bool,
+}
+
+/// Durability policy for a failed expiry-cancel journal, by WAL mode.
+fn wal_expiry_failure_action(mode: &WalMode) -> ExpiryJournalFailure {
+    match mode {
+        // Pre: the triggering command shares this un-flushed group-commit batch
+        // and was not journaled, so reject it; AND halt, because the expiry
+        // mutation is durably lost and later commands would diverge on replay.
+        WalMode::Pre => ExpiryJournalFailure {
+            reject_triggering_command: true,
+            halt_symbol: true,
+        },
+        // Post: the command is journaled after matching; halting both stops
+        // further un-journaled state and rejects this command's post-write.
+        WalMode::Post => ExpiryJournalFailure {
+            reject_triggering_command: false,
+            halt_symbol: true,
+        },
+        // No writer is present in Disabled mode, so this path is unreachable;
+        // be total and take no action.
+        WalMode::Disabled => ExpiryJournalFailure {
+            reject_triggering_command: false,
+            halt_symbol: false,
+        },
+    }
+}
+
 /// Convert an engine `Command` to a persistence `WalCommand`.
 fn command_to_wal(cmd: &Command) -> WalCommand {
     match cmd {
@@ -1367,6 +1411,41 @@ fn command_to_wal(cmd: &Command) -> WalCommand {
 // RejectReason::InternalError (not SymbolNotFound) on all affected paths.
 // Kept as unit tests (not integration tests) because they need access to
 // the private `shards` field to kill a specific worker.
+
+#[cfg(test)]
+mod wal_durability_policy_tests {
+    use super::*;
+
+    // When an in-memory GTD expiry cannot be journaled, the symbol's durable
+    // state has diverged from memory. In Pre mode the un-journaled expiry must
+    // both reject the triggering command (it shares the un-flushed batch) AND
+    // halt the symbol — otherwise later commands match the post-expiry book live
+    // but replay (which lacks the expiry cancel) matches them against the
+    // pre-expiry book, permanently diverging the recovered state.
+    #[test]
+    fn pre_mode_expiry_journal_failure_rejects_and_halts() {
+        let action = wal_expiry_failure_action(&WalMode::Pre);
+        assert!(
+            action.reject_triggering_command,
+            "Pre must reject the un-journaled triggering command"
+        );
+        assert!(
+            action.halt_symbol,
+            "Pre must halt — an un-journaled expiry would resurrect on replay and diverge"
+        );
+    }
+
+    // Post mode already halts on this path; the halt rejects the triggering
+    // command (its post-write is skipped once the engine is halted).
+    #[test]
+    fn post_mode_expiry_journal_failure_halts() {
+        let action = wal_expiry_failure_action(&WalMode::Post);
+        assert!(
+            action.halt_symbol,
+            "Post must halt on an un-journaled expiry"
+        );
+    }
+}
 
 #[cfg(test)]
 mod dead_shard_tests {
