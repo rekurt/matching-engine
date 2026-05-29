@@ -82,6 +82,16 @@ pub fn validate_order(order: &Order, config: &SymbolConfig) -> Option<RejectReas
         return Some(RejectReason::InvalidExpiry);
     }
 
+    // A maker-only flag (post-only / maker-or-cancel) is incompatible with a
+    // market-type order: a market — and a stop-market once triggered — always
+    // takes liquidity, so it can never be a maker. Reject the contradiction
+    // rather than silently taking.
+    if order.flags & (ORDER_FLAG_POST_ONLY | ORDER_FLAG_MAKER_OR_CANCEL) != 0
+        && matches!(order.order_type, OrderType::Market | OrderType::StopMarket)
+    {
+        return Some(RejectReason::WouldTakeMarket);
+    }
+
     None
 }
 

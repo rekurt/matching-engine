@@ -346,21 +346,22 @@ impl Engine {
             // Drop fully-exhausted icebergs (final slice consumed).
             self.icebergs.retain(|_, t| t.cumulative_qty < t.qty);
 
-            // Replenish slices whose visible portion left the book.
-            let mut candidates: Vec<OrderId> = self
+            // Replenish slices whose visible portion left the book, in submission
+            // order (template timestamp, id tiebreak) — NOT client-supplied id,
+            // which need not be time-ordered. This gives the earlier-submitted
+            // iceberg queue priority and is deterministic across replicas / WAL
+            // replay, independent of HashMap iteration order.
+            let mut candidates: Vec<(u64, OrderId)> = self
                 .icebergs
                 .iter()
                 .filter(|(id, _)| !self.book.contains_order(**id))
-                .map(|(id, _)| *id)
+                .map(|(id, t)| (t.timestamp, *id))
                 .collect();
             if candidates.is_empty() {
                 break;
             }
-            // Canonical order (by id) so simultaneous replenishment assigns queue
-            // priority deterministically across replicas and WAL replay, not by
-            // HashMap iteration order.
             candidates.sort_unstable();
-            for id in candidates {
+            for (_, id) in candidates {
                 let template = match self.icebergs.get(&id) {
                     Some(t) => *t,
                     None => continue,

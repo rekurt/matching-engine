@@ -1,6 +1,6 @@
 /// Integration tests: Stop orders (G50-G57)
 use me_core::events::{MatchEvent, RejectReason};
-use me_core::order::{Order, TimeInForce};
+use me_core::order::{Order, TimeInForce, ORDER_FLAG_MAKER_OR_CANCEL};
 use me_core::symbol::SymbolConfig;
 use me_core::types::*;
 use me_engine::command::Command;
@@ -302,6 +302,40 @@ fn test_two_trailing_stops_trigger_deterministically() {
             .iter()
             .any(|ev| matches!(ev, MatchEvent::Trade(t) if t.taker_order_id == 2)),
         "the later trailing stop (id 2) must not be filled before id 1"
+    );
+}
+
+#[test]
+fn test_maker_or_cancel_on_stop_market_rejected() {
+    // A maker-or-cancel (or post-only) flag on a market-type order is
+    // contradictory: once triggered it converts to a market order, which always
+    // takes liquidity. Reject at submission rather than silently taking.
+    let mut e = setup();
+    let mut o = Order::new_stop_market(
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(95.0),
+        FixedQty::from_f64(1.0),
+        1000,
+    );
+    o.flags = ORDER_FLAG_MAKER_OR_CANCEL;
+    let events = e.process(Command::PlaceOrder(o)).to_vec();
+    assert!(
+        events.iter().any(|ev| matches!(
+            ev,
+            MatchEvent::OrderRejected {
+                reason: RejectReason::WouldTakeMarket,
+                ..
+            }
+        )),
+        "maker-or-cancel on a stop-market must be rejected"
+    );
+    assert_eq!(
+        e.stop_book().len(),
+        0,
+        "contradictory maker-or-cancel stop-market must not rest"
     );
 }
 

@@ -1341,6 +1341,59 @@ fn test_iceberg_gtd_expiry_drops_reserve() {
 }
 
 #[test]
+fn test_iceberg_replenish_respects_time_priority_not_id() {
+    // Two icebergs at the same price where the EARLIER-submitted one has the
+    // HIGHER id. Replenishment priority must follow submission time, not the
+    // client-supplied id, so the earlier order keeps queue priority.
+    let mut e = setup();
+    // id 10 submitted first (ts 1000); id 5 submitted later (ts 2000).
+    e.process(Command::PlaceOrder(
+        Order::new_limit(
+            10,
+            SymbolId(0),
+            Side::Sell,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(100.0),
+            FixedQty::from_f64(4.0),
+            1000,
+        )
+        .with_display_qty(FixedQty::from_f64(2.0)),
+    ));
+    e.process(Command::PlaceOrder(
+        Order::new_limit(
+            5,
+            SymbolId(0),
+            Side::Sell,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(100.0),
+            FixedQty::from_f64(4.0),
+            2000,
+        )
+        .with_display_qty(FixedQty::from_f64(2.0)),
+    ));
+
+    // Sweep both visible slices (2 + 2) → both replenish in this command.
+    e.process(limit_buy(20, 100.0, 4.0));
+    assert!(e.book().get_order(10).is_some() && e.book().get_order(5).is_some());
+
+    // A follow-up buy of one slice must hit the earlier-submitted iceberg (id 10,
+    // ts 1000), not the lower id (5, ts 2000).
+    let events = e.process(limit_buy(21, 100.0, 2.0)).to_vec();
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::Trade(t) if t.maker_order_id == 10)),
+        "earlier-submitted iceberg (lower timestamp) must keep priority"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::Trade(t) if t.maker_order_id == 5)),
+        "lower id must not jump ahead of an earlier-submitted order"
+    );
+}
+
+#[test]
 fn test_two_icebergs_same_price_replenish_deterministically() {
     // Two iceberg sells at the SAME price, each with a hidden reserve. One
     // incoming buy sweeps both visible slices in a single command, forcing BOTH
