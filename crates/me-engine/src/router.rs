@@ -917,7 +917,15 @@ fn shard_worker_loop(
                 reply,
             } => {
                 let events = if let Some(engine) = engines.get(&symbol) {
-                    match engine.book().get_order(order_id) {
+                    // Look in the live book first, then the stop book: a pending
+                    // stop is an accepted, resting order (OpenOrders already
+                    // reports it via stop_book), so GetOrderStatus must too rather
+                    // than claiming it vanished until it triggers or cancels.
+                    let found = engine
+                        .book()
+                        .get_order(order_id)
+                        .or_else(|| engine.stop_book().get(order_id));
+                    match found {
                         Some(order) => {
                             // Use cumulative/open quantities so an iceberg reports
                             // its true filled and open size, not the visible slice

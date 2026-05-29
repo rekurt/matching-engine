@@ -578,3 +578,48 @@ fn test_stp_rejected_triggered_stop_releases_open_order_slot() {
         "order #5 must NOT be risk-rejected: {e5:?}"
     );
 }
+
+#[test]
+fn test_query_order_returns_status_for_pending_stop() {
+    // An accepted-but-not-yet-triggered stop lives only in the stop book.
+    // GetOrderStatus must report it as OrderStatus (it is resting and accepted),
+    // not OrderNotFound — consistent with OpenOrders, which scans the stop book.
+    let mut router = Router::new(1);
+    router.add_symbol(btc_config());
+
+    // Stop-limit buy: trigger 100, limit 101. Nothing trades, so it stays
+    // pending in the stop book.
+    let stop = Order::new_stop_limit(
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(101.0), // limit
+        FixedPrice::from_f64(100.0), // stop/trigger
+        FixedQty::from_f64(1.0),
+        1000,
+    );
+    let accepted = router.process(Command::PlaceOrder(stop));
+    assert!(
+        accepted
+            .iter()
+            .any(|e| matches!(e, MatchEvent::OrderAccepted { order_id: 1, .. })),
+        "stop must be accepted: {accepted:?}"
+    );
+
+    let status = router.query_order(1, SymbolId(0));
+    assert!(
+        status
+            .iter()
+            .any(|e| matches!(e, MatchEvent::OrderStatus { order_id: 1, .. })),
+        "pending stop must report OrderStatus, not vanish until trigger: {status:?}"
+    );
+    assert!(
+        !status
+            .iter()
+            .any(|e| matches!(e, MatchEvent::OrderNotFound { .. })),
+        "pending stop must not be reported as not found: {status:?}"
+    );
+
+    router.shutdown();
+}
