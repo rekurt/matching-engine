@@ -271,6 +271,41 @@ fn test_trailing_sell_stop_ratchets_and_fills() {
 }
 
 #[test]
+fn test_two_trailing_stops_trigger_deterministically() {
+    // Two identical trailing stops are hit by the same trade with only enough
+    // liquidity for one. The earlier stop (by timestamp, then id) must get the
+    // fill — trigger order must be canonical, not HashMap-iteration order, or a
+    // replica / WAL replay could fill the other one.
+    let mut e = setup();
+    e.process(trailing_sell_stop(1, 95.0, 5.0, 1.0)); // ts 1000
+    e.process(trailing_sell_stop(2, 95.0, 5.0, 1.0)); // ts 2000
+
+    // Trade at 110 ratchets both stops up to 105 (no trigger yet).
+    e.process(limit_sell(10, 110.0, 1.0));
+    e.process(limit_buy(11, 110.0, 1.0));
+    assert_eq!(e.stop_book().len(), 2);
+
+    // Bid 2 @ 105; a sell of 1 trades at 105 (leaving 1 bid) and trips both
+    // trailing stops. Their two market sells (2 lots) chase the single remaining
+    // bid lot — only one fills.
+    e.process(limit_buy(12, 105.0, 2.0));
+    let events = e.process(limit_sell(13, 105.0, 1.0)).to_vec();
+
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::Trade(t) if t.taker_order_id == 1)),
+        "the earlier trailing stop (id 1) must deterministically get the liquidity"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::Trade(t) if t.taker_order_id == 2)),
+        "the later trailing stop (id 2) must not be filled before id 1"
+    );
+}
+
+#[test]
 fn test_gtd_stop_without_expiry_rejected() {
     // A GTD stop carries no expiry here (expire_at = 0). The engine routes stops
     // straight to the stop book, so it must validate them first — otherwise the

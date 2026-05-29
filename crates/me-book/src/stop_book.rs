@@ -250,7 +250,13 @@ impl StopBook {
         //   sell stop: stop = max(stop, price - trail); triggers when price <= stop
         if !self.trailing.is_empty() {
             let p = last_trade_price.raw();
-            let mut triggered_ids = Vec::new();
+            // Ratcheting is independent per order, so HashMap iteration order is
+            // fine here; the TRIGGER order is not — collect (timestamp, id) and
+            // sort so simultaneous triggers feed matching deterministically
+            // (time priority, id tiebreak), like the explicit order of fixed
+            // stops, instead of HashMap-iteration order that differs across
+            // replicas / WAL replay.
+            let mut triggered_ids: Vec<(u64, OrderId)> = Vec::new();
             for (id, order) in self.trailing.iter_mut() {
                 let off = order.trail_offset.raw();
                 let cur = order.stop_price.raw();
@@ -264,10 +270,11 @@ impl StopBook {
                     Side::Sell => p <= new_stop,
                 };
                 if hit {
-                    triggered_ids.push(*id);
+                    triggered_ids.push((order.timestamp, *id));
                 }
             }
-            for id in triggered_ids {
+            triggered_ids.sort_unstable();
+            for (_, id) in triggered_ids {
                 if let Some(mut order) = self.trailing.remove(&id) {
                     events.push(MatchEvent::StopTriggered {
                         order_id: id,
