@@ -273,7 +273,8 @@ impl StopBook {
                     triggered_ids.push((order.timestamp, *id));
                 }
             }
-            triggered_ids.sort_unstable();
+            // Ordering of the combined `triggered` list is imposed once below
+            // (by timestamp, id), so no local sort is needed here.
             for (_, id) in triggered_ids {
                 if let Some(mut order) = self.trailing.remove(&id) {
                     events.push(MatchEvent::StopTriggered {
@@ -286,6 +287,12 @@ impl StopBook {
                 }
             }
         }
+
+        // Feed triggered stops into matching in time priority (timestamp, with an
+        // id tiebreak), independent of the price-level vector order — which a
+        // cancellation (swap_remove) or trailing-map (HashMap) iteration can
+        // otherwise scramble, letting a newer stop execute ahead of an older one.
+        triggered.sort_unstable_by_key(|o| (o.timestamp, o.id));
 
         triggered
     }

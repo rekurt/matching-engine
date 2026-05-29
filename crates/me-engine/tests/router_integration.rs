@@ -397,3 +397,54 @@ fn test_self_trade_prevention_rejects_same_session_cross() {
         "different-session order must trade"
     );
 }
+
+#[test]
+fn test_expired_gtd_swept_before_open_order_risk_check() {
+    // With max_open_orders reached by an already-expired GTD order, the lazy
+    // expiry sweep must run BEFORE the pre-trade risk check, freeing the slot,
+    // so the next order is not spuriously rejected by stale (expired) liquidity.
+    let mut rcfg = RiskConfig::default_for(SymbolId(0));
+    rcfg.max_open_orders = 1;
+    rcfg.max_orders_per_second = 1_000_000;
+    rcfg.max_order_qty = FixedQty::from_f64(10.0);
+    rcfg.reference_price = FixedPrice::from_f64(50.0);
+    rcfg.price_band_bps = 5000; // ±50%
+
+    let mut router = Router::new(1);
+    router.add_symbol_with_risk(btc_config(), Some(rcfg));
+
+    // GTD buy with an already-past expiry → rests; open-order count = 1 (= max).
+    let gtd = Order::new_limit(
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTD,
+        FixedPrice::from_f64(50.0),
+        FixedQty::from_f64(1.0),
+        1000,
+    )
+    .with_expiry(1);
+    let e1 = router.process(Command::PlaceOrder(gtd));
+    assert!(e1
+        .iter()
+        .any(|ev| matches!(ev, MatchEvent::OrderAccepted { order_id: 1, .. })));
+
+    // The slot is occupied by an expired order; placing another must sweep it
+    // first and then accept, not reject for max_open_orders.
+    let e2 = router.process(limit_buy(2, 49.0, 1.0));
+    assert!(
+        e2.iter()
+            .any(|ev| matches!(ev, MatchEvent::OrderAccepted { order_id: 2, .. })),
+        "expired GTD must be swept before the open-order risk check"
+    );
+    assert!(
+        !e2.iter().any(|ev| matches!(
+            ev,
+            MatchEvent::OrderRejected {
+                reason: me_core::events::RejectReason::RiskCheckFailed,
+                ..
+            }
+        )),
+        "must not be rejected by an already-expired order's stale count"
+    );
+}

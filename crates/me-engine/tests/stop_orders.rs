@@ -474,6 +474,58 @@ fn test_gtd_stop_without_expiry_rejected() {
     assert_eq!(e.stop_book().len(), 0, "invalid GTD stop must not rest");
 }
 
+fn stop_market_sell(id: OrderId, stop: f64, qty: f64) -> Command {
+    Command::PlaceOrder(Order::new_stop_market(
+        id,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(stop),
+        FixedQty::from_f64(qty),
+        id * 1000, // timestamp = id*1000, so lower id == earlier
+    ))
+}
+
+#[test]
+fn test_same_price_stops_keep_time_priority_after_cancel() {
+    // Three stop-sells at the same stop price; cancelling the first uses
+    // swap_remove, which moves the last (newest) into the freed slot. Trigger
+    // order must still follow time priority (older first), not the reordered
+    // vector — otherwise a newer stop jumps ahead under limited liquidity.
+    let mut e = setup();
+    e.process(stop_market_sell(1, 95.0, 1.0)); // ts 1000
+    e.process(stop_market_sell(2, 95.0, 1.0)); // ts 2000
+    e.process(stop_market_sell(3, 95.0, 1.0)); // ts 3000
+    assert_eq!(e.stop_book().len(), 3);
+
+    // Cancel the oldest (id 1); swap_remove moves id 3 into slot 0 → vector [3,2].
+    e.process(Command::CancelOrder {
+        order_id: 1,
+        symbol: SymbolId(0),
+        timestamp: 1500,
+    });
+    assert_eq!(e.stop_book().len(), 2);
+
+    // Bid of 2 @ 95, then a sell of 1 trades at 95 (leaving one bid lot) and
+    // trips both surviving stops. Their two market sells chase the single
+    // remaining lot — the older survivor (id 2) must win, not id 3.
+    e.process(limit_buy(10, 95.0, 2.0));
+    let events = e.process(limit_sell(11, 95.0, 1.0)).to_vec();
+
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::Trade(t) if t.taker_order_id == 2)),
+        "older surviving stop (id 2) must trigger/fill ahead of the newer id 3"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::Trade(t) if t.taker_order_id == 3)),
+        "newer stop (id 3) must not jump ahead after the cancel"
+    );
+}
+
 fn trailing_buy_stop(id: OrderId, init_stop: f64, trail: f64, qty: f64) -> Command {
     Command::PlaceOrder(
         Order::new_stop_market(
