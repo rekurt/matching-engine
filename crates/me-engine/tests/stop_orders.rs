@@ -1,5 +1,5 @@
 /// Integration tests: Stop orders (G50-G57)
-use me_core::events::MatchEvent;
+use me_core::events::{MatchEvent, RejectReason};
 use me_core::order::{Order, TimeInForce};
 use me_core::symbol::SymbolConfig;
 use me_core::types::*;
@@ -268,6 +268,36 @@ fn test_trailing_sell_stop_ratchets_and_fills() {
         "triggered trailing stop must trade"
     );
     assert_eq!(e.stop_book().len(), 0);
+}
+
+#[test]
+fn test_gtd_stop_without_expiry_rejected() {
+    // A GTD stop carries no expiry here (expire_at = 0). The engine routes stops
+    // straight to the stop book, so it must validate them first — otherwise the
+    // stop is accepted, never enqueued for expiry (engine skips expire_at == 0),
+    // and becomes a permanent stop instead of being rejected as InvalidExpiry.
+    let mut e = setup();
+    let stop = Order::new_stop_market(
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTD,
+        FixedPrice::from_f64(95.0),
+        FixedQty::from_f64(1.0),
+        1000,
+    ); // new_stop_market leaves expire_at = 0
+    let events = e.process(Command::PlaceOrder(stop)).to_vec();
+    assert!(
+        events.iter().any(|ev| matches!(
+            ev,
+            MatchEvent::OrderRejected {
+                reason: RejectReason::InvalidExpiry,
+                ..
+            }
+        )),
+        "a GTD stop with no expiry must be rejected as InvalidExpiry"
+    );
+    assert_eq!(e.stop_book().len(), 0, "invalid GTD stop must not rest");
 }
 
 fn trailing_buy_stop(id: OrderId, init_stop: f64, trail: f64, qty: f64) -> Command {

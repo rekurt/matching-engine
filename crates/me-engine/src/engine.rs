@@ -104,6 +104,18 @@ impl Engine {
                 let events_start = self.events.len();
 
                 if order.is_stop() {
+                    // Stops bypass process_order, so validate them here (qty,
+                    // stop price, GTD expiry, etc.) before they rest. Internal /
+                    // Router paths build orders without the io decoder, so this is
+                    // the only validation guard for stops.
+                    if let Some(reason) = matching::validate_order(&order, &self.book.config) {
+                        self.events.push(MatchEvent::OrderRejected {
+                            order_id: order.id,
+                            reason,
+                            timestamp: order.timestamp,
+                        });
+                        return self.events.events();
+                    }
                     // Route stop orders to stop book
                     self.stop_book.insert(order, &mut self.events);
                 } else {
