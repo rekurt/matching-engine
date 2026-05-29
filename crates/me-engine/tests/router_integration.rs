@@ -448,3 +448,133 @@ fn test_expired_gtd_swept_before_open_order_risk_check() {
         "must not be rejected by an already-expired order's stale count"
     );
 }
+
+#[test]
+fn test_stp_rejected_triggered_stop_releases_open_order_slot() {
+    // A stop that triggers into same-session liquidity is STP-rejected (it is
+    // already off the stop book). The router's open-order count MUST be
+    // decremented for it — otherwise the slot leaks and later legitimate orders
+    // are spuriously rejected once the leaked count reaches max_open_orders.
+    use me_core::events::RejectReason;
+    use me_core::SessionId;
+
+    let session_a = SessionId::from_bytes([0xA1u8; 16]);
+    let session_b = SessionId::from_bytes([0xB2u8; 16]);
+    let session_c = SessionId::from_bytes([0xC3u8; 16]);
+
+    let mut rcfg = RiskConfig::default_for(SymbolId(0));
+    rcfg.max_open_orders = 3;
+    rcfg.max_orders_per_second = 1_000_000;
+    rcfg.max_order_qty = FixedQty::from_f64(10.0);
+    rcfg.reference_price = FixedPrice::from_f64(100.0);
+    rcfg.price_band_bps = 10_000; // ±100%
+    rcfg.self_trade_prevention = true;
+
+    let mut router = Router::new(1);
+    router.add_symbol_with_risk(btc_config(), Some(rcfg));
+
+    // #1 session-A sell @ 101, qty 2 — both the trigger fuel AND the self-cross
+    // target (a 1-lot taker leaves 1 lot resting). open count → 1.
+    let mut a_sell = Order::new_limit(
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(101.0),
+        FixedQty::from_f64(2.0),
+        1000,
+    );
+    a_sell.client_session_id = session_a;
+    router.process(Command::PlaceOrder(a_sell));
+
+    // #2 session-A stop-limit buy: trigger=101, limit=101. open count → 2.
+    let mut a_stop = Order::new_stop_limit(
+        2,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(101.0), // limit
+        FixedPrice::from_f64(101.0), // stop/trigger
+        FixedQty::from_f64(1.0),
+        2000,
+    );
+    a_stop.client_session_id = session_a;
+    router.process(Command::PlaceOrder(a_stop));
+
+    // #3 session-C buy @ 101, qty 1 → trades against A's sell (cross-session) →
+    // last trade=101 → triggers A's stop, which would self-cross A's remaining
+    // sell → STP-rejected. With the bug, slot #2 is never released.
+    let mut c_buy = Order::new_limit(
+        3,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(101.0),
+        FixedQty::from_f64(1.0),
+        3000,
+    );
+    c_buy.client_session_id = session_c;
+    let e3 = router.process(Command::PlaceOrder(c_buy)).to_vec();
+    assert!(
+        e3.iter()
+            .any(|ev| matches!(ev, MatchEvent::StopTriggered { order_id: 2, .. })),
+        "stop #2 must trigger: {e3:?}"
+    );
+    assert!(
+        e3.iter().any(|ev| matches!(
+            ev,
+            MatchEvent::OrderRejected {
+                order_id: 2,
+                reason: RejectReason::SelfTradePrevented,
+                ..
+            }
+        )),
+        "triggered stop #2 must be STP-rejected: {e3:?}"
+    );
+
+    // True open orders now = 1 (A's remaining sell). The STP-rejected stop must
+    // have released its slot, so two more resting orders fit under max=3.
+    let mut b_buy4 = Order::new_limit(
+        4,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(50.0),
+        FixedQty::from_f64(1.0),
+        4000,
+    );
+    b_buy4.client_session_id = session_b;
+    let e4 = router.process(Command::PlaceOrder(b_buy4)).to_vec();
+    assert!(
+        e4.iter()
+            .any(|ev| matches!(ev, MatchEvent::OrderAccepted { order_id: 4, .. })),
+        "order #4 must be accepted: {e4:?}"
+    );
+
+    let mut b_buy5 = Order::new_limit(
+        5,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(49.0),
+        FixedQty::from_f64(1.0),
+        5000,
+    );
+    b_buy5.client_session_id = session_b;
+    let e5 = router.process(Command::PlaceOrder(b_buy5)).to_vec();
+    assert!(
+        e5.iter()
+            .any(|ev| matches!(ev, MatchEvent::OrderAccepted { order_id: 5, .. })),
+        "order #5 must be accepted — a leaked STP slot falsely trips max_open_orders: {e5:?}"
+    );
+    assert!(
+        !e5.iter().any(|ev| matches!(
+            ev,
+            MatchEvent::OrderRejected {
+                reason: RejectReason::RiskCheckFailed,
+                ..
+            }
+        )),
+        "order #5 must NOT be risk-rejected: {e5:?}"
+    );
+}

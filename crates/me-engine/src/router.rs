@@ -786,6 +786,19 @@ fn shard_worker_loop(
                             MatchEvent::OrderFilled { .. } | MatchEvent::OrderCancelled { .. } => {
                                 risk.on_order_removed(symbol);
                             }
+                            // A triggered stop rejected by self-trade prevention was
+                            // counted as an open order at placement and is now gone
+                            // from both books, so release its slot. The only
+                            // OrderRejected reachable post-matching is this
+                            // trigger-loop STP rejection (a normal place-path
+                            // rejection short-circuits before this accounting), and
+                            // it is paired with a StopTriggered this command, hence
+                            // the triggered_order_ids guard.
+                            MatchEvent::OrderRejected { order_id, .. }
+                                if triggered_order_ids.contains(order_id) =>
+                            {
+                                risk.on_order_removed(symbol);
+                            }
                             MatchEvent::Trade(t) => {
                                 risk.update_reference_price(symbol, t.price);
                             }
