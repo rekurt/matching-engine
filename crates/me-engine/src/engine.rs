@@ -79,6 +79,22 @@ impl Engine {
         self.self_trade_prevention = enabled;
     }
 
+    /// True when self-trade prevention is enabled and `order` would cross into a
+    /// resting order from the same session. Shared by the normal place path and
+    /// the stop-trigger path so both honor STP identically — a market order has
+    /// no limit, so it is checked against any crossable price.
+    fn self_trade_blocked(&self, order: &Order) -> bool {
+        if !self.self_trade_prevention {
+            return false;
+        }
+        let limit_price = match order.order_type {
+            me_core::order::OrderType::Market => None,
+            _ => Some(order.price),
+        };
+        self.book
+            .would_self_trade(order.side, limit_price, &order.client_session_id)
+    }
+
     /// Process a single command and return the resulting events.
     ///
     /// This is the main entry point. Commands are processed STRICTLY SEQUENTIALLY.
@@ -140,23 +156,13 @@ impl Engine {
                     // Self-trade prevention (cancel-newest): reject before
                     // matching if the order would cross into a resting order
                     // from the same session.
-                    if self.self_trade_prevention {
-                        let limit_price = match order.order_type {
-                            me_core::order::OrderType::Market => None,
-                            _ => Some(order.price),
-                        };
-                        if self.book.would_self_trade(
-                            order.side,
-                            limit_price,
-                            &order.client_session_id,
-                        ) {
-                            self.events.push(MatchEvent::OrderRejected {
-                                order_id: order.id,
-                                reason: RejectReason::SelfTradePrevented,
-                                timestamp: order.timestamp,
-                            });
-                            return self.events.events();
-                        }
+                    if self.self_trade_blocked(&order) {
+                        self.events.push(MatchEvent::OrderRejected {
+                            order_id: order.id,
+                            reason: RejectReason::SelfTradePrevented,
+                            timestamp: order.timestamp,
+                        });
+                        return self.events.events();
                     }
 
                     // Iceberg: only the display slice is visible on the book; the
@@ -494,6 +500,17 @@ impl Engine {
 
             // Process each triggered order
             for order in triggered {
+                // A triggered stop is the newest aggressor — honor STP just like
+                // the normal place path, cancelling it rather than self-matching
+                // a resting order from the same session.
+                if self.self_trade_blocked(&order) {
+                    self.events.push(MatchEvent::OrderRejected {
+                        order_id: order.id,
+                        reason: RejectReason::SelfTradePrevented,
+                        timestamp,
+                    });
+                    continue;
+                }
                 matching::process_order(&mut self.book, order, &mut self.events);
             }
 

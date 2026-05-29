@@ -3,6 +3,7 @@ use me_core::events::{MatchEvent, RejectReason};
 use me_core::order::{Order, TimeInForce, ORDER_FLAG_MAKER_OR_CANCEL};
 use me_core::symbol::SymbolConfig;
 use me_core::types::*;
+use me_core::SessionId;
 use me_engine::command::Command;
 use me_engine::engine::Engine;
 
@@ -699,4 +700,150 @@ fn test_iceberg_replenishment_trade_triggers_stop() {
         "a stop reached only by an iceberg replenishment trade must still fire"
     );
     assert_eq!(e.stop_book().len(), 0);
+}
+
+// ─── Self-trade prevention for triggered stops ──────────────────────────────
+
+const SESSION_A: SessionId = SessionId::from_bytes([0xA1u8; 16]);
+const SESSION_B: SessionId = SessionId::from_bytes([0xB2u8; 16]);
+const SESSION_C: SessionId = SessionId::from_bytes([0xC3u8; 16]);
+
+fn limit_sell_session(id: OrderId, price: f64, qty: f64, session: SessionId) -> Command {
+    let mut o = Order::new_limit(
+        id,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(price),
+        FixedQty::from_f64(qty),
+        id * 1000,
+    );
+    o.client_session_id = session;
+    Command::PlaceOrder(o)
+}
+
+fn limit_buy_session(id: OrderId, price: f64, qty: f64, session: SessionId) -> Command {
+    let mut o = Order::new_limit(
+        id,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(price),
+        FixedQty::from_f64(qty),
+        id * 1000,
+    );
+    o.client_session_id = session;
+    Command::PlaceOrder(o)
+}
+
+/// A triggered stop that would cross its OWN session's resting order must be
+/// rejected by self-trade prevention — not executed. The trigger path
+/// (`matching::process_order`) must honor STP just like the normal place path.
+#[test]
+fn test_triggered_stop_blocked_by_self_trade_prevention() {
+    let mut e = setup();
+    e.set_self_trade_prevention(true);
+
+    // Session B sell @ 100 — fuel for the trigger trade (consumed first, FIFO).
+    e.process(limit_sell_session(1, 100.0, 1.0, SESSION_B));
+    // Session A sell @ 101 — the self-cross target; untouched by the 100 trade.
+    e.process(limit_sell_session(2, 101.0, 1.0, SESSION_A));
+
+    // Session A stop-limit buy: trigger=100, limit=101. Rests in the stop book.
+    let mut stop = Order::new_stop_limit(
+        3,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(101.0), // limit
+        FixedPrice::from_f64(100.0), // stop/trigger
+        FixedQty::from_f64(1.0),
+        3000,
+    );
+    stop.client_session_id = SESSION_A;
+    e.process(Command::PlaceOrder(stop));
+
+    // Session C buys @ 100 → trades against B's sell → last trade=100 → triggers
+    // A's stop. The triggered buy @ 101 would cross A's own resting sell @ 101.
+    let events = e
+        .process(limit_buy_session(4, 100.0, 1.0, SESSION_C))
+        .to_vec();
+
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::StopTriggered { order_id: 3, .. })),
+        "stop #3 must trigger on the 100 trade: {events:?}"
+    );
+    assert!(
+        events.iter().any(|ev| matches!(
+            ev,
+            MatchEvent::OrderRejected {
+                order_id: 3,
+                reason: RejectReason::SelfTradePrevented,
+                ..
+            }
+        )),
+        "triggered stop crossing same-session liquidity must be STP-rejected: {events:?}"
+    );
+    // No trade between the triggered stop (#3) and A's resting sell (#2).
+    assert!(
+        e.book().contains_order(2),
+        "session A's resting sell #2 must remain — no self-trade executed"
+    );
+}
+
+/// The STP guard on the trigger path must NOT over-block: a triggered stop that
+/// crosses a DIFFERENT session's liquidity still executes normally.
+#[test]
+fn test_triggered_stop_crossing_other_session_still_trades() {
+    let mut e = setup();
+    e.set_self_trade_prevention(true);
+
+    // Session B sell @ 100 — trigger fuel.
+    e.process(limit_sell_session(1, 100.0, 1.0, SESSION_B));
+    // Session B sell @ 101 — cross target owned by a DIFFERENT session than the stop.
+    e.process(limit_sell_session(2, 101.0, 1.0, SESSION_B));
+
+    // Session A stop-limit buy: trigger=100, limit=101.
+    let mut stop = Order::new_stop_limit(
+        3,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(101.0),
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_f64(1.0),
+        3000,
+    );
+    stop.client_session_id = SESSION_A;
+    e.process(Command::PlaceOrder(stop));
+
+    // Session C buys @ 100 → trades against B's sell #1 → triggers A's stop #3,
+    // which then crosses B's sell #2 (different session) → must trade.
+    let events = e
+        .process(limit_buy_session(4, 100.0, 1.0, SESSION_C))
+        .to_vec();
+
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::StopTriggered { order_id: 3, .. })),
+        "stop #3 must trigger: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|ev| matches!(
+            ev,
+            MatchEvent::OrderRejected {
+                reason: RejectReason::SelfTradePrevented,
+                ..
+            }
+        )),
+        "a different-session triggered stop must NOT be STP-rejected: {events:?}"
+    );
+    // The triggered stop crossed B's sell #2 → that resting order is consumed.
+    assert!(
+        !e.book().contains_order(2),
+        "B's resting sell #2 must be filled by the triggered stop: {events:?}"
+    );
 }
