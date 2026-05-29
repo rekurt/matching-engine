@@ -5,9 +5,11 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use me_core::events::{EventBuffer, MatchEvent, RejectReason};
-use me_core::order::{Order, OrderStatus, TimeInForce};
+use me_core::order::{
+    Order, OrderStatus, TimeInForce, ORDER_FLAG_MAKER_OR_CANCEL, ORDER_FLAG_POST_ONLY,
+};
 use me_core::symbol::SymbolConfig;
-use me_core::types::{FixedPrice, FixedQty, OrderId};
+use me_core::types::{FixedPrice, FixedQty, OrderId, Side};
 
 use me_book::book::OrderBook;
 use me_book::matching;
@@ -93,6 +95,20 @@ impl Engine {
         };
         self.book
             .would_self_trade(order.side, limit_price, &order.client_session_id)
+    }
+
+    /// True when `order` carries a maker-only flag (POST_ONLY / MAKER_OR_CANCEL)
+    /// and would cross the spread — i.e. act as a taker. Mirrors the entry-time
+    /// guard in `matching::process_order`, so an iceberg refill honors the same
+    /// "never take" contract its first slice did.
+    fn maker_only_would_cross(&self, order: &Order) -> bool {
+        if order.flags & (ORDER_FLAG_POST_ONLY | ORDER_FLAG_MAKER_OR_CANCEL) == 0 {
+            return false;
+        }
+        match order.side {
+            Side::Buy => self.book.best_ask().is_some_and(|ask| ask <= order.price),
+            Side::Sell => self.book.best_bid().is_some_and(|bid| bid >= order.price),
+        }
     }
 
     /// Process a single command and return the resulting events.
@@ -290,10 +306,11 @@ impl Engine {
             settle += 1;
         }
         self.reconcile_iceberg_events(&touched);
-        // STP may have blocked an iceberg's replenishment, leaving it tracked
-        // but absent from the book. Cancel such residuals so the order is never
-        // in an uncancellable / unexpirable / resurrectable limbo.
-        self.cancel_stp_blocked_icebergs();
+        // A pre-match guard (STP or a maker-only flag) may have blocked an
+        // iceberg's replenishment, leaving it tracked but absent from the book.
+        // Cancel such residuals so the order is never in an uncancellable /
+        // unexpirable / resurrectable limbo.
+        self.cancel_unrestable_icebergs();
 
         self.events.events()
     }
@@ -318,15 +335,16 @@ impl Engine {
             return;
         }
 
-        // Icebergs whose next slice would cross resting SAME-session liquidity
-        // (self-trade prevention). The initial placement STP check cannot see
-        // liquidity that appears after the iceberg rests — e.g. a same-session
-        // stop the iceberg's own fill triggered. Such an iceberg is skipped this
-        // command (left tracked → reported as partially filled, and retried on a
-        // later command once the blocking liquidity clears) rather than
-        // self-traded. Tracked locally so the candidate loop below cannot spin on
-        // an order it will never rematch this pass.
-        let mut stp_blocked: rustc_hash::FxHashSet<OrderId> = rustc_hash::FxHashSet::default();
+        // Icebergs whose next slice cannot be rematched this command because it
+        // would violate a pre-match guard the order carries — self-trade
+        // prevention (would cross SAME-session liquidity) or a maker-only flag
+        // (would cross at all). The initial placement check cannot see liquidity
+        // that appears after the iceberg rests (e.g. a same-session stop the
+        // iceberg's own fill triggered, or a taker's resting remainder). Such an
+        // iceberg is skipped this pass and cancelled at end-of-command. Tracked
+        // locally so the candidate loop below cannot spin on an order it will
+        // never rematch this pass.
+        let mut blocked: rustc_hash::FxHashSet<OrderId> = rustc_hash::FxHashSet::default();
 
         loop {
             // Fold only events appended since the last pass (avoid double count).
@@ -369,7 +387,7 @@ impl Engine {
             let mut candidates: Vec<(u64, OrderId)> = self
                 .icebergs
                 .iter()
-                .filter(|(id, _)| !self.book.contains_order(**id) && !stp_blocked.contains(*id))
+                .filter(|(id, _)| !self.book.contains_order(**id) && !blocked.contains(*id))
                 .map(|(id, t)| (t.timestamp, *id))
                 .collect();
             if candidates.is_empty() {
@@ -394,13 +412,15 @@ impl Engine {
                                             // status from the book. If the slice crosses, matching overwrites this
                                             // with the matched status.
                 slice.status = OrderStatus::PartiallyFilled;
-                // Self-trade prevention also applies to refills: if the next
-                // slice would cross resting same-session liquidity, skip it this
-                // command (the iceberg stays tracked and is retried later) rather
-                // than self-match — the placement check could not see liquidity
-                // that rested after the iceberg did.
-                if self.self_trade_blocked(&slice) {
-                    stp_blocked.insert(id);
+                // A refill must honor the same pre-match guards process_order
+                // applies on entry — the placement check could not see liquidity
+                // that rested after the iceberg did. Skip (→ cancelled at
+                // end-of-command) rather than rematch if the slice would:
+                //   - self-cross same-session liquidity (self-trade prevention), or
+                //   - cross at all while carrying a maker-only flag (POST_ONLY /
+                //     MAKER_OR_CANCEL), which forbids taking.
+                if self.self_trade_blocked(&slice) || self.maker_only_would_cross(&slice) {
+                    blocked.insert(id);
                     continue;
                 }
                 touched.insert(id);
@@ -488,21 +508,23 @@ impl Engine {
     }
 
     /// Cancel any iceberg that ends the command still tracked but absent from
-    /// the live book — i.e. self-trade prevention blocked its replenishment.
+    /// the live book — i.e. a pre-match guard blocked its replenishment.
     ///
     /// Normally a tracked iceberg always has a visible slice resting (or has
     /// been removed when exhausted); the only way it can be tracked-but-unrested
-    /// is an STP-blocked refill. Leaving it in that shadow-only state would make
-    /// it uncancellable (CancelOrder checks only the live/stop books → returns
-    /// OrderNotFound), unexpirable (GTD sweep also checks only those books), and
-    /// resurrectable (a later command could replenish it). Cancelling the
-    /// residual frees the reserve, notifies the client (OrderCancelled), and
-    /// restores the invariant that every tracked iceberg rests in the book.
+    /// is a refill blocked by self-trade prevention or a maker-only flag
+    /// (POST_ONLY / MAKER_OR_CANCEL). Leaving it in that shadow-only state would
+    /// make it uncancellable (CancelOrder checks only the live/stop books →
+    /// returns OrderNotFound), unexpirable (GTD sweep also checks only those
+    /// books), and resurrectable (a later command could replenish it).
+    /// Cancelling the residual frees the reserve, notifies the client
+    /// (OrderCancelled), and restores the invariant that every tracked iceberg
+    /// rests in the book.
     ///
     /// Runs AFTER reconcile so the fill summary (PartiallyFilled with the
     /// residual) is emitted while the id is still tracked; this then appends the
     /// terminal OrderCancelled for that residual.
-    fn cancel_stp_blocked_icebergs(&mut self) {
+    fn cancel_unrestable_icebergs(&mut self) {
         if self.icebergs.is_empty() {
             return;
         }

@@ -1,7 +1,9 @@
 /// Integration tests: IOC, FOK, Cancel, Amend, Validation
 /// Covers scenarios C (23-35), E (41-44), F (45-49), H (58-65), I (66-72), J (73-77)
 use me_core::events::{MatchEvent, RejectReason};
-use me_core::order::{Order, OrderStatus, TimeInForce, ORDER_FLAG_MAKER_OR_CANCEL};
+use me_core::order::{
+    Order, OrderStatus, TimeInForce, ORDER_FLAG_MAKER_OR_CANCEL, ORDER_FLAG_POST_ONLY,
+};
 use me_core::symbol::SymbolConfig;
 use me_core::types::*;
 use me_engine::command::Command;
@@ -1536,4 +1538,52 @@ fn test_stop_trigger_price_not_on_tick_rejected() {
         "off-tick stop trigger price must be rejected: {events:?}"
     );
     assert_eq!(e.stop_book().len(), 0, "rejected stop must not rest");
+}
+
+#[test]
+fn test_post_only_iceberg_refill_does_not_take() {
+    // POST_ONLY means "never take". On entry process_order rejects a crossing
+    // maker-only order; the refill path (rematch_limit) must honor the same
+    // contract. A replenished slice that would cross liquidity which appeared
+    // AFTER the iceberg rested must not execute as a taker.
+    let mut e = setup();
+    // POST_ONLY buy iceberg @ 100, total 4, display 1. Empty book → it rests.
+    let mut ice = Order::new_limit(
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_f64(4.0),
+        1000,
+    )
+    .with_display_qty(FixedQty::from_f64(1.0));
+    ice.flags = ORDER_FLAG_POST_ONLY;
+    let placed = e.process(Command::PlaceOrder(ice)).to_vec();
+    assert!(
+        placed
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::OrderAccepted { order_id: 1, .. })),
+        "post-only iceberg must rest on an empty book: {placed:?}"
+    );
+
+    // A sell @ 100 qty 3 fills the visible slice (1) and rests the remaining 2
+    // as an ask @ 100. The next refill slice @ 100 would now cross it.
+    let events = e.process(limit_sell(2, 100.0, 3.0)).to_vec();
+
+    // The post-only iceberg must NOT take the resting ask on replenishment.
+    assert!(
+        !events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::Trade(t) if t.taker_order_id == 1)),
+        "post-only iceberg refill must not execute as a taker: {events:?}"
+    );
+    // It cannot post (would cross) and cannot take (post-only) → its residual is
+    // cancelled rather than left in limbo.
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::OrderCancelled { order_id: 1, .. })),
+        "post-only iceberg that cannot post its refill must be cancelled: {events:?}"
+    );
 }
