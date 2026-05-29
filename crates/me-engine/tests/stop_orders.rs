@@ -915,3 +915,70 @@ fn test_fixed_stop_triggers_on_intra_command_extreme() {
     );
     assert_eq!(e.stop_book().len(), 0);
 }
+
+#[test]
+fn test_iceberg_refill_does_not_self_trade_a_triggered_same_session_stop() {
+    // Self-trade prevention must also cover iceberg replenishment. The initial
+    // placement STP check cannot see liquidity that appears AFTER the iceberg
+    // rests — e.g. a same-session sell stop triggered by the iceberg's own fill.
+    // The replenished buy slice must NOT match that same-session resting sell.
+    let mut e = setup();
+    e.set_self_trade_prevention(true);
+
+    // #1 session-A stop-limit SELL: trigger 100, limit 100. Rests in stop book.
+    let mut stop = Order::new_stop_limit(
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(100.0), // limit
+        FixedPrice::from_f64(100.0), // stop/trigger
+        FixedQty::from_f64(1.0),
+        1000,
+    );
+    stop.client_session_id = SESSION_A;
+    e.process(Command::PlaceOrder(stop));
+
+    // #2 session-A buy iceberg @ 100, total 4, display 1. Visible slice rests.
+    let mut iceberg = Order::new_limit(
+        2,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_f64(4.0),
+        2000,
+    )
+    .with_display_qty(FixedQty::from_f64(1.0));
+    iceberg.client_session_id = SESSION_A;
+    e.process(Command::PlaceOrder(iceberg));
+
+    // #3 session-B sell @ 100, qty 1 → trades against the iceberg's visible
+    // slice (cross-session) → last trade 100 → triggers A's sell stop, which
+    // rests @ 100. The iceberg then replenishes a buy slice @ 100 that would
+    // cross A's own resting sell.
+    let events = e
+        .process(limit_sell_session(3, 100.0, 1.0, SESSION_B))
+        .to_vec();
+
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, MatchEvent::StopTriggered { order_id: 1, .. })),
+        "A's sell stop must trigger on the cross-session fill: {events:?}"
+    );
+    // The replenished buy slice (#2) must NOT self-match A's resting sell (#1).
+    assert!(
+        !events.iter().any(|ev| matches!(
+            ev,
+            MatchEvent::Trade(t)
+                if (t.maker_order_id == 1 && t.taker_order_id == 2)
+                    || (t.maker_order_id == 2 && t.taker_order_id == 1)
+        )),
+        "iceberg refill must not self-trade the same-session stop: {events:?}"
+    );
+    assert!(
+        e.book().get_order(1).is_some(),
+        "A's triggered sell #1 must still rest (not consumed by a self-trade): {events:?}"
+    );
+}

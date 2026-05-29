@@ -314,6 +314,16 @@ impl Engine {
             return;
         }
 
+        // Icebergs whose next slice would cross resting SAME-session liquidity
+        // (self-trade prevention). The initial placement STP check cannot see
+        // liquidity that appears after the iceberg rests — e.g. a same-session
+        // stop the iceberg's own fill triggered. Such an iceberg is skipped this
+        // command (left tracked → reported as partially filled, and retried on a
+        // later command once the blocking liquidity clears) rather than
+        // self-traded. Tracked locally so the candidate loop below cannot spin on
+        // an order it will never rematch this pass.
+        let mut stp_blocked: rustc_hash::FxHashSet<OrderId> = rustc_hash::FxHashSet::default();
+
         loop {
             // Fold only events appended since the last pass (avoid double count).
             let mut fills: Vec<(OrderId, FixedQty)> = Vec::new();
@@ -355,7 +365,7 @@ impl Engine {
             let mut candidates: Vec<(u64, OrderId)> = self
                 .icebergs
                 .iter()
-                .filter(|(id, _)| !self.book.contains_order(**id))
+                .filter(|(id, _)| !self.book.contains_order(**id) && !stp_blocked.contains(*id))
                 .map(|(id, t)| (t.timestamp, *id))
                 .collect();
             if candidates.is_empty() {
@@ -380,6 +390,15 @@ impl Engine {
                                             // status from the book. If the slice crosses, matching overwrites this
                                             // with the matched status.
                 slice.status = OrderStatus::PartiallyFilled;
+                // Self-trade prevention also applies to refills: if the next
+                // slice would cross resting same-session liquidity, skip it this
+                // command (the iceberg stays tracked and is retried later) rather
+                // than self-match — the placement check could not see liquidity
+                // that rested after the iceberg did.
+                if self.self_trade_blocked(&slice) {
+                    stp_blocked.insert(id);
+                    continue;
+                }
                 touched.insert(id);
                 matching::rematch_limit(&mut self.book, &mut slice, &mut self.events);
             }
