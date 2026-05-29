@@ -1,7 +1,7 @@
 /// Integration tests: IOC, FOK, Cancel, Amend, Validation
 /// Covers scenarios C (23-35), E (41-44), F (45-49), H (58-65), I (66-72), J (73-77)
 use me_core::events::{MatchEvent, RejectReason};
-use me_core::order::{Order, TimeInForce};
+use me_core::order::{Order, TimeInForce, ORDER_FLAG_MAKER_OR_CANCEL};
 use me_core::symbol::SymbolConfig;
 use me_core::types::*;
 use me_engine::command::Command;
@@ -1077,6 +1077,35 @@ fn test_iceberg_display_not_below_total_rejected() {
         "display_qty >= total must be rejected"
     );
     assert_eq!(e.book().order_count(), 0);
+}
+
+#[test]
+fn test_maker_or_cancel_rejected_when_crossing() {
+    // MAKER_OR_CANCEL (0x04) is a documented flag with the same "maker only"
+    // semantics as POST_ONLY: a crossing order must be rejected as
+    // WouldTakeMarket, not silently accepted as a taker.
+    let mut e = setup();
+    e.process(limit_sell(1, 100.0, 1.0)); // resting ask
+    let mut o = Order::new_limit(
+        2,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_f64(1.0),
+        2000,
+    );
+    o.flags = ORDER_FLAG_MAKER_OR_CANCEL;
+    let events = e.process(Command::PlaceOrder(o)).to_vec();
+    assert!(
+        has_reject(&events, RejectReason::WouldTakeMarket),
+        "crossing maker-or-cancel order must be rejected"
+    );
+    assert_eq!(
+        count_trades(&events),
+        0,
+        "maker-or-cancel must not take liquidity"
+    );
 }
 
 #[test]

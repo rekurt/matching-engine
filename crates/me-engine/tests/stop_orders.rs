@@ -306,6 +306,77 @@ fn test_two_trailing_stops_trigger_deterministically() {
 }
 
 #[test]
+fn test_stop_with_duplicate_id_rejected() {
+    // Stops bypass process_order, so the engine must apply the same uniqueness
+    // invariant: a stop whose id collides with an existing stop OR a live order
+    // must be rejected as DuplicateOrderId, not silently inserted (which would
+    // orphan a stop-book vector entry).
+    let mut e = setup();
+    e.process(Command::PlaceOrder(Order::new_stop_market(
+        1,
+        SymbolId(0),
+        Side::Sell,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(95.0),
+        FixedQty::from_f64(1.0),
+        1000,
+    )));
+    assert_eq!(e.stop_book().len(), 1);
+
+    // Duplicate stop id → rejected.
+    let dup = e
+        .process(Command::PlaceOrder(Order::new_stop_market(
+            1,
+            SymbolId(0),
+            Side::Sell,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(90.0),
+            FixedQty::from_f64(1.0),
+            1100,
+        )))
+        .to_vec();
+    assert!(
+        dup.iter().any(|ev| matches!(
+            ev,
+            MatchEvent::OrderRejected {
+                reason: RejectReason::DuplicateOrderId,
+                ..
+            }
+        )),
+        "duplicate stop id must be rejected"
+    );
+    assert_eq!(
+        e.stop_book().len(),
+        1,
+        "duplicate stop must not be inserted"
+    );
+
+    // Stop id colliding with a live resting order → also rejected.
+    e.process(limit_buy(2, 100.0, 1.0));
+    let dup2 = e
+        .process(Command::PlaceOrder(Order::new_stop_market(
+            2,
+            SymbolId(0),
+            Side::Sell,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(95.0),
+            FixedQty::from_f64(1.0),
+            1200,
+        )))
+        .to_vec();
+    assert!(
+        dup2.iter().any(|ev| matches!(
+            ev,
+            MatchEvent::OrderRejected {
+                reason: RejectReason::DuplicateOrderId,
+                ..
+            }
+        )),
+        "stop id colliding with a live order must be rejected"
+    );
+}
+
+#[test]
 fn test_gtd_stop_without_expiry_rejected() {
     // A GTD stop carries no expiry here (expire_at = 0). The engine routes stops
     // straight to the stop book, so it must validate them first — otherwise the

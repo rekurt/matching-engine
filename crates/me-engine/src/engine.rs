@@ -116,6 +116,17 @@ impl Engine {
                         });
                         return self.events.events();
                     }
+                    // Same uniqueness invariant as process_order: an id already
+                    // resting (live book) or pending (stop book) must be rejected,
+                    // not inserted (which would orphan a stop-book vector entry).
+                    if self.book.contains_order(order.id) || self.stop_book.contains(order.id) {
+                        self.events.push(MatchEvent::OrderRejected {
+                            order_id: order.id,
+                            reason: RejectReason::DuplicateOrderId,
+                            timestamp: order.timestamp,
+                        });
+                        return self.events.events();
+                    }
                     // Route stop orders to stop book
                     self.stop_book.insert(order, &mut self.events);
                 } else {

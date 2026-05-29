@@ -1,6 +1,8 @@
 use me_core::events::{EventBuffer, MatchEvent, RejectReason};
 use me_core::invariant::InvariantKind;
-use me_core::order::{Order, OrderStatus, OrderType, TimeInForce, ORDER_FLAG_POST_ONLY};
+use me_core::order::{
+    Order, OrderStatus, OrderType, TimeInForce, ORDER_FLAG_MAKER_OR_CANCEL, ORDER_FLAG_POST_ONLY,
+};
 use me_core::symbol::SymbolConfig;
 use me_core::trade::Trade;
 use me_core::types::{FixedPrice, FixedQty, OrderId, Side};
@@ -111,9 +113,10 @@ pub fn process_order(book: &mut OrderBook, mut order: Order, events: &mut EventB
     // Dispatch by order type
     match order.order_type {
         OrderType::Limit => {
-            // POST_ONLY: reject before accepting if the order would immediately
-            // cross the spread (i.e., it would act as a taker, not a maker).
-            if order.flags & ORDER_FLAG_POST_ONLY != 0 {
+            // POST_ONLY / MAKER_OR_CANCEL (same "maker only" semantics): reject
+            // before accepting if the order would immediately cross the spread
+            // (i.e., it would act as a taker, not a maker).
+            if order.flags & (ORDER_FLAG_POST_ONLY | ORDER_FLAG_MAKER_OR_CANCEL) != 0 {
                 let would_cross = match order.side {
                     Side::Buy => book.best_ask().is_some_and(|ask| ask <= order.price),
                     Side::Sell => book.best_bid().is_some_and(|bid| bid >= order.price),
