@@ -12,11 +12,12 @@ import (
 // Client is a thread-safe client for the matching engine wire protocol.
 // It supports both TCP and Unix domain socket connections.
 type Client struct {
-	mu   sync.Mutex
-	conn net.Conn
-	w    *bufio.Writer
-	r    *bufio.Reader
-	seq  atomic.Uint64
+	mu    sync.Mutex
+	conn  net.Conn
+	w     *bufio.Writer
+	r     *bufio.Reader
+	seq   atomic.Uint64
+	reqID atomic.Uint64
 }
 
 // Dial connects to a matching engine over TCP at the given address
@@ -84,7 +85,9 @@ func (c *Client) Handshake() error {
 
 	payload := EncodeHandshake()
 	seq := c.nextSeq()
-	frame := EncodeFrame(MsgHandshake, seq, payload)
+	// Handshake is a connection-management frame, not an inbound command, so
+	// request_id is 0.
+	frame := EncodeFrame(MsgHandshake, seq, 0, payload)
 	if _, err := c.w.Write(frame); err != nil {
 		return fmt.Errorf("meclient: handshake write: %w", err)
 	}
@@ -93,7 +96,7 @@ func (c *Client) Handshake() error {
 	}
 
 	// Read the response -- should be a HandshakeAck.
-	msgType, _, respPayload, err := ReadFrame(c.r)
+	msgType, _, _, respPayload, err := ReadFrame(c.r)
 	if err != nil {
 		return fmt.Errorf("meclient: handshake read: %w", err)
 	}
@@ -122,7 +125,8 @@ func (c *Client) Ping() error {
 	defer c.mu.Unlock()
 
 	seq := c.nextSeq()
-	frame := EncodeFrame(MsgPing, seq, nil)
+	// Ping is a connection-management frame, not an inbound command (request_id 0).
+	frame := EncodeFrame(MsgPing, seq, 0, nil)
 	if _, err := c.w.Write(frame); err != nil {
 		return fmt.Errorf("meclient: ping write: %w", err)
 	}
@@ -131,7 +135,7 @@ func (c *Client) Ping() error {
 	}
 
 	// Read the response -- should be a Pong.
-	msgType, _, respPayload, err := ReadFrame(c.r)
+	msgType, _, _, respPayload, err := ReadFrame(c.r)
 	if err != nil {
 		return fmt.Errorf("meclient: ping read: %w", err)
 	}
@@ -155,20 +159,30 @@ func (c *Client) nextSeq() uint64 {
 	return c.seq.Add(1)
 }
 
-// sendFrame encodes and sends a frame. Caller must hold c.mu.
+// nextReqID returns the next request id. It is always non-zero (the counter
+// starts at 0 and is pre-incremented), because the v2 server rejects inbound
+// commands whose request_id is 0.
+func (c *Client) nextReqID() uint64 {
+	return c.reqID.Add(1)
+}
+
+// sendFrame encodes and sends a command frame with a fresh non-zero request id,
+// returning that id so the caller can correlate the server's response (which
+// echoes it). Caller must hold c.mu.
 func (c *Client) sendFrame(msgType uint8, payload []byte) (uint64, error) {
 	seq := c.nextSeq()
-	frame := EncodeFrame(msgType, seq, payload)
+	requestID := c.nextReqID()
+	frame := EncodeFrame(msgType, seq, requestID, payload)
 	if _, err := c.w.Write(frame); err != nil {
 		return 0, fmt.Errorf("meclient: write frame: %w", err)
 	}
 	if err := c.w.Flush(); err != nil {
 		return 0, fmt.Errorf("meclient: flush: %w", err)
 	}
-	return seq, nil
+	return requestID, nil
 }
 
-// PlaceOrder sends a PlaceOrder request and returns the sequence number.
+// PlaceOrder sends a PlaceOrder request and returns the request id (echoed by the matching response).
 func (c *Client) PlaceOrder(req *PlaceOrderRequest) (uint64, error) {
 	payload := EncodePlaceOrder(req)
 	c.mu.Lock()
@@ -176,7 +190,7 @@ func (c *Client) PlaceOrder(req *PlaceOrderRequest) (uint64, error) {
 	return c.sendFrame(MsgPlaceOrder, payload)
 }
 
-// CancelOrder sends a CancelOrder request and returns the sequence number.
+// CancelOrder sends a CancelOrder request and returns the request id (echoed by the matching response).
 func (c *Client) CancelOrder(req *CancelOrderRequest) (uint64, error) {
 	payload := EncodeCancelOrder(req)
 	c.mu.Lock()
@@ -184,7 +198,7 @@ func (c *Client) CancelOrder(req *CancelOrderRequest) (uint64, error) {
 	return c.sendFrame(MsgCancelOrder, payload)
 }
 
-// AmendOrder sends an AmendOrder request and returns the sequence number.
+// AmendOrder sends an AmendOrder request and returns the request id (echoed by the matching response).
 func (c *Client) AmendOrder(req *AmendOrderRequest) (uint64, error) {
 	payload := EncodeAmendOrder(req)
 	c.mu.Lock()
@@ -192,11 +206,13 @@ func (c *Client) AmendOrder(req *AmendOrderRequest) (uint64, error) {
 	return c.sendFrame(MsgAmendOrder, payload)
 }
 
-// ReadEvent reads and decodes the next event from the engine.
-// It blocks until an event is available or an error occurs.
-// Returns io.EOF when the connection is closed.
+// ReadEvent reads and decodes the next event from the engine. It blocks until
+// an event is available or an error occurs. The returned uint64 is the request
+// id the server echoed — the originating command's id, or 0 for unsolicited
+// frames — letting callers correlate replies to PlaceOrder/CancelOrder/
+// AmendOrder. Returns io.EOF when the connection is closed.
 func (c *Client) ReadEvent() (*Event, uint64, error) {
-	msgType, seq, payload, err := ReadFrame(c.r)
+	msgType, _, requestID, payload, err := ReadFrame(c.r)
 	if err != nil {
 		if err == io.EOF {
 			return nil, 0, io.EOF
@@ -205,9 +221,9 @@ func (c *Client) ReadEvent() (*Event, uint64, error) {
 	}
 	event, err := DecodeEvent(msgType, payload)
 	if err != nil {
-		return nil, seq, err
+		return nil, requestID, err
 	}
-	return event, seq, nil
+	return event, requestID, nil
 }
 
 // ReadEvents starts reading events in a loop and sends them to the returned

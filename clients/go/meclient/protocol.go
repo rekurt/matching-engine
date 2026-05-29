@@ -7,17 +7,19 @@ import (
 	"io"
 )
 
-// Frame header sizes.
+// Frame header sizes (protocol v2).
 const (
-	frameLenSize    = 4                                                          // u32 length prefix
-	frameVerSize    = 1                                                          // u8 protocol version
-	frameTypeSize   = 1                                                          // u8 message type
-	frameSeqSize    = 8                                                          // u64 sequence number
-	frameHeaderSize = frameLenSize + frameVerSize + frameTypeSize + frameSeqSize // 14 bytes
+	frameLenSize   = 4 // u32 length prefix (payload bytes only)
+	frameVerSize   = 1 // u8 protocol version
+	frameTypeSize  = 1 // u8 message type
+	frameSeqSize   = 8 // u64 sequence number
+	frameReqIDSize = 8 // u64 request id (idempotency key, server→client echoes it)
+	// 22 bytes.
+	frameHeaderSize = frameLenSize + frameVerSize + frameTypeSize + frameSeqSize + frameReqIDSize
 )
 
 // ProtocolVersion is the current wire protocol version.
-const ProtocolVersion uint8 = 1
+const ProtocolVersion uint8 = 2
 
 // Inbound message type IDs (client to engine).
 const (
@@ -79,53 +81,62 @@ var (
 	ErrProtocolError = errors.New("meclient: protocol error")
 )
 
-// EncodeFrame encodes a frame with the given type, sequence number, and
-// payload into a byte slice ready for transmission.
+// EncodeFrame encodes a v2 frame ready for transmission.
 //
-// Wire layout: len(u32 LE, payload bytes only) + ver(u8) + type(u8) + seq(u64 LE) + payload
-func EncodeFrame(msgType uint8, seq uint64, payload []byte) []byte {
+// Wire layout: len(u32 LE, payload bytes only) + ver(u8) + type(u8) +
+// seq(u64 LE) + requestID(u64 LE) + payload.
+//
+// requestID is the idempotency key the server dedups on and echoes back in the
+// matching response. It MUST be non-zero for inbound commands (PlaceOrder,
+// CancelOrder, AmendOrder); connection-management frames (Handshake, Ping) pass 0.
+func EncodeFrame(msgType uint8, seq uint64, requestID uint64, payload []byte) []byte {
 	payloadLen := uint32(len(payload))
 	buf := make([]byte, frameHeaderSize+len(payload))
 	binary.LittleEndian.PutUint32(buf[0:4], payloadLen)
 	buf[4] = ProtocolVersion
 	buf[5] = msgType
 	binary.LittleEndian.PutUint64(buf[6:14], seq)
-	copy(buf[14:], payload)
+	binary.LittleEndian.PutUint64(buf[14:22], requestID)
+	copy(buf[22:], payload)
 	return buf
 }
 
-// ReadFrame reads a single frame from the reader. It returns the message type,
-// sequence number, and payload. It returns io.EOF if the connection is closed
-// cleanly.
+// ReadFrame reads a single v2 frame from the reader. It returns the message
+// type, sequence number, request id, and payload. It returns io.EOF if the
+// connection is closed cleanly.
 //
-// Wire layout: len(u32 LE, payload bytes only) + ver(u8) + type(u8) + seq(u64 LE) + payload(len bytes)
-func ReadFrame(r io.Reader) (msgType uint8, seq uint64, payload []byte, err error) {
-	// Read the 14-byte header: len(4) + ver(1) + type(1) + seq(8)
+// Wire layout: len(u32 LE, payload bytes only) + ver(u8) + type(u8) +
+// seq(u64 LE) + requestID(u64 LE) + payload(len bytes). For server→client
+// responses the requestID echoes the originating command (0 for unsolicited
+// frames such as Pong), so callers can correlate replies to requests.
+func ReadFrame(r io.Reader) (msgType uint8, seq uint64, requestID uint64, payload []byte, err error) {
+	// Read the 22-byte header: len(4) + ver(1) + type(1) + seq(8) + reqID(8)
 	var hdr [frameHeaderSize]byte
 	if _, err = io.ReadFull(r, hdr[:]); err != nil {
-		return 0, 0, nil, err
+		return 0, 0, 0, nil, err
 	}
 
 	payloadLen := binary.LittleEndian.Uint32(hdr[0:4])
 	// hdr[4] is the version byte (ignored for forward compat)
 	msgType = hdr[5]
 	seq = binary.LittleEndian.Uint64(hdr[6:14])
+	requestID = binary.LittleEndian.Uint64(hdr[14:22])
 
 	if payloadLen > uint32(MaxFrameSize) {
-		return 0, 0, nil, ErrFrameTooLarge
+		return 0, 0, 0, nil, ErrFrameTooLarge
 	}
 
 	if payloadLen == 0 {
-		return msgType, seq, nil, nil
+		return msgType, seq, requestID, nil, nil
 	}
 
 	// Read the payload.
 	payload = make([]byte, payloadLen)
 	if _, err = io.ReadFull(r, payload); err != nil {
-		return 0, 0, nil, err
+		return 0, 0, 0, nil, err
 	}
 
-	return msgType, seq, payload, nil
+	return msgType, seq, requestID, payload, nil
 }
 
 // PlaceOrder optional-field payload sizes (length-tiered, backward compatible):

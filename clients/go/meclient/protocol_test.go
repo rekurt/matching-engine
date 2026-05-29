@@ -145,10 +145,10 @@ func TestEncodeAmendNoFields(t *testing.T) {
 
 func TestEncodeFrame(t *testing.T) {
 	payload := EncodePlaceOrder(&PlaceOrderRequest{OrderId: 1, Qty: NewDecimal(1.0)})
-	frame := EncodeFrame(0x01, 100, payload)
-	// Frame: 4 (len) + 1 (ver) + 1 (type) + 8 (seq) + 37 (payload) = 51
-	if len(frame) != 51 {
-		t.Fatalf("expected 51, got %d", len(frame))
+	frame := EncodeFrame(0x01, 100, 7, payload)
+	// Frame: 4 (len) + 1 (ver) + 1 (type) + 8 (seq) + 8 (reqID) + 37 (payload) = 59
+	if len(frame) != 59 {
+		t.Fatalf("expected 59, got %d", len(frame))
 	}
 	// len field covers payload only (37 bytes)
 	payloadLen := binary.LittleEndian.Uint32(frame[0:4])
@@ -158,6 +158,9 @@ func TestEncodeFrame(t *testing.T) {
 	if frame[4] != ProtocolVersion {
 		t.Fatalf("version: got %d", frame[4])
 	}
+	if frame[4] != 2 {
+		t.Fatalf("v2 version byte expected 2, got %d", frame[4])
+	}
 	if frame[5] != 0x01 {
 		t.Fatal("type")
 	}
@@ -165,18 +168,23 @@ func TestEncodeFrame(t *testing.T) {
 	if seq != 100 {
 		t.Fatalf("seq: %d", seq)
 	}
+	reqID := binary.LittleEndian.Uint64(frame[14:22])
+	if reqID != 7 {
+		t.Fatalf("requestID: got %d, want 7", reqID)
+	}
 }
 
 // ─── Decode outbound messages ───────────────────────────────────────────────
 
 func mkFrame(msgType uint8, seq uint64, payload []byte) []byte {
-	return EncodeFrame(msgType, seq, payload)
+	// Test outbound (server→client) frames; request_id 0 is fine for decoding.
+	return EncodeFrame(msgType, seq, 0, payload)
 }
 
 func decodeFirst(t *testing.T, frame []byte) *Event {
 	t.Helper()
 	r := bytes.NewReader(frame)
-	mt, _, pl, err := ReadFrame(r)
+	mt, _, _, pl, err := ReadFrame(r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,25 +300,26 @@ func TestDecodeStopTriggered(t *testing.T) {
 // ─── Edge Cases ─────────────────────────────────────────────────────────────
 
 func TestReadFrameIncomplete(t *testing.T) {
-	// Only 5 bytes, but header needs 14 -- should fail with unexpected EOF.
+	// Only 5 bytes, but the v2 header needs 22 -- should fail with unexpected EOF.
 	r := bytes.NewReader([]byte{5, 0, 0, 0, 1})
-	_, _, _, err := ReadFrame(r)
+	_, _, _, _, err := ReadFrame(r)
 	if err == nil {
 		t.Fatal("expected error")
 	}
 }
 
 func TestReadFrameIncompletePayload(t *testing.T) {
-	// Valid 14-byte header claiming 10-byte payload, but only 2 payload bytes.
-	var hdr [16]byte
+	// Valid 22-byte v2 header claiming 10-byte payload, but only 2 payload bytes.
+	var hdr [24]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], 10) // payload len = 10
 	hdr[4] = ProtocolVersion
 	hdr[5] = MsgOrderAccepted
-	binary.LittleEndian.PutUint64(hdr[6:14], 1) // seq
-	hdr[14] = 0xAA                              // partial payload
-	hdr[15] = 0xBB
+	binary.LittleEndian.PutUint64(hdr[6:14], 1)  // seq
+	binary.LittleEndian.PutUint64(hdr[14:22], 0) // request id
+	hdr[22] = 0xAA                               // partial payload
+	hdr[23] = 0xBB
 	r := bytes.NewReader(hdr[:])
-	_, _, _, err := ReadFrame(r)
+	_, _, _, _, err := ReadFrame(r)
 	if err == nil {
 		t.Fatal("expected error for incomplete payload")
 	}
@@ -398,11 +407,11 @@ func TestDecodeErrorFrameEmpty(t *testing.T) {
 }
 
 func TestEncodeFrameZeroPayload(t *testing.T) {
-	// Ping has no payload.
-	frame := EncodeFrame(MsgPing, 5, nil)
-	// 14 header + 0 payload = 14
-	if len(frame) != 14 {
-		t.Fatalf("expected 14, got %d", len(frame))
+	// Ping has no payload and (as a connection-management frame) request_id 0.
+	frame := EncodeFrame(MsgPing, 5, 0, nil)
+	// 22 header + 0 payload = 22
+	if len(frame) != 22 {
+		t.Fatalf("expected 22, got %d", len(frame))
 	}
 	payloadLen := binary.LittleEndian.Uint32(frame[0:4])
 	if payloadLen != 0 {
@@ -493,13 +502,13 @@ func TestMultiFrameRead(t *testing.T) {
 	combined := append(mkFrame(0x10, 1, p1[:]), mkFrame(0x15, 2, p2[:])...)
 	r := bytes.NewReader(combined)
 
-	mt1, _, pl1, _ := ReadFrame(r)
+	mt1, _, _, pl1, _ := ReadFrame(r)
 	ev1, _ := DecodeEvent(mt1, pl1)
 	if ev1.OrderAccepted == nil {
 		t.Fatal("first")
 	}
 
-	mt2, _, pl2, _ := ReadFrame(r)
+	mt2, _, _, pl2, _ := ReadFrame(r)
 	ev2, _ := DecodeEvent(mt2, pl2)
 	if ev2.OrderCancelled == nil {
 		t.Fatal("second")
