@@ -91,6 +91,84 @@ fn has_cancelled(events: &[MatchEvent], id: OrderId) -> bool {
         .any(|e| matches!(e, MatchEvent::OrderCancelled { order_id, .. } if *order_id == id))
 }
 
+// ─── Level total_qty accuracy (FOK precheck depends on it) ───────────────────
+
+/// Regression: a fully-filled maker's quantity must leave `level.total_qty`
+/// even when the level survives because another order remains. Otherwise the
+/// cached aggregate overcounts and `available_*_qty` (used by the FOK precheck)
+/// reports phantom liquidity.
+#[test]
+fn test_level_total_qty_accurate_after_full_fill() {
+    let mut book = new_book();
+    let mut events = EventBuffer::default();
+    // Two resting bids at 100: A=2, B=3 → level total 5.
+    process_order(
+        &mut book,
+        limit(1, Side::Buy, 100.0, 2.0, TimeInForce::GTC),
+        &mut events,
+    );
+    process_order(
+        &mut book,
+        limit(2, Side::Buy, 100.0, 3.0, TimeInForce::GTC),
+        &mut events,
+    );
+    assert_eq!(
+        book.available_bid_qty(Some(FixedPrice::from_f64(100.0))),
+        FixedQty::from_f64(5.0)
+    );
+
+    // A sell of 2 fully fills A (FIFO front); B (3) survives at the level.
+    let mut e2 = EventBuffer::default();
+    process_order(
+        &mut book,
+        limit(3, Side::Sell, 100.0, 2.0, TimeInForce::IOC),
+        &mut e2,
+    );
+
+    assert_eq!(
+        book.available_bid_qty(Some(FixedPrice::from_f64(100.0))),
+        FixedQty::from_f64(3.0),
+        "fully-filled maker quantity must leave level.total_qty"
+    );
+}
+
+/// End-to-end: after a full fill leaves only 3 at the level, a FOK sell for 4
+/// must be rejected (InsufficientLiquidity) — the precheck must see the true
+/// residual, not the stale cached total — and must not partially fill.
+#[test]
+fn test_fok_rejected_against_true_residual_not_stale_total() {
+    let mut book = new_book();
+    let mut events = EventBuffer::default();
+    process_order(
+        &mut book,
+        limit(1, Side::Buy, 100.0, 2.0, TimeInForce::GTC),
+        &mut events,
+    );
+    process_order(
+        &mut book,
+        limit(2, Side::Buy, 100.0, 3.0, TimeInForce::GTC),
+        &mut events,
+    );
+    let mut e2 = EventBuffer::default();
+    process_order(
+        &mut book,
+        limit(3, Side::Sell, 100.0, 2.0, TimeInForce::IOC),
+        &mut e2,
+    );
+
+    let mut e3 = EventBuffer::default();
+    process_order(
+        &mut book,
+        limit(4, Side::Sell, 100.0, 4.0, TimeInForce::FOK),
+        &mut e3,
+    );
+    assert!(
+        has_rejected(e3.events(), 4, RejectReason::InsufficientLiquidity),
+        "FOK for 4 with only 3 truly available must be rejected"
+    );
+    assert_eq!(count_trades(e3.events()), 0, "rejected FOK must not trade");
+}
+
 // ─── FOK: full rejection on insufficient liquidity ───────────────────────────
 
 /// A FOK limit buy for more than the available ask quantity must be fully rejected

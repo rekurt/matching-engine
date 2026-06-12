@@ -26,7 +26,7 @@ use me_audit::async_logger::AsyncAuditLogger;
 use me_audit::logger::{match_event_to_entry, order_to_entry};
 use me_core::events::{MatchEvent, RejectReason};
 use me_core::symbol::SymbolConfig;
-use me_core::types::{FixedQty, OrderId, SymbolId};
+use me_core::types::{OrderId, SymbolId};
 use me_metrics::EngineMetrics;
 use me_persist::snapshot::SnapshotManager;
 use me_persist::wal::{WalCommand, WalEntry, WalReader, WalWriter};
@@ -592,14 +592,90 @@ fn shard_worker_loop(
                     None
                 };
 
-                // 0. WAL pre-trade write (if mode == Pre).
+                // 0. Lazy GTD expiry sweep — runs BEFORE journaling/risk-checking
+                // this command. Two reasons:
+                //   1. An already-expired GTD frees its open-order slot so
+                //      max_open_orders does not spuriously reject this command.
+                //   2. DURABILITY/DETERMINISM: each expiry is journaled as a
+                //      CancelOrder *before* the triggering command, so crash
+                //      recovery replays the cancellation at the same log
+                //      position. Recovery never re-runs the wall-clock sweep, so
+                //      without this record replay would resurrect the expired GTD
+                //      and let it phantom-match a later order — diverging the
+                //      recovered book from the live one.
+                // The expiry cancellations are metered/audited and decrement the
+                // open-order count, but are not part of this command's reply.
+                let mut wal_pre_write_failed = false;
+                if let Some(engine) = engines.get_mut(&symbol) {
+                    let expired = engine.expire_gtd_now();
+                    if !expired.is_empty() {
+                        for ev in &expired {
+                            if let MatchEvent::OrderCancelled {
+                                order_id,
+                                timestamp,
+                                ..
+                            } = ev
+                            {
+                                // Journal the expiry as a durable cancel. Pre-mode
+                                // buffers it (group-committed alongside the
+                                // command); Post-mode appends immediately, ahead
+                                // of the command's own post-write. Either way the
+                                // expiry precedes the command in the log.
+                                if let Some(ref mut w) = wal {
+                                    let expiry_cmd = WalCommand::CancelOrder {
+                                        order_id: *order_id,
+                                        symbol,
+                                        timestamp: *timestamp,
+                                    };
+                                    let res = match wal_mode {
+                                        WalMode::Pre => w.append_nosync(&expiry_cmd),
+                                        WalMode::Post => w.append(&expiry_cmd),
+                                        // Unreachable: a present writer implies a
+                                        // non-Disabled mode. Treat as no-op.
+                                        WalMode::Disabled => Ok(0),
+                                    };
+                                    if let Err(e) = res {
+                                        tracing::error!(
+                                            shard_id, order_id, error = %e,
+                                            "WAL GTD-EXPIRY WRITE FAILED — recovery would diverge"
+                                        );
+                                        // The expiry already mutated the book and
+                                        // risk counters but is not journaled; the
+                                        // response depends on the WAL mode (see
+                                        // wal_expiry_failure_action).
+                                        let action = wal_expiry_failure_action(&wal_mode);
+                                        if action.reject_triggering_command {
+                                            wal_pre_write_failed = true;
+                                        }
+                                        if action.halt_symbol {
+                                            engine.halt_trading();
+                                        }
+                                    }
+                                }
+                                risk.on_order_removed(symbol);
+                            }
+                        }
+                        if let Some(ref a) = audit {
+                            for ev in &expired {
+                                if let Some(entry) = match_event_to_entry(ev, symbol) {
+                                    a.log_entry(entry);
+                                }
+                            }
+                        }
+                        if let Some(ref m) = metrics {
+                            m.record_events(&expired, sym_name, std::time::Duration::ZERO);
+                        }
+                    }
+                }
+
+                // 0.5. WAL pre-trade write of THIS command — AFTER the expiry
+                // cancels above, so any expiries precede it in the log.
                 //
                 // DURABILITY CONTRACT: Pre-mode guarantees that every accepted
                 // command is journaled BEFORE execution. If the write fails we
                 // MUST reject the order — otherwise a crash immediately after
                 // matching would lose the trade, violating the contract.
-                let mut wal_pre_write_failed = false;
-                if wal_mode == WalMode::Pre {
+                if wal_mode == WalMode::Pre && !wal_pre_write_failed {
                     if let Some(ref mut w) = wal {
                         let wal_cmd = command_to_wal(&cmd);
                         // Buffered append only; the batch is fsynced once in
@@ -682,30 +758,8 @@ fn shard_worker_loop(
                         timestamp: ts,
                     }]
                 } else if let Some(engine) = engines.get_mut(&symbol) {
-                    // 1.5. Lazy GTD expiry sweep for this symbol. Expiry
-                    // cancellations are audited, metered, and decrement the
-                    // open-order count, but are NOT returned in this command's
-                    // reply — they belong to other orders, not this caller.
-                    let expired = engine.expire_gtd_now();
-                    if !expired.is_empty() {
-                        for ev in &expired {
-                            if matches!(ev, MatchEvent::OrderCancelled { .. }) {
-                                risk.on_order_removed(symbol);
-                            }
-                        }
-                        if let Some(ref a) = audit {
-                            for ev in &expired {
-                                if let Some(entry) = match_event_to_entry(ev, symbol) {
-                                    a.log_entry(entry);
-                                }
-                            }
-                        }
-                        if let Some(ref m) = metrics {
-                            m.record_events(&expired, sym_name, std::time::Duration::ZERO);
-                        }
-                    }
-
-                    // 2. Matching
+                    // 2. Matching (GTD expiry was already swept above, before the
+                    // risk check, so expired orders never count against limits).
                     let events = engine.process(cmd).to_vec();
 
                     // 3. Post-trade risk state updates
@@ -730,6 +784,19 @@ fn shard_worker_loop(
                                 risk.on_order_added(symbol);
                             }
                             MatchEvent::OrderFilled { .. } | MatchEvent::OrderCancelled { .. } => {
+                                risk.on_order_removed(symbol);
+                            }
+                            // A triggered stop rejected by self-trade prevention was
+                            // counted as an open order at placement and is now gone
+                            // from both books, so release its slot. The only
+                            // OrderRejected reachable post-matching is this
+                            // trigger-loop STP rejection (a normal place-path
+                            // rejection short-circuits before this accounting), and
+                            // it is paired with a StopTriggered this command, hence
+                            // the triggered_order_ids guard.
+                            MatchEvent::OrderRejected { order_id, .. }
+                                if triggered_order_ids.contains(order_id) =>
+                            {
                                 risk.on_order_removed(symbol);
                             }
                             MatchEvent::Trade(t) => {
@@ -850,16 +917,24 @@ fn shard_worker_loop(
                 reply,
             } => {
                 let events = if let Some(engine) = engines.get(&symbol) {
-                    match engine.book().get_order(order_id) {
+                    // Look in the live book first, then the stop book: a pending
+                    // stop is an accepted, resting order (OpenOrders already
+                    // reports it via stop_book), so GetOrderStatus must too rather
+                    // than claiming it vanished until it triggers or cancels.
+                    let found = engine
+                        .book()
+                        .get_order(order_id)
+                        .or_else(|| engine.stop_book().get(order_id));
+                    match found {
                         Some(order) => {
-                            let filled = FixedQty::from_raw(
-                                order.qty.raw().saturating_sub(order.remaining_qty.raw()),
-                            );
+                            // Use cumulative/open quantities so an iceberg reports
+                            // its true filled and open size, not the visible slice
+                            // (remaining_qty is only the displayed portion).
                             vec![MatchEvent::OrderStatus {
                                 order_id,
                                 status: order.status as u8,
-                                filled_qty: filled,
-                                remaining_qty: order.remaining_qty,
+                                filled_qty: order.cumulative_qty,
+                                remaining_qty: order.open_qty(),
                                 price: order.price,
                                 timestamp: order.timestamp,
                             }]
@@ -1264,6 +1339,50 @@ fn wal_to_command(cmd: &WalCommand) -> Command {
     }
 }
 
+/// What to do when journaling a lazy GTD-expiry cancel fails mid-command.
+///
+/// The expiry has already cancelled the order in the live book and decremented
+/// the risk counters, but the cancel record is NOT durable — so the symbol's
+/// in-memory state has diverged from what WAL replay would reconstruct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExpiryJournalFailure {
+    /// Reject the command that triggered the sweep. In Pre mode that command
+    /// shares this group-commit batch and has not been journaled, so it must
+    /// not execute — otherwise replay (which never saw it) would diverge.
+    reject_triggering_command: bool,
+    /// Halt the symbol so no further commands are processed against the
+    /// un-journaled post-expiry book. Subsequent commands would match different
+    /// liquidity on replay (which lacks the expiry cancel and so still has the
+    /// expired order resting), diverging the recovered book from the live one.
+    /// Mirrors the group-commit fsync-failure handling.
+    halt_symbol: bool,
+}
+
+/// Durability policy for a failed expiry-cancel journal, by WAL mode.
+fn wal_expiry_failure_action(mode: &WalMode) -> ExpiryJournalFailure {
+    match mode {
+        // Pre: the triggering command shares this un-flushed group-commit batch
+        // and was not journaled, so reject it; AND halt, because the expiry
+        // mutation is durably lost and later commands would diverge on replay.
+        WalMode::Pre => ExpiryJournalFailure {
+            reject_triggering_command: true,
+            halt_symbol: true,
+        },
+        // Post: the command is journaled after matching; halting both stops
+        // further un-journaled state and rejects this command's post-write.
+        WalMode::Post => ExpiryJournalFailure {
+            reject_triggering_command: false,
+            halt_symbol: true,
+        },
+        // No writer is present in Disabled mode, so this path is unreachable;
+        // be total and take no action.
+        WalMode::Disabled => ExpiryJournalFailure {
+            reject_triggering_command: false,
+            halt_symbol: false,
+        },
+    }
+}
+
 /// Convert an engine `Command` to a persistence `WalCommand`.
 fn command_to_wal(cmd: &Command) -> WalCommand {
     match cmd {
@@ -1300,6 +1419,41 @@ fn command_to_wal(cmd: &Command) -> WalCommand {
 // RejectReason::InternalError (not SymbolNotFound) on all affected paths.
 // Kept as unit tests (not integration tests) because they need access to
 // the private `shards` field to kill a specific worker.
+
+#[cfg(test)]
+mod wal_durability_policy_tests {
+    use super::*;
+
+    // When an in-memory GTD expiry cannot be journaled, the symbol's durable
+    // state has diverged from memory. In Pre mode the un-journaled expiry must
+    // both reject the triggering command (it shares the un-flushed batch) AND
+    // halt the symbol — otherwise later commands match the post-expiry book live
+    // but replay (which lacks the expiry cancel) matches them against the
+    // pre-expiry book, permanently diverging the recovered state.
+    #[test]
+    fn pre_mode_expiry_journal_failure_rejects_and_halts() {
+        let action = wal_expiry_failure_action(&WalMode::Pre);
+        assert!(
+            action.reject_triggering_command,
+            "Pre must reject the un-journaled triggering command"
+        );
+        assert!(
+            action.halt_symbol,
+            "Pre must halt — an un-journaled expiry would resurrect on replay and diverge"
+        );
+    }
+
+    // Post mode already halts on this path; the halt rejects the triggering
+    // command (its post-write is skipped once the engine is halted).
+    #[test]
+    fn post_mode_expiry_journal_failure_halts() {
+        let action = wal_expiry_failure_action(&WalMode::Post);
+        assert!(
+            action.halt_symbol,
+            "Post must halt on an un-journaled expiry"
+        );
+    }
+}
 
 #[cfg(test)]
 mod dead_shard_tests {

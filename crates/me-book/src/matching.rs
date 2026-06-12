@@ -1,6 +1,8 @@
 use me_core::events::{EventBuffer, MatchEvent, RejectReason};
 use me_core::invariant::InvariantKind;
-use me_core::order::{Order, OrderStatus, OrderType, TimeInForce, ORDER_FLAG_POST_ONLY};
+use me_core::order::{
+    Order, OrderStatus, OrderType, TimeInForce, ORDER_FLAG_MAKER_OR_CANCEL, ORDER_FLAG_POST_ONLY,
+};
 use me_core::symbol::SymbolConfig;
 use me_core::trade::Trade;
 use me_core::types::{FixedPrice, FixedQty, OrderId, Side};
@@ -36,6 +38,32 @@ pub fn validate_order(order: &Order, config: &SymbolConfig) -> Option<RejectReas
     if !order.qty.is_multiple_of(config.qty_step) {
         return Some(RejectReason::InvalidLotSize);
     }
+    // Iceberg display slice: when set it must be a strict slice (< total) that
+    // itself meets the symbol minimum — otherwise a sub-min or no-op "iceberg"
+    // would rest silently with the wrong intent. It also only makes sense on a
+    // resting TIF (GTC/GTD); on IOC/FOK there is no reserve to hide.
+    if order.display_qty.raw() > 0 {
+        // Iceberg display only applies to a plain limit order. A StopLimit (or
+        // any non-Limit) carrying display_qty would pass the slice checks and
+        // rest in the stop book; once triggered, convert_stop turns it into a
+        // Limit fed straight to process_order, bypassing the engine's iceberg
+        // registration — so it rests untracked yet still flagged display_qty>0,
+        // which a later snapshot restore resurrects as a phantom iceberg. Reject
+        // it here, matching the wire decoder's constraint.
+        if order.order_type != OrderType::Limit {
+            return Some(RejectReason::InvalidQuantity);
+        }
+        if !matches!(order.tif, TimeInForce::GTC | TimeInForce::GTD) {
+            return Some(RejectReason::InvalidQuantity);
+        }
+        if order.display_qty < config.min_qty || order.display_qty >= order.qty {
+            return Some(RejectReason::InvalidQuantity);
+        }
+        // The visible slice rests on the book, so it must obey the lot step.
+        if !order.display_qty.is_multiple_of(config.qty_step) {
+            return Some(RejectReason::InvalidLotSize);
+        }
+    }
 
     // Price validations (only for limit and stop-limit orders)
     match order.order_type {
@@ -50,18 +78,35 @@ pub fn validate_order(order: &Order, config: &SymbolConfig) -> Option<RejectReas
         _ => {}
     }
 
-    // Stop price validation for stop orders
+    // Stop price (trigger) validation for stop orders. The trigger is a price
+    // level, so it must be positive AND on-tick, exactly like a limit price —
+    // otherwise an off-tick trigger would rest in the stop book at an invalid
+    // level.
     if matches!(
         order.order_type,
         OrderType::StopLimit | OrderType::StopMarket
-    ) && !order.stop_price.is_positive()
-    {
-        return Some(RejectReason::InvalidPrice);
+    ) {
+        if !order.stop_price.is_positive() {
+            return Some(RejectReason::InvalidPrice);
+        }
+        if config.price_step.raw() > 0 && order.stop_price.raw() % config.price_step.raw() != 0 {
+            return Some(RejectReason::InvalidTickSize);
+        }
     }
 
     // GTD orders must carry a non-zero expiry.
     if matches!(order.tif, TimeInForce::GTD) && order.expire_at == 0 {
         return Some(RejectReason::InvalidExpiry);
+    }
+
+    // A maker-only flag (post-only / maker-or-cancel) is incompatible with a
+    // market-type order: a market — and a stop-market once triggered — always
+    // takes liquidity, so it can never be a maker. Reject the contradiction
+    // rather than silently taking.
+    if order.flags & (ORDER_FLAG_POST_ONLY | ORDER_FLAG_MAKER_OR_CANCEL) != 0
+        && matches!(order.order_type, OrderType::Market | OrderType::StopMarket)
+    {
+        return Some(RejectReason::WouldTakeMarket);
     }
 
     None
@@ -95,9 +140,10 @@ pub fn process_order(book: &mut OrderBook, mut order: Order, events: &mut EventB
     // Dispatch by order type
     match order.order_type {
         OrderType::Limit => {
-            // POST_ONLY: reject before accepting if the order would immediately
-            // cross the spread (i.e., it would act as a taker, not a maker).
-            if order.flags & ORDER_FLAG_POST_ONLY != 0 {
+            // POST_ONLY / MAKER_OR_CANCEL (same "maker only" semantics): reject
+            // before accepting if the order would immediately cross the spread
+            // (i.e., it would act as a taker, not a maker).
+            if order.flags & (ORDER_FLAG_POST_ONLY | ORDER_FLAG_MAKER_OR_CANCEL) != 0 {
                 let would_cross = match order.side {
                     Side::Buy => book.best_ask().is_some_and(|ask| ask <= order.price),
                     Side::Sell => book.best_bid().is_some_and(|bid| bid >= order.price),
@@ -137,6 +183,15 @@ pub fn process_order(book: &mut OrderBook, mut order: Order, events: &mut EventB
 }
 
 // ─── Limit order matching ────────────────────────────────────────────────────
+
+/// Match a replenished iceberg slice against the book and rest the remainder,
+/// WITHOUT emitting `OrderAccepted` or re-validating (the parent order was
+/// already accepted at submission). Routes through the same matching path as a
+/// normal limit order so a crossing slice executes instead of resting into a
+/// crossed book. Used by the engine's iceberg replenishment.
+pub fn rematch_limit(book: &mut OrderBook, order: &mut Order, events: &mut EventBuffer) {
+    match_limit(book, order, events);
+}
 
 fn match_limit(book: &mut OrderBook, order: &mut Order, events: &mut EventBuffer) {
     // FOK: check if we can fill entirely before doing anything
@@ -419,28 +474,21 @@ fn match_taker_against_ask_level(
         }
     }
 
-    // Remove fully filled makers from book
-    for (maker_id, _, fully_filled) in &fills {
-        if *fully_filled {
-            book.remove_order(*maker_id);
-        }
-    }
-
-    // Update level qty for partially filled makers. Fully-filled makers are
-    // removed via remove_order (which adjusts total_qty in PriceLevel::remove);
-    // partial fills must be decremented here. Use checked subtraction so that
-    // a divergence between the level aggregate and the sum of its orders is
-    // surfaced as an invariant violation instead of silently saturating to 0.
+    // Decrement the level aggregate by EVERY fill (full and partial) while the
+    // level still exists. Fully-filled makers had their remaining zeroed above,
+    // so the subsequent remove_order subtracts 0 — the decrement must happen
+    // here, not be left to removal (which the previous code assumed but which
+    // subtracts the already-zeroed remaining), or the filled quantity would
+    // linger in total_qty and overcount available liquidity. Checked subtraction
+    // surfaces any aggregate/order divergence as an invariant violation.
     let mut total_qty_underflow = false;
     if let Some((_, level)) = book.best_ask_level_mut() {
-        for (_, fill_qty, fully_filled) in &fills {
-            if !fully_filled {
-                match level.total_qty.checked_sub(*fill_qty) {
-                    Some(v) => level.total_qty = v,
-                    None => {
-                        level.total_qty = FixedQty::ZERO;
-                        total_qty_underflow = true;
-                    }
+        for (_, fill_qty, _) in &fills {
+            match level.total_qty.checked_sub(*fill_qty) {
+                Some(v) => level.total_qty = v,
+                None => {
+                    level.total_qty = FixedQty::ZERO;
+                    total_qty_underflow = true;
                 }
             }
         }
@@ -450,6 +498,14 @@ fn match_taker_against_ask_level(
             InvariantKind::LevelTotalQtyUnderflow,
             "match_taker_against_ask_level::total_qty",
         );
+    }
+
+    // Remove fully-filled makers (remaining already 0 → PriceLevel::remove
+    // subtracts 0; their quantity left total_qty in the loop above).
+    for (maker_id, _, fully_filled) in &fills {
+        if *fully_filled {
+            book.remove_order(*maker_id);
+        }
     }
 
     // Emit taker fill events
@@ -583,22 +639,19 @@ fn match_taker_against_bid_level(
         }
     }
 
-    for (maker_id, _, fully_filled) in &fills {
-        if *fully_filled {
-            book.remove_order(*maker_id);
-        }
-    }
-
+    // Decrement the level aggregate by EVERY fill (full and partial) while the
+    // level still exists. Fully-filled makers had their remaining zeroed above,
+    // so the subsequent remove_order subtracts 0 — the decrement must happen
+    // here, not be left to removal, or the filled quantity would linger in
+    // total_qty and overcount available liquidity (breaking the FOK precheck).
     let mut total_qty_underflow = false;
     if let Some((_, level)) = book.best_bid_level_mut() {
-        for (_, fill_qty, fully_filled) in &fills {
-            if !fully_filled {
-                match level.total_qty.checked_sub(*fill_qty) {
-                    Some(v) => level.total_qty = v,
-                    None => {
-                        level.total_qty = FixedQty::ZERO;
-                        total_qty_underflow = true;
-                    }
+        for (_, fill_qty, _) in &fills {
+            match level.total_qty.checked_sub(*fill_qty) {
+                Some(v) => level.total_qty = v,
+                None => {
+                    level.total_qty = FixedQty::ZERO;
+                    total_qty_underflow = true;
                 }
             }
         }
@@ -608,6 +661,14 @@ fn match_taker_against_bid_level(
             InvariantKind::LevelTotalQtyUnderflow,
             "match_taker_against_bid_level::total_qty",
         );
+    }
+
+    // Remove fully-filled makers (remaining already 0 → PriceLevel::remove
+    // subtracts 0; their quantity left total_qty in the loop above).
+    for (maker_id, _, fully_filled) in &fills {
+        if *fully_filled {
+            book.remove_order(*maker_id);
+        }
     }
 
     let total_filled: FixedQty = fills
@@ -649,7 +710,9 @@ pub fn cancel_order(
         Some(order) => {
             events.push(MatchEvent::OrderCancelled {
                 order_id,
-                remaining_qty: order.remaining_qty,
+                // True open quantity (qty - cumulative). Equals remaining_qty for
+                // a plain order; for an iceberg it includes the hidden reserve.
+                remaining_qty: order.open_qty(),
                 timestamp,
             });
         }

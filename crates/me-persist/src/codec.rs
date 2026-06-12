@@ -123,8 +123,9 @@ pub fn decode_wal_command(data: &[u8]) -> Result<WalCommand, String> {
 
 /// Size of encoded order in bytes.
 /// v2: +16 bytes for client_session_id. v3: +1 byte for `flags`.
-/// v4: +8 bytes for `expire_at` (GTD).
-pub const ORDER_ENCODED_SIZE: usize = 95;
+/// v4: +8 bytes for `expire_at` (GTD). v5: +8 bytes for `trail_offset`.
+/// v6: +8 bytes for `display_qty` (iceberg).
+pub const ORDER_ENCODED_SIZE: usize = 111;
 
 /// Encode an order into a buffer (public, used by snapshot).
 pub fn encode_order_to(order: &Order, buf: &mut Vec<u8>) {
@@ -144,6 +145,8 @@ fn encode_order(order: &Order, buf: &mut Vec<u8>) {
     buf.extend_from_slice(&order.remaining_qty.raw().to_le_bytes());
     buf.extend_from_slice(&order.cumulative_qty.raw().to_le_bytes());
     buf.extend_from_slice(&order.expire_at.to_le_bytes());
+    buf.extend_from_slice(&order.trail_offset.raw().to_le_bytes());
+    buf.extend_from_slice(&order.display_qty.raw().to_le_bytes());
     buf.extend_from_slice(&order.timestamp.to_le_bytes());
     buf.extend_from_slice(&order.sequence.to_le_bytes());
     buf.extend_from_slice(&order.symbol.0.to_le_bytes());
@@ -155,13 +158,32 @@ fn encode_order(order: &Order, buf: &mut Vec<u8>) {
     buf.extend_from_slice(order.client_session_id.as_bytes());
 }
 
+/// Size of the pre-trailing/iceberg encoded order (v4): expire_at present, but
+/// no trail_offset/display_qty. A WAL written by the previous release still
+/// carries these shorter records; decoding them by length (defaulting the two
+/// new fields to zero) lets recovery replay them instead of mistaking the
+/// shorter record for a torn tail and truncating the WAL.
+const ORDER_ENCODED_SIZE_V4: usize = 95;
+
 fn decode_order(data: &[u8]) -> Result<Order, String> {
     use me_core::order::{OrderStatus, OrderType, TimeInForce};
     use me_core::types::Side;
 
-    if data.len() < ORDER_ENCODED_SIZE {
+    // The v4 and current layouts share the byte 0..56 prefix (id..expire_at).
+    // The current layout then inserts trail_offset(8)+display_qty(8) before the
+    // tail (timestamp..session), so the tail is shifted by exactly 16 bytes.
+    // `tail` is where that common tail begins for the detected layout.
+    // `extended` (>= 111) stays lenient on length because the snapshot reader
+    // hands `decode_order` the remaining buffer (orders + trailing CRC), not a
+    // single record — it reads the first 111 bytes and strides on. A
+    // non-extended record, by contrast, must be EXACTLY the v4 size: a length
+    // in (95, 111) is not produced by any released encoder, so it is a torn or
+    // corrupt record (or the never-released intra-branch v5=103 layout) and is
+    // rejected loudly rather than mis-decoded against the v4 offsets.
+    let extended = data.len() >= ORDER_ENCODED_SIZE;
+    if !extended && data.len() != ORDER_ENCODED_SIZE_V4 {
         return Err(format!(
-            "Order data too short: {} < {ORDER_ENCODED_SIZE}",
+            "Order data bad length {} (expected {ORDER_ENCODED_SIZE_V4} or >= {ORDER_ENCODED_SIZE})",
             data.len()
         ));
     }
@@ -173,29 +195,42 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
     let remaining_qty = FixedQty::from_raw(u64::from_le_bytes(data[32..40].try_into().unwrap()));
     let cumulative_qty = FixedQty::from_raw(u64::from_le_bytes(data[40..48].try_into().unwrap()));
     let expire_at = u64::from_le_bytes(data[48..56].try_into().unwrap());
-    let timestamp = u64::from_le_bytes(data[56..64].try_into().unwrap());
-    let sequence = u64::from_le_bytes(data[64..72].try_into().unwrap());
-    let symbol = SymbolId(u16::from_le_bytes(data[72..74].try_into().unwrap()));
-    let side = match data[74] {
+
+    let (trail_offset, display_qty, tail) = if extended {
+        (
+            FixedPrice::from_raw(i64::from_le_bytes(data[56..64].try_into().unwrap())),
+            FixedQty::from_raw(u64::from_le_bytes(data[64..72].try_into().unwrap())),
+            72usize,
+        )
+    } else {
+        (FixedPrice::ZERO, FixedQty::ZERO, 56usize)
+    };
+
+    let timestamp = u64::from_le_bytes(data[tail..tail + 8].try_into().unwrap());
+    let sequence = u64::from_le_bytes(data[tail + 8..tail + 16].try_into().unwrap());
+    let symbol = SymbolId(u16::from_le_bytes(
+        data[tail + 16..tail + 18].try_into().unwrap(),
+    ));
+    let side = match data[tail + 18] {
         0 => Side::Buy,
         1 => Side::Sell,
         v => return Err(format!("Invalid side: {v}")),
     };
-    let order_type = match data[75] {
+    let order_type = match data[tail + 19] {
         0 => OrderType::Limit,
         1 => OrderType::Market,
         2 => OrderType::StopLimit,
         3 => OrderType::StopMarket,
         v => return Err(format!("Invalid order type: {v}")),
     };
-    let tif = match data[76] {
+    let tif = match data[tail + 20] {
         0 => TimeInForce::GTC,
         1 => TimeInForce::IOC,
         2 => TimeInForce::FOK,
         3 => TimeInForce::GTD,
         v => return Err(format!("Invalid TIF: {v}")),
     };
-    let status = match data[77] {
+    let status = match data[tail + 21] {
         0 => OrderStatus::New,
         1 => OrderStatus::PartiallyFilled,
         2 => OrderStatus::Filled,
@@ -204,9 +239,9 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
         5 => OrderStatus::Triggered,
         v => return Err(format!("Invalid status: {v}")),
     };
-    let flags = data[78];
+    let flags = data[tail + 22];
     let mut session_bytes = [0u8; 16];
-    session_bytes.copy_from_slice(&data[79..95]);
+    session_bytes.copy_from_slice(&data[tail + 23..tail + 39]);
     let client_session_id = me_core::SessionId::from_bytes(session_bytes);
 
     Ok(Order {
@@ -217,6 +252,8 @@ fn decode_order(data: &[u8]) -> Result<Order, String> {
         remaining_qty,
         cumulative_qty,
         expire_at,
+        trail_offset,
+        display_qty,
         timestamp,
         sequence,
         symbol,
@@ -263,6 +300,52 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_legacy_v4_order_defaults_trail_and_display() {
+        // The pre-trailing/iceberg encoded order (v4) was 95 bytes: it carried
+        // expire_at but no trail_offset/display_qty, so `timestamp` followed
+        // expire_at directly. A WAL written by the previous release must still
+        // replay after upgrade — otherwise recovery treats the shorter record
+        // as a torn tail and silently truncates the WAL (data loss).
+        const V4_SIZE: usize = 95;
+        // v4 offsets: id 0, price 8, stop 16, qty 24, remaining 32, cumulative
+        // 40, expire_at 48, timestamp 56, sequence 64, symbol 72, side 74,
+        // order_type 75, tif 76, status 77, flags 78, session 79..95. Unset
+        // fields (stop/cumulative/expire/sequence/type/tif/status/flags) stay 0.
+        let mut data = vec![0u8; V4_SIZE];
+        data[0..8].copy_from_slice(&7u64.to_le_bytes());
+        data[8..16].copy_from_slice(&FixedPrice::from_f64(100.0).raw().to_le_bytes());
+        data[24..32].copy_from_slice(&FixedQty::from_f64(2.0).raw().to_le_bytes());
+        data[32..40].copy_from_slice(&FixedQty::from_f64(2.0).raw().to_le_bytes());
+        data[56..64].copy_from_slice(&123u64.to_le_bytes()); // timestamp at the v4 offset
+        data[72..74].copy_from_slice(&3u16.to_le_bytes());
+        data[74] = 1; // side = Sell
+
+        let order = decode_order_from(&data).expect("legacy v4 order must still decode");
+        assert_eq!(order.id, 7);
+        assert_eq!(order.qty, FixedQty::from_f64(2.0));
+        assert_eq!(order.timestamp, 123);
+        assert_eq!(order.symbol, SymbolId(3));
+        assert_eq!(order.side, Side::Sell);
+        assert_eq!(order.trail_offset, FixedPrice::ZERO);
+        assert_eq!(order.display_qty, FixedQty::ZERO);
+    }
+
+    #[test]
+    fn test_decode_gray_zone_length_rejected() {
+        // A non-extended record must be EXACTLY the v4 size. A length in
+        // (95, 111) — e.g. a torn WAL tail, or the never-released intra-branch
+        // v5=103 layout — must be rejected loudly, not silently mis-decoded
+        // against the v4 offsets (which would yield a garbage order).
+        for len in [96usize, 103, 110] {
+            let data = vec![0u8; len];
+            assert!(
+                decode_order_from(&data).is_err(),
+                "length {len} is between v4 (95) and current (111); must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn test_roundtrip_preserves_flags() {
         use me_core::order::ORDER_FLAG_POST_ONLY;
         let mut order = Order::new_limit(
@@ -304,6 +387,27 @@ mod tests {
             WalCommand::PlaceOrder(o) => {
                 assert_eq!(o.tif, TimeInForce::GTD);
                 assert_eq!(o.expire_at, 1_700_000_000_000_000_000);
+            }
+            _ => panic!("Expected PlaceOrder"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_preserves_iceberg_and_trail() {
+        let order = Order::new_limit(
+            11,
+            SymbolId(3),
+            Side::Sell,
+            TimeInForce::GTC,
+            FixedPrice::from_f64(100.0),
+            FixedQty::from_f64(10.0),
+            55,
+        )
+        .with_display_qty(FixedQty::from_f64(2.0));
+        match decode_wal_command(&encode_wal_command(&WalCommand::PlaceOrder(order))).unwrap() {
+            WalCommand::PlaceOrder(o) => {
+                assert_eq!(o.display_qty, FixedQty::from_f64(2.0));
+                assert!(o.is_iceberg());
             }
             _ => panic!("Expected PlaceOrder"),
         }
