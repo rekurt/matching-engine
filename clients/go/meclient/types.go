@@ -67,6 +67,8 @@ const (
 	TimeInForceIOC TimeInForce = 1
 	// TimeInForceFOK (Fill-Or-Kill) must be filled entirely or not at all.
 	TimeInForceFOK TimeInForce = 2
+	// TimeInForceGTD (Good-Til-Date) rests like GTC but expires at ExpireAt.
+	TimeInForceGTD TimeInForce = 3
 )
 
 // String returns the human-readable name of the time-in-force.
@@ -78,6 +80,8 @@ func (t TimeInForce) String() string {
 		return "IOC"
 	case TimeInForceFOK:
 		return "FOK"
+	case TimeInForceGTD:
+		return "GTD"
 	default:
 		return fmt.Sprintf("TimeInForce(%d)", t)
 	}
@@ -98,6 +102,11 @@ const (
 	RejectSymbolNotFound        RejectReason = 8
 	RejectTradingHalted         RejectReason = 9
 	RejectRiskCheckFailed       RejectReason = 10
+	RejectWouldTakeMarket       RejectReason = 11
+	RejectInternalError         RejectReason = 12
+	RejectSelfTradePrevented    RejectReason = 13
+	RejectInvalidExpiry         RejectReason = 14
+	RejectAmendNotSupported     RejectReason = 15
 )
 
 // String returns the human-readable name of the reject reason.
@@ -125,12 +134,26 @@ func (r RejectReason) String() string {
 		return "TradingHalted"
 	case RejectRiskCheckFailed:
 		return "RiskCheckFailed"
+	case RejectWouldTakeMarket:
+		return "WouldTakeMarket"
+	case RejectInternalError:
+		return "InternalError"
+	case RejectSelfTradePrevented:
+		return "SelfTradePrevented"
+	case RejectInvalidExpiry:
+		return "InvalidExpiry"
+	case RejectAmendNotSupported:
+		return "AmendNotSupported"
 	default:
 		return fmt.Sprintf("RejectReason(%d)", r)
 	}
 }
 
 // PlaceOrderRequest represents a request to place a new order.
+//
+// The advanced fields (Flags, ExpireAt, TrailOffset, DisplayQty) are optional
+// and default to zero; they are only serialized when set, keeping the wire
+// payload backward-compatible with servers/encoders that don't use them.
 type PlaceOrderRequest struct {
 	OrderId     uint64
 	SymbolId    uint16
@@ -140,6 +163,18 @@ type PlaceOrderRequest struct {
 	Price       Decimal // fixed-point price (scale 10^8)
 	StopPrice   Decimal // fixed-point stop price (scale 10^8)
 	Qty         Decimal // fixed-point quantity (scale 10^8)
+
+	// Flags is the execution-flags bitmask (e.g. POST_ONLY = 0x01).
+	Flags uint8
+	// ExpireAt is the GTD expiry as unix nanoseconds (required when
+	// TimeInForce == TimeInForceGTD; ignored otherwise).
+	ExpireAt uint64
+	// TrailOffset is the trailing-stop trail distance (price units); non-zero
+	// turns a stop order into a trailing stop.
+	TrailOffset Decimal
+	// DisplayQty is the iceberg visible slice; non-zero and < Qty makes a limit
+	// order an iceberg.
+	DisplayQty Decimal
 }
 
 // CancelOrderRequest represents a request to cancel an existing order.
@@ -180,6 +215,9 @@ type Trade struct {
 	TakerOrderId uint64
 	MakerSide    Side
 	Timestamp    uint64
+	// Sequence is the engine's monotonic trade sequence number (v2 appends it
+	// after the timestamp).
+	Sequence uint64
 }
 
 // OrderFilled is received when an order is completely filled.
@@ -208,9 +246,9 @@ type OrderCancelled struct {
 
 // OrderAmended is received when an order is successfully amended.
 type OrderAmended struct {
-	OrderId  uint64
-	NewPrice Decimal
-	NewQty   Decimal
+	OrderId   uint64
+	NewPrice  Decimal
+	NewQty    Decimal
 	Timestamp uint64
 }
 

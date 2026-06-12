@@ -45,6 +45,24 @@ fn limit_sell(id: u64, price: f64, qty: f64) -> Command {
     ))
 }
 
+/// A GTD buy whose `expire_at` is in the past (1 ns) so the next lazy sweep
+/// (SystemClock now ≫ 1) cancels it. The order still rests when first placed —
+/// the sweep runs before each *subsequent* command.
+fn gtd_buy_expired(id: u64, price: f64, qty: f64) -> Command {
+    Command::PlaceOrder(
+        Order::new_limit(
+            id,
+            SymbolId(0),
+            Side::Buy,
+            TimeInForce::GTD,
+            FixedPrice::from_f64(price),
+            FixedQty::from_f64(qty),
+            id * 1000,
+        )
+        .with_expiry(1),
+    )
+}
+
 // ─── WAL Pre-mode tests ─────────────────────────────────────────────────────
 
 #[test]
@@ -488,5 +506,105 @@ fn test_wal_multi_shard() {
     match &entries1[0].command {
         WalCommand::PlaceOrder(o) => assert_eq!(o.symbol, SymbolId(1)),
         _ => panic!("Expected PlaceOrder on shard 1"),
+    }
+}
+
+// ─── GTD expiry durability (replay determinism) ─────────────────────────────
+
+#[test]
+fn test_gtd_expiry_is_journaled_before_triggering_command() {
+    // A GTD order that expires during the lazy pre-command sweep MUST be
+    // journaled as a durable CancelOrder BEFORE the command that triggered the
+    // sweep. Otherwise crash recovery replays only PlaceOrder#1, PlaceOrder#2 —
+    // resurrecting the expired GTD so it phantom-matches the later order.
+    let wal_dir = temp_wal_dir("gtd_expiry_journaled");
+    let wal_cfg = WalConfig {
+        mode: WalMode::Pre,
+        path: wal_dir.clone(),
+        sync_interval: 1,
+        ..Default::default()
+    };
+
+    {
+        let mut router = Router::new_with_wal(1, None, None, wal_cfg);
+        router.add_symbol(btc_config());
+        // #1 rests now (already-past expiry is only swept on the next command).
+        router.process(gtd_buy_expired(1, 100.0, 1.0));
+        // #2 WOULD cross #1, but the pre-command sweep expires #1 first, so #2
+        // just rests. The expiry cancel must be journaled before #2.
+        router.process(limit_sell(2, 100.0, 1.0));
+        router.shutdown();
+    }
+
+    let wal_path = format!("{}/shard_0.wal", wal_dir);
+    let mut reader = WalReader::open(&wal_path).unwrap();
+    let entries = reader.read_all().unwrap();
+
+    assert_eq!(
+        entries.len(),
+        3,
+        "expected PlaceOrder#1, CancelOrder#1 (expiry), PlaceOrder#2; got {:?}",
+        entries.iter().map(|e| &e.command).collect::<Vec<_>>()
+    );
+    match &entries[0].command {
+        WalCommand::PlaceOrder(o) => assert_eq!(o.id, 1),
+        other => panic!("entry 0 should be PlaceOrder#1, got {other:?}"),
+    }
+    match &entries[1].command {
+        WalCommand::CancelOrder { order_id, .. } => {
+            assert_eq!(
+                *order_id, 1,
+                "the expired GTD must be journaled as a cancel"
+            );
+        }
+        other => panic!("entry 1 should be CancelOrder#1 (expiry), got {other:?}"),
+    }
+    match &entries[2].command {
+        WalCommand::PlaceOrder(o) => assert_eq!(o.id, 2),
+        other => panic!("entry 2 should be PlaceOrder#2, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_recovery_does_not_resurrect_expired_gtd() {
+    // End-to-end determinism: after a GTD expires live (freeing its slot) and a
+    // later order rests against the now-empty side, recovery must NOT resurrect
+    // the expired GTD and let it phantom-match the later order.
+    let wal_dir = temp_wal_dir("gtd_recovery_no_resurrect");
+    let mk_cfg = || WalConfig {
+        mode: WalMode::Pre,
+        path: wal_dir.clone(),
+        sync_interval: 0, // fsync every write
+        ..Default::default()
+    };
+
+    // Phase 1: live run.
+    {
+        let mut router = Router::new_with_wal(1, None, None, mk_cfg());
+        router.add_symbol(btc_config());
+        router.process(gtd_buy_expired(1, 100.0, 1.0)); // rests
+        router.process(limit_sell(2, 100.0, 1.0)); // sweep expires #1 → #2 rests
+        router.shutdown();
+    }
+
+    // Phase 2: brand-new router recovers from the same WAL dir.
+    {
+        let mut router = Router::new_with_wal(1, None, None, mk_cfg());
+        router.add_symbol(btc_config());
+
+        let q1 = router.query_order(1, SymbolId(0));
+        assert!(
+            q1.iter()
+                .any(|e| matches!(e, MatchEvent::OrderNotFound { order_id: 1 })),
+            "expired GTD #1 must NOT be resurrected after recovery, got {q1:?}"
+        );
+
+        let q2 = router.query_order(2, SymbolId(0));
+        assert!(
+            q2.iter()
+                .any(|e| matches!(e, MatchEvent::OrderStatus { order_id: 2, .. })),
+            "order #2 must still rest after recovery (no phantom match), got {q2:?}"
+        );
+        router.shutdown();
     }
 }

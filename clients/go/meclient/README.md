@@ -58,25 +58,7 @@ All integers are **little-endian**. Prices and quantities use **fixed-point** re
 
 ### Frame Format
 
-Every message is wrapped in a length-prefixed, versioned frame:
-
-> **⚠ Migration required:** The Go client library currently implements **protocol v1**
-> (14-byte header, no `req_id`). The server enforces **v2 only** — connecting with
-> this client will fail with `UnsupportedVersion`. A v2 migration of this library
-> is in progress. The v2 wire format is documented below for implementers.
-
-**Protocol v1 (current Go client):**
-
-```
-┌──────────┬──────────┬──────────┬──────────┬─────────────────┐
-│ len: u32 │ ver: u8  │ type: u8 │ seq: u64 │ payload: [u8]   │
-│ 4 bytes  │ 1 byte   │ 1 byte   │ 8 bytes  │ variable        │
-└──────────┴──────────┴──────────┴──────────┴─────────────────┘
-```
-
-Header size: 14 bytes. Version byte: `0x01`.
-
-**Protocol v2 (server native):**
+Every message is wrapped in a length-prefixed, versioned frame (protocol **v2**):
 
 ```
 ┌──────────┬──────────┬──────────┬──────────┬─────────────┬─────────────────┐
@@ -85,7 +67,14 @@ Header size: 14 bytes. Version byte: `0x01`.
 └──────────┴──────────┴──────────┴──────────┴─────────────┴─────────────────┘
 ```
 
-Header size: 22 bytes. Version byte: `0x02`. `req_id` enables exactly-once semantics and response correlation.
+Header size: 22 bytes. Version byte: `0x02`. `len` covers the payload only.
+
+`req_id` is the idempotency key. Inbound commands (`PlaceOrder`, `CancelOrder`,
+`AmendOrder`) MUST carry a non-zero `req_id` — the server dedups on it and echoes
+it in the matching response for correlation; a zero `req_id` on a command is
+rejected with `InvalidRequestId`. Connection-management frames (`Handshake`,
+`Ping`) use `req_id` 0. `PlaceOrder`/`CancelOrder`/`AmendOrder` return the
+generated `req_id`, and `ReadEvent` returns the echoed `req_id` of each response.
 
 ### Connection Lifecycle
 

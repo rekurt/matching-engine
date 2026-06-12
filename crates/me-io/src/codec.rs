@@ -472,6 +472,8 @@ pub fn decode_frame(
 /// StopPrice(8) + Qty(8)  = 37 bytes (base)
 ///   [+ Flags(1)]         = 38 bytes
 ///   [+ ExpireAt(8)]      = 46 bytes (GTD expiry, unix nanoseconds)
+///   [+ TrailOffset(8)]   = 54 bytes (trailing-stop trail distance)
+///   [+ DisplayQty(8)]    = 62 bytes (iceberg visible slice)
 /// Older clients send 37/38 bytes; the extra fields default to 0.
 fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Command, DecodeError> {
     if payload.len() < 37 {
@@ -542,6 +544,44 @@ fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Com
         ));
     }
 
+    // Backward-compatible trailing-stop offset: bytes 46..54 if present, else 0.
+    let trail_offset = if payload.len() >= 54 {
+        FixedPrice::from_raw(i64::from_le_bytes(
+            payload[46..54]
+                .try_into()
+                .expect("PlaceOrder: trail_offset"),
+        ))
+    } else {
+        FixedPrice::ZERO
+    };
+    // A negative trail is nonsensical and would otherwise be silently treated
+    // as a fixed stop (is_trailing_stop only checks > 0).
+    if trail_offset.raw() < 0 {
+        return Err(DecodeError::InvalidPayload(
+            "trail_offset must be non-negative".into(),
+        ));
+    }
+    let is_trailing = trail_offset.raw() > 0;
+    if is_trailing && !matches!(order_type, OrderType::StopLimit | OrderType::StopMarket) {
+        return Err(DecodeError::InvalidPayload(
+            "trail_offset is only valid on stop orders".into(),
+        ));
+    }
+
+    // Backward-compatible iceberg display size: bytes 54..62 if present, else 0.
+    let display_qty = if payload.len() >= 62 {
+        FixedQty::from_raw(u64::from_le_bytes(
+            payload[54..62].try_into().expect("PlaceOrder: display_qty"),
+        ))
+    } else {
+        FixedQty::ZERO
+    };
+    if display_qty.raw() > 0 && !matches!(order_type, OrderType::Limit) {
+        return Err(DecodeError::InvalidPayload(
+            "display_qty (iceberg) is only valid on limit orders".into(),
+        ));
+    }
+
     if matches!(order_type, OrderType::Limit | OrderType::StopLimit) && !price.is_positive() {
         return Err(DecodeError::InvalidPayload(
             "Limit/StopLimit order requires positive price".into(),
@@ -565,6 +605,8 @@ fn decode_place_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Com
         remaining_qty: qty,
         cumulative_qty: FixedQty::ZERO,
         expire_at,
+        trail_offset,
+        display_qty,
         timestamp,
         sequence: 0,
         symbol,
@@ -951,7 +993,9 @@ pub fn encode_open_order(
     buf.put_i64_le(order.price.raw());
     buf.put_i64_le(order.stop_price.raw());
     buf.put_u64_le(order.qty.raw());
-    buf.put_u64_le(order.remaining_qty.raw());
+    // True open quantity (qty - cumulative); for an iceberg this is the full
+    // residual, not the visible slice, so a resync reports correct open size.
+    buf.put_u64_le(order.open_qty().raw());
     buf.put_u64_le(order.timestamp);
     buf.put_u8(order.flags);
     // Reserved padding to make payload aligned and future-proof
@@ -1005,5 +1049,6 @@ fn reject_reason_to_u8(reason: &me_core::events::RejectReason) -> u8 {
         RejectReason::InternalError => 12,
         RejectReason::SelfTradePrevented => 13,
         RejectReason::InvalidExpiry => 14,
+        RejectReason::AmendNotSupported => 15,
     }
 }
