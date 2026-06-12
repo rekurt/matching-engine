@@ -442,7 +442,9 @@ where
                                                 if let me_engine::command::Command::PlaceOrder(ref mut ord) = cmd {
                                                     ord.client_session_id = conn.session_id;
                                                 }
-                                                let events = router.process(cmd);
+                                                // Enforce order ownership on cancel/amend: a client
+                                                // may only mutate orders its own session placed.
+                                                let events = router.process_with_session(cmd, conn.session_id);
                                                 codec::encode_events(&events, seq, request_id, &mut write_buf);
                                                 new_dedup_request_id = Some(request_id);
                                             }
@@ -456,7 +458,7 @@ where
                                                     if let me_engine::command::Command::PlaceOrder(ref mut ord) = cmd {
                                                         ord.client_session_id = conn.session_id;
                                                     }
-                                                    let events = router.process(cmd);
+                                                    let events = router.process_with_session(cmd, conn.session_id);
                                                     codec::encode_events(&events, seq, request_id, &mut write_buf);
                                                 }
                                                 new_dedup_request_id = Some(request_id);
@@ -468,7 +470,7 @@ where
                                                 dedup_cache_hit = true;
                                             } else {
                                                 let symbol = me_core::types::SymbolId(symbol_id);
-                                                let events = router.query_order(order_id, symbol);
+                                                let events = router.query_order_for_session(order_id, symbol, conn.session_id);
                                                 codec::encode_events(&events, seq, request_id, &mut write_buf);
                                                 new_dedup_request_id = Some(request_id);
                                             }

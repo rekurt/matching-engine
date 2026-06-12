@@ -4,8 +4,13 @@
 [server]
 # TCP listen address / Адрес TCP сервера
 tcp_addr = "0.0.0.0:9090"
-# Metrics/Admin HTTP listen address / Адрес HTTP метрик и админки
-metrics_addr = "0.0.0.0:9091"
+# Metrics/Admin HTTP listen address / Адрес HTTP метрик и админки.
+# Bind to loopback by default: /metrics and /admin endpoints are UNAUTHENTICATED
+# (except mutating admin routes, which require server.admin.api_key) and expose
+# trading volumes, latencies, and book state. Put them behind a reverse proxy or
+# private network rather than binding 0.0.0.0.
+# Адрес HTTP метрик/админки. По умолчанию loopback: /metrics без аутентификации.
+metrics_addr = "127.0.0.1:9091"
 # Number of engine shards (0 = auto, uses available_parallelism)
 # Количество шардов (0 = авто, по числу ядер)
 shards = 0
@@ -13,8 +18,10 @@ shards = 0
 # uds_path = "/tmp/matching-engine.sock"
 
 [server.admin]
-# API key for admin endpoints. Empty = no authentication.
-# API ключ для админских эндпоинтов. Пустой = без аутентификации.
+# API key for admin endpoints. Empty = mutating admin endpoints DISABLED.
+# Set a strong secret (>= 16 chars) to enable halt/resume. Never ship empty to prod.
+# API ключ для админки. Пустой = мутирующие эндпоинты ОТКЛЮЧЕНЫ.
+# api_key = "REPLACE_WITH_STRONG_SECRET"
 api_key = ""
 
 [server.shutdown]
@@ -32,6 +39,16 @@ drain_timeout_secs = 30
 #   "halt_symbol" — log + halt the affected symbol only (prod recommended)
 #   "continue"    — log + keep processing (only for emergency recovery)
 # Any violation also increments `me_invariant_violations_total{kind,symbol}`.
+#
+# Optional per-symbol `[symbols.risk]` table enables PRE-TRADE risk controls.
+# WITHOUT this table NO risk checks run for the symbol. Fields:
+#   max_order_qty          — fat-finger max single-order qty (decimal string)
+#   max_order_notional     — max price*qty per order in quote ccy (decimal string)
+#   price_band_bps         — max deviation from reference price, bps (0 = off)
+#   max_orders_per_second  — token-bucket rate limit (0 = off)
+#   max_open_orders        — max simultaneously resting orders (0 = off)
+#   trading_enabled        — false to reject all new orders for the symbol
+#   self_trade_prevention  — true to reject same-session self-matches
 
 [[symbols]]
 id = 0
@@ -45,6 +62,15 @@ qty_step = "0.00001"
 price_step = "0.01"
 invariant_policy = "halt_symbol"
 
+[symbols.risk]
+max_order_qty = "10000.0"
+max_order_notional = "100000000.0"
+price_band_bps = 1000
+max_orders_per_second = 1000
+max_open_orders = 100000
+trading_enabled = true
+self_trade_prevention = false
+
 [[symbols]]
 id = 1
 base = "ETH"
@@ -56,6 +82,15 @@ max_qty = "100000.0"
 qty_step = "0.0001"
 price_step = "0.01"
 
+[symbols.risk]
+max_order_qty = "100000.0"
+max_order_notional = "100000000.0"
+price_band_bps = 1000
+max_orders_per_second = 1000
+max_open_orders = 100000
+trading_enabled = true
+self_trade_prevention = false
+
 [[symbols]]
 id = 2
 base = "SOL"
@@ -66,3 +101,12 @@ min_qty = "0.001"
 max_qty = "100000.0"
 qty_step = "0.001"
 price_step = "0.0001"
+
+[symbols.risk]
+max_order_qty = "100000.0"
+max_order_notional = "100000000.0"
+price_band_bps = 1000
+max_orders_per_second = 1000
+max_open_orders = 100000
+trading_enabled = true
+self_trade_prevention = false

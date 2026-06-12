@@ -111,11 +111,89 @@ impl Engine {
         }
     }
 
+    /// Owning session of a resting order (live book first, then stop book).
+    /// `None` if the order is not currently resting in either book.
+    fn order_owner(&self, order_id: OrderId) -> Option<me_core::SessionId> {
+        self.book
+            .get_order(order_id)
+            .or_else(|| self.stop_book.get(order_id))
+            .map(|o| o.client_session_id)
+    }
+
+    /// Authorize a cancel/amend issued by `requesting_session` against
+    /// `order_id`. Returns `true` when the mutation is permitted.
+    ///
+    /// Rules:
+    /// - `requesting_session == NONE` is a privileged/internal caller (WAL
+    ///   replay, admin, direct `process`): always allowed.
+    /// - A resting order owned by `NONE` (legacy/unattributed) is manageable by
+    ///   anyone — preserves operability without re-opening the cross-session
+    ///   hole, since an attacker with a real session can never match a victim's
+    ///   real session this way.
+    /// - Otherwise the owning session must equal the requesting session.
+    /// - A non-resting order returns `true` so the normal path emits the
+    ///   ordinary `OrderNotFound` rejection.
+    fn is_mutation_authorized(
+        &self,
+        order_id: OrderId,
+        requesting_session: me_core::SessionId,
+    ) -> bool {
+        if requesting_session.is_none() {
+            return true;
+        }
+        match self.order_owner(order_id) {
+            Some(owner) if owner.is_none() => true,
+            Some(owner) => owner == requesting_session,
+            None => true,
+        }
+    }
+
     /// Process a single command and return the resulting events.
     ///
     /// This is the main entry point. Commands are processed STRICTLY SEQUENTIALLY.
     /// The caller must ensure that commands for one symbol are never processed concurrently.
+    ///
+    /// Equivalent to [`Engine::process_with_session`] with a privileged
+    /// (`SessionId::NONE`) caller — i.e. no per-session ownership enforcement.
     pub fn process(&mut self, cmd: Command) -> &[MatchEvent] {
+        self.process_with_session(cmd, me_core::SessionId::NONE)
+    }
+
+    /// Process a command on behalf of `requesting_session`, enforcing order
+    /// ownership for cancel/amend. A client may only cancel or amend an order
+    /// its own session placed; an attempt against another session's order is
+    /// rejected with `OrderNotFound` (without revealing the order exists).
+    pub fn process_with_session(
+        &mut self,
+        cmd: Command,
+        requesting_session: me_core::SessionId,
+    ) -> &[MatchEvent] {
+        if let Command::CancelOrder {
+            order_id,
+            timestamp,
+            ..
+        }
+        | Command::AmendOrder {
+            order_id,
+            timestamp,
+            ..
+        } = &cmd
+        {
+            let (order_id, timestamp) = (*order_id, *timestamp);
+            if !self.is_mutation_authorized(order_id, requesting_session) {
+                self.events.clear();
+                self.events.push(MatchEvent::OrderRejected {
+                    order_id,
+                    reason: RejectReason::OrderNotFound,
+                    timestamp,
+                });
+                return self.events.events();
+            }
+        }
+        self.process_inner(cmd)
+    }
+
+    fn process_inner(&mut self, cmd: Command) -> &[MatchEvent] {
         self.events.clear();
 
         match cmd {

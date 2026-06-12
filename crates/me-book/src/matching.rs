@@ -794,6 +794,29 @@ pub fn amend_order(
     let qty_increased = matches!(new_qty, Some(q) if q > current_order.qty);
 
     if price_changed || qty_increased {
+        // A maker-only (POST_ONLY / MAKER_OR_CANCEL) order amended into a
+        // crossing price must NOT become a taker. Reject the amend WITHOUT
+        // touching the resting order, so it keeps its place. The previous path
+        // removed the order and re-ran `process_order`, which (a) emitted a
+        // duplicate `OrderAccepted` for an already-accepted order, breaking
+        // client state machines, and (b) for a crossing maker-only order
+        // emitted `OrderRejected{WouldTakeMarket}` AFTER removal, silently
+        // dropping the order from the book.
+        if current_order.flags & (ORDER_FLAG_POST_ONLY | ORDER_FLAG_MAKER_OR_CANCEL) != 0 {
+            let would_cross = match current_order.side {
+                Side::Buy => book.best_ask().is_some_and(|ask| ask <= final_price),
+                Side::Sell => book.best_bid().is_some_and(|bid| bid >= final_price),
+            };
+            if would_cross {
+                events.push(MatchEvent::OrderRejected {
+                    order_id,
+                    reason: RejectReason::WouldTakeMarket,
+                    timestamp,
+                });
+                return;
+            }
+        }
+
         // Cancel and re-insert — loses time priority.
         // Invariant: we just verified the order exists via get_order_location.
         let mut order = match book.remove_order(order_id) {
@@ -826,8 +849,10 @@ pub fn amend_order(
         });
 
         if !order.remaining_qty.is_zero() {
-            // Re-insert. If new price crosses, it will match.
-            process_order(book, order, events);
+            // Re-insert via the matching path WITHOUT re-emitting `OrderAccepted`
+            // (the order was accepted at original placement). If the new price
+            // crosses, it matches; otherwise it rests at the new level.
+            rematch_limit(book, &mut order, events);
         }
     } else {
         // In-place modification — retains time priority.

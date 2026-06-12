@@ -920,6 +920,7 @@ dependencies = [
  "me-io",
  "me-metrics",
  "me-persist",
+ "me-risk",
  "prometheus",
  "rustls-pemfile",
  "serde",

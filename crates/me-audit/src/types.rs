@@ -134,6 +134,82 @@ pub mod halt_reason {
 }
 
 impl AuditEntry {
+    /// Wire size of the explicit little-endian binary encoding produced by
+    /// [`AuditEntry::to_bytes`]. This is the sum of the field sizes only —
+    /// it deliberately excludes the struct's `repr(C)` alignment padding.
+    /// 8+1+8+2+1+1+1+8+8+8+8+8+8+1 = 71.
+    pub const ENCODED_LEN: usize = 71;
+
+    /// Serialize to a fixed-size little-endian byte buffer.
+    ///
+    /// This replaces a previous `slice::from_raw_parts` over the raw struct,
+    /// which read the `repr(C)` alignment padding bytes — constructing a
+    /// `&[u8]` over uninitialized padding is undefined behaviour in Rust. The
+    /// explicit field-by-field encoding is both UB-free and a stable,
+    /// portable wire format (no dependency on the compiler's struct layout).
+    pub fn to_bytes(&self) -> [u8; Self::ENCODED_LEN] {
+        let mut out = [0u8; Self::ENCODED_LEN];
+        let mut off = 0usize;
+        macro_rules! put {
+            ($val:expr) => {{
+                let b = $val.to_le_bytes();
+                out[off..off + b.len()].copy_from_slice(&b);
+                off += b.len();
+            }};
+        }
+        put!(self.timestamp_ns);
+        put!(self.event_type);
+        put!(self.order_id);
+        put!(self.symbol_id);
+        put!(self.side);
+        put!(self.order_type);
+        put!(self.tif);
+        put!(self.price_raw);
+        put!(self.qty_raw);
+        put!(self.aux_i64);
+        put!(self.aux_u64);
+        put!(self.maker_order_id);
+        put!(self.taker_order_id);
+        put!(self.reason);
+        debug_assert_eq!(off, Self::ENCODED_LEN);
+        out
+    }
+
+    /// Inverse of [`AuditEntry::to_bytes`]. Returns `None` if the slice is
+    /// shorter than [`AuditEntry::ENCODED_LEN`].
+    pub fn from_bytes(buf: &[u8]) -> Option<Self> {
+        if buf.len() < Self::ENCODED_LEN {
+            return None;
+        }
+        let mut off = 0usize;
+        macro_rules! get {
+            ($t:ty) => {{
+                const N: usize = std::mem::size_of::<$t>();
+                let v = <$t>::from_le_bytes(buf[off..off + N].try_into().unwrap());
+                off += N;
+                v
+            }};
+        }
+        let e = AuditEntry {
+            timestamp_ns: get!(u64),
+            event_type: get!(u8),
+            order_id: get!(u64),
+            symbol_id: get!(u16),
+            side: get!(u8),
+            order_type: get!(u8),
+            tif: get!(u8),
+            price_raw: get!(i64),
+            qty_raw: get!(u64),
+            aux_i64: get!(i64),
+            aux_u64: get!(u64),
+            maker_order_id: get!(u64),
+            taker_order_id: get!(u64),
+            reason: get!(u8),
+        };
+        debug_assert_eq!(off, Self::ENCODED_LEN);
+        Some(e)
+    }
+
     /// Convert to a rich `AuditEvent` (for JSON serialization on the consumer thread).
     pub fn to_audit_event(&self) -> AuditEvent {
         match self.event_type {
@@ -267,4 +343,63 @@ fn ser_halt_reason<S: serde::Serializer>(v: &u8, s: S) -> Result<S::Ok, S::Error
         2 => "Maintenance",
         _ => "Unknown",
     })
+}
+
+#[cfg(test)]
+mod entry_codec_tests {
+    use super::*;
+
+    fn sample() -> AuditEntry {
+        AuditEntry {
+            timestamp_ns: 0x0102_0304_0506_0708,
+            event_type: event_type::TRADE_EXECUTED,
+            order_id: 0xDEAD_BEEF,
+            symbol_id: 0x1234,
+            side: 1,
+            order_type: 2,
+            tif: 3,
+            price_raw: -123_456_789,
+            qty_raw: 987_654_321,
+            aux_i64: -42,
+            aux_u64: 42,
+            maker_order_id: 111,
+            taker_order_id: 222,
+            reason: 9,
+        }
+    }
+
+    #[test]
+    fn to_bytes_has_fixed_field_only_length() {
+        // The explicit encoding excludes the struct's repr(C) padding; the size
+        // is the exact sum of the field widths.
+        assert_eq!(AuditEntry::ENCODED_LEN, 71);
+        assert_eq!(sample().to_bytes().len(), AuditEntry::ENCODED_LEN);
+    }
+
+    #[test]
+    fn to_bytes_from_bytes_roundtrip() {
+        let e = sample();
+        let bytes = e.to_bytes();
+        let back = AuditEntry::from_bytes(&bytes).expect("decode");
+        assert_eq!(e.timestamp_ns, back.timestamp_ns);
+        assert_eq!(e.event_type, back.event_type);
+        assert_eq!(e.order_id, back.order_id);
+        assert_eq!(e.symbol_id, back.symbol_id);
+        assert_eq!(e.side, back.side);
+        assert_eq!(e.order_type, back.order_type);
+        assert_eq!(e.tif, back.tif);
+        assert_eq!(e.price_raw, back.price_raw);
+        assert_eq!(e.qty_raw, back.qty_raw);
+        assert_eq!(e.aux_i64, back.aux_i64);
+        assert_eq!(e.aux_u64, back.aux_u64);
+        assert_eq!(e.maker_order_id, back.maker_order_id);
+        assert_eq!(e.taker_order_id, back.taker_order_id);
+        assert_eq!(e.reason, back.reason);
+    }
+
+    #[test]
+    fn from_bytes_rejects_short_input() {
+        let short = vec![0u8; AuditEntry::ENCODED_LEN - 1];
+        assert!(AuditEntry::from_bytes(&short).is_none());
+    }
 }

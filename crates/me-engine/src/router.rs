@@ -100,11 +100,17 @@ struct Shard {
 enum ShardMsg {
     Command {
         cmd: Command,
+        /// Session that issued the command, used to enforce order ownership on
+        /// cancel/amend. `SessionId::NONE` is a privileged/internal caller.
+        requesting_session: me_core::SessionId,
         reply: Sender<Vec<MatchEvent>>,
     },
     QueryOrder {
         order_id: OrderId,
         symbol: SymbolId,
+        /// Session that issued the query, used to enforce order ownership.
+        /// `SessionId::NONE` is a privileged/internal caller.
+        requesting_session: me_core::SessionId,
         reply: Sender<Vec<MatchEvent>>,
     },
     /// Query all open orders for a client session across all symbols in this shard.
@@ -264,8 +270,20 @@ impl Router {
         }
     }
 
-    /// Process a command synchronously.
+    /// Process a command synchronously as a privileged/internal caller — no
+    /// per-session ownership enforcement on cancel/amend.
     pub fn process(&self, cmd: Command) -> Vec<MatchEvent> {
+        self.process_with_session(cmd, me_core::SessionId::NONE)
+    }
+
+    /// Process a command synchronously on behalf of `requesting_session`.
+    /// Cancel/amend on an order owned by a different session is rejected with
+    /// `OrderNotFound` inside the engine (see `Engine::process_with_session`).
+    pub fn process_with_session(
+        &self,
+        cmd: Command,
+        requesting_session: me_core::SessionId,
+    ) -> Vec<MatchEvent> {
         let symbol = cmd.symbol();
         let ts = cmd.timestamp();
         let order_id = cmd_order_id(&cmd);
@@ -285,6 +303,7 @@ impl Router {
             .tx
             .send(ShardMsg::Command {
                 cmd,
+                requesting_session,
                 reply: reply_tx,
             })
             .is_err()
@@ -370,8 +389,20 @@ impl Router {
         true
     }
 
-    /// Query order status.
+    /// Query order status as a privileged/internal caller — no ownership check.
     pub fn query_order(&self, order_id: OrderId, symbol: SymbolId) -> Vec<MatchEvent> {
+        self.query_order_for_session(order_id, symbol, me_core::SessionId::NONE)
+    }
+
+    /// Query order status on behalf of `requesting_session`. A query for an
+    /// order owned by another session returns `OrderNotFound`, preventing
+    /// enumeration of other clients' orders by id.
+    pub fn query_order_for_session(
+        &self,
+        order_id: OrderId,
+        symbol: SymbolId,
+        requesting_session: me_core::SessionId,
+    ) -> Vec<MatchEvent> {
         let shard_idx = match self.symbol_to_shard.get(&symbol) {
             Some(&idx) => idx,
             None => return vec![MatchEvent::OrderNotFound { order_id }],
@@ -383,6 +414,7 @@ impl Router {
             .send(ShardMsg::QueryOrder {
                 order_id,
                 symbol,
+                requesting_session,
                 reply: reply_tx,
             })
             .is_err()
@@ -549,7 +581,11 @@ fn shard_worker_loop(
             commit_and_flush(shard_id, &mut wal, &mut engines, &mut pending);
         }
         match msg {
-            ShardMsg::Command { cmd, reply } => {
+            ShardMsg::Command {
+                cmd,
+                requesting_session,
+                reply,
+            } => {
                 let symbol = cmd.symbol();
                 let reply_order_id = cmd_order_id(&cmd);
                 let sym_name = symbol_names
@@ -748,9 +784,22 @@ fn shard_worker_loop(
                         timestamp: ts,
                     }]
                 } else if risk_rejected {
+                    // `risk_rejected` is only ever set on the PlaceOrder branch
+                    // today, but matching exhaustively (instead of `unreachable!()`)
+                    // means a future refactor that risk-checks cancels/amends can
+                    // never silently panic this shard worker.
                     let (order_id, ts) = match &cmd {
                         Command::PlaceOrder(o) => (o.id, o.timestamp),
-                        _ => unreachable!(),
+                        Command::CancelOrder {
+                            order_id,
+                            timestamp,
+                            ..
+                        }
+                        | Command::AmendOrder {
+                            order_id,
+                            timestamp,
+                            ..
+                        } => (*order_id, *timestamp),
                     };
                     vec![MatchEvent::OrderRejected {
                         order_id,
@@ -760,7 +809,11 @@ fn shard_worker_loop(
                 } else if let Some(engine) = engines.get_mut(&symbol) {
                     // 2. Matching (GTD expiry was already swept above, before the
                     // risk check, so expired orders never count against limits).
-                    let events = engine.process(cmd).to_vec();
+                    // Ownership of cancel/amend is enforced here against the
+                    // issuing session.
+                    let events = engine
+                        .process_with_session(cmd, requesting_session)
+                        .to_vec();
 
                     // 3. Post-trade risk state updates
                     let triggered_order_ids: FxHashSet<_> = events
@@ -914,6 +967,7 @@ fn shard_worker_loop(
             ShardMsg::QueryOrder {
                 order_id,
                 symbol,
+                requesting_session,
                 reply,
             } => {
                 let events = if let Some(engine) = engines.get(&symbol) {
@@ -925,7 +979,19 @@ fn shard_worker_loop(
                         .book()
                         .get_order(order_id)
                         .or_else(|| engine.stop_book().get(order_id));
-                    match found {
+                    // Enforce ownership: a client may only query its own orders.
+                    // A real session querying another session's order gets
+                    // OrderNotFound (no enumeration). NONE (internal/admin) and
+                    // NONE-owned orders are exempt, mirroring cancel/amend.
+                    let owned = match found {
+                        Some(order) => {
+                            requesting_session.is_none()
+                                || order.client_session_id.is_none()
+                                || order.client_session_id == requesting_session
+                        }
+                        None => true,
+                    };
+                    match found.filter(|_| owned) {
                         Some(order) => {
                             // Use cumulative/open quantities so an iceberg reports
                             // its true filled and open size, not the visible slice
@@ -1110,6 +1176,14 @@ fn init_wal_and_recover(shard_id: usize, wal_config: Option<WalConfig>) -> WalIn
                     if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&wal_path) {
                         if let Err(e) = f.set_len(result.valid_bytes) {
                             tracing::error!(shard_id, error = %e, "WAL tail truncation failed");
+                        } else if let Err(e) = f.sync_all() {
+                            // The truncation MUST be durable before the writer
+                            // reopens the WAL in O_APPEND and writes past the new
+                            // EOF. Without this fsync a crash here can leave the
+                            // shrunk length unflushed; the resurrected torn tail
+                            // would then sit behind freshly fsynced records and be
+                            // replayed as a phantom command on the next recovery.
+                            tracing::error!(shard_id, error = %e, "WAL tail truncation fsync failed");
                         }
                     }
                 }

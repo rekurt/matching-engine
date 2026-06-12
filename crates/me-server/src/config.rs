@@ -1,5 +1,6 @@
 use me_core::symbol::SymbolConfig;
 use me_core::types::{FixedPrice, FixedQty, SymbolId};
+use me_risk::config::RiskConfig;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -115,6 +116,42 @@ pub struct SymbolEntry {
     /// See `me_core::invariant::InvariantPolicy` for semantics.
     #[serde(default = "default_invariant_policy")]
     pub invariant_policy: me_core::invariant::InvariantPolicy,
+    /// Optional pre-trade risk controls for this symbol. When present, the
+    /// engine enforces fat-finger qty, max notional, price band, rate limit,
+    /// max open orders, trading-enabled, and self-trade prevention. When
+    /// absent, NO risk checks run for the symbol (back-compat).
+    #[serde(default)]
+    pub risk: Option<RiskSettings>,
+}
+
+/// Per-symbol pre-trade risk controls (deserialized from `[[symbols.risk]]`).
+/// Decimal fields are strings (parsed to fixed-point) to avoid float rounding,
+/// consistent with the symbol qty/price fields.
+#[derive(Debug, Deserialize, Clone)]
+pub struct RiskSettings {
+    /// Fat-finger guard: maximum single-order quantity.
+    #[serde(default = "default_risk_max_order_qty")]
+    pub max_order_qty: String,
+    /// Maximum single-order notional (price * qty) in quote currency.
+    #[serde(default = "default_risk_max_order_notional")]
+    pub max_order_notional: String,
+    /// Price band: maximum deviation from reference price, in basis points
+    /// (1 = 0.01%). 0 disables the band.
+    #[serde(default = "default_risk_price_band_bps")]
+    pub price_band_bps: u32,
+    /// Maximum orders per second (token-bucket rate limit). 0 disables.
+    #[serde(default = "default_risk_max_orders_per_second")]
+    pub max_orders_per_second: u32,
+    /// Maximum simultaneously open orders for this symbol. 0 disables.
+    #[serde(default = "default_risk_max_open_orders")]
+    pub max_open_orders: u32,
+    /// Whether trading is enabled for this symbol.
+    #[serde(default = "default_true")]
+    pub trading_enabled: bool,
+    /// Reject (cancel-newest) any order that would match a resting order from
+    /// the same client session.
+    #[serde(default)]
+    pub self_trade_prevention: bool,
 }
 
 /// WAL (Write-Ahead Log) configuration.
@@ -171,6 +208,25 @@ fn default_snapshot_interval() -> u64 {
 fn default_invariant_policy() -> me_core::invariant::InvariantPolicy {
     // Production default: isolate the affected symbol rather than panic.
     me_core::invariant::InvariantPolicy::HaltSymbol
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_risk_max_order_qty() -> String {
+    "10000.0".to_string()
+}
+fn default_risk_max_order_notional() -> String {
+    "100000000.0".to_string() // $100M
+}
+fn default_risk_price_band_bps() -> u32 {
+    1000 // ±10%
+}
+fn default_risk_max_orders_per_second() -> u32 {
+    1000
+}
+fn default_risk_max_open_orders() -> u32 {
+    100_000
 }
 
 fn default_clock() -> String {
@@ -342,6 +398,50 @@ impl SymbolEntry {
             invariant_policy: self.invariant_policy,
         })
     }
+
+    /// Build the per-symbol [`RiskConfig`], or `None` when no `risk` table is
+    /// configured for this symbol. Decimal fields are parsed via the same
+    /// fixed-point parser as qty/price to avoid float rounding.
+    pub fn to_risk_config(&self) -> Result<Option<RiskConfig>, String> {
+        let Some(r) = &self.risk else {
+            return Ok(None);
+        };
+        let id = self.id;
+        let max_order_qty = FixedQty::from_raw(
+            parse_decimal_to_raw(&r.max_order_qty)
+                .map_err(|e| format!("symbol {id}: risk.max_order_qty: {e}"))?,
+        );
+        let max_order_notional = parse_decimal_to_raw(&r.max_order_notional)
+            .map_err(|e| format!("symbol {id}: risk.max_order_notional: {e}"))?;
+        Ok(Some(RiskConfig {
+            symbol: SymbolId(id),
+            max_order_qty,
+            max_order_notional,
+            // RESERVED until an account/position model exists. Keep unlimited.
+            max_position: FixedQty::ZERO,
+            price_band_bps: r.price_band_bps,
+            reference_price: FixedPrice::ZERO,
+            max_orders_per_second: r.max_orders_per_second,
+            max_open_orders: r.max_open_orders,
+            trading_enabled: r.trading_enabled,
+            self_trade_prevention: r.self_trade_prevention,
+        }))
+    }
+}
+
+/// Permissive-but-real default risk controls applied to the built-in symbols
+/// when the server runs without a config file. Enabling risk by default closes
+/// the "risk engine never activates in production" gap.
+fn default_risk_settings() -> RiskSettings {
+    RiskSettings {
+        max_order_qty: default_risk_max_order_qty(),
+        max_order_notional: default_risk_max_order_notional(),
+        price_band_bps: default_risk_price_band_bps(),
+        max_orders_per_second: default_risk_max_orders_per_second(),
+        max_open_orders: default_risk_max_open_orders(),
+        trading_enabled: true,
+        self_trade_prevention: false,
+    }
 }
 
 /// Load configuration from a TOML file. Returns default config on any error
@@ -369,6 +469,7 @@ pub fn default_config() -> Config {
                 qty_step: "0.00001".into(),
                 price_step: "0.01".into(),
                 invariant_policy: default_invariant_policy(),
+                risk: Some(default_risk_settings()),
             },
             SymbolEntry {
                 id: 1,
@@ -381,6 +482,7 @@ pub fn default_config() -> Config {
                 qty_step: "0.0001".into(),
                 price_step: "0.01".into(),
                 invariant_policy: default_invariant_policy(),
+                risk: Some(default_risk_settings()),
             },
             SymbolEntry {
                 id: 2,
@@ -393,6 +495,7 @@ pub fn default_config() -> Config {
                 qty_step: "0.001".into(),
                 price_step: "0.0001".into(),
                 invariant_policy: default_invariant_policy(),
+                risk: Some(default_risk_settings()),
             },
         ],
     }

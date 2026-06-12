@@ -149,10 +149,41 @@ impl SnapshotManager {
             ));
         }
 
-        let mut offset = 0;
+        // Sanity cap on the declared order counts. A CRC pass does not prove
+        // the payload is well-formed (disk bit-rot or an external overwrite can
+        // produce a CRC-valid-but-corrupt file), so a wild `resting_count` must
+        // not drive a multi-GB `Vec::with_capacity` OOM before the read loop
+        // even runs. 10M orders/book is already far beyond any real deployment.
+        const MAX_SNAPSHOT_ORDERS: usize = 10_000_000;
+
+        let mut offset = 0usize;
+
+        // Bounds-checked fixed-width readers over `payload`. Every field read
+        // goes through these so a truncated/corrupt payload returns InvalidData
+        // instead of panicking on an out-of-range slice index in the shard
+        // worker during startup recovery.
+        let truncated = || io::Error::new(io::ErrorKind::InvalidData, "Snapshot truncated");
+        let read_u16 = |off: usize| -> io::Result<u16> {
+            payload
+                .get(off..off + 2)
+                .map(|s| u16::from_le_bytes(s.try_into().unwrap()))
+                .ok_or_else(truncated)
+        };
+        let read_u32 = |off: usize| -> io::Result<u32> {
+            payload
+                .get(off..off + 4)
+                .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+                .ok_or_else(truncated)
+        };
+        let read_u64 = |off: usize| -> io::Result<u64> {
+            payload
+                .get(off..off + 8)
+                .map(|s| u64::from_le_bytes(s.try_into().unwrap()))
+                .ok_or_else(truncated)
+        };
 
         // Magic
-        let magic = u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap());
+        let magic = read_u32(offset)?;
         offset += 4;
         if magic != SNAPSHOT_MAGIC {
             return Err(io::Error::new(
@@ -162,7 +193,7 @@ impl SnapshotManager {
         }
 
         // Version
-        let version = u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap());
+        let version = read_u16(offset)?;
         offset += 2;
         if version != SNAPSHOT_VERSION {
             return Err(io::Error::new(
@@ -172,46 +203,53 @@ impl SnapshotManager {
         }
 
         // Symbol
-        let symbol = SymbolId(u16::from_le_bytes(
-            payload[offset..offset + 2].try_into().unwrap(),
-        ));
+        let symbol = SymbolId(read_u16(offset)?);
         offset += 2;
 
         // Sequence
-        let sequence = u64::from_le_bytes(payload[offset..offset + 8].try_into().unwrap());
+        let sequence = read_u64(offset)?;
         offset += 8;
 
         // Trade ID gen
-        let trade_id_gen = u64::from_le_bytes(payload[offset..offset + 8].try_into().unwrap());
+        let trade_id_gen = read_u64(offset)?;
         offset += 8;
 
         // WAL sequence watermark
-        let wal_sequence = u64::from_le_bytes(payload[offset..offset + 8].try_into().unwrap());
+        let wal_sequence = read_u64(offset)?;
         offset += 8;
 
+        // Decode `count` consecutive fixed-size orders starting at `offset`,
+        // validating that the payload actually holds that many bytes.
+        let decode_orders =
+            |offset: &mut usize, count: usize| -> io::Result<Vec<me_core::order::Order>> {
+                if count > MAX_SNAPSHOT_ORDERS {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Snapshot order count {count} exceeds cap {MAX_SNAPSHOT_ORDERS}"),
+                    ));
+                }
+                let mut orders = Vec::with_capacity(count);
+                for _ in 0..count {
+                    if payload.len().saturating_sub(*offset) < codec::ORDER_ENCODED_SIZE {
+                        return Err(truncated());
+                    }
+                    let order = codec::decode_order_from(&payload[*offset..])
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                    *offset += codec::ORDER_ENCODED_SIZE;
+                    orders.push(order);
+                }
+                Ok(orders)
+            };
+
         // Resting orders
-        let resting_count =
-            u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
+        let resting_count = read_u32(offset)? as usize;
         offset += 4;
-        let mut resting_orders = Vec::with_capacity(resting_count);
-        for _ in 0..resting_count {
-            let order = codec::decode_order_from(&payload[offset..])
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            offset += codec::ORDER_ENCODED_SIZE;
-            resting_orders.push(order);
-        }
+        let resting_orders = decode_orders(&mut offset, resting_count)?;
 
         // Stop orders
-        let stop_count =
-            u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap()) as usize;
+        let stop_count = read_u32(offset)? as usize;
         offset += 4;
-        let mut stop_orders = Vec::with_capacity(stop_count);
-        for _ in 0..stop_count {
-            let order = codec::decode_order_from(&payload[offset..])
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            offset += codec::ORDER_ENCODED_SIZE;
-            stop_orders.push(order);
-        }
+        let stop_orders = decode_orders(&mut offset, stop_count)?;
 
         Ok(BookSnapshot {
             symbol,
@@ -338,6 +376,55 @@ mod tests {
 
         let result = mgr.load_latest(SymbolId(0)).unwrap();
         assert!(result.is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Append a valid CRC over `payload` and write `payload || crc` to a file.
+    fn write_with_crc(dir: &PathBuf, name: &str, payload: &[u8]) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+        let crc = crc32fast::hash(payload);
+        let mut data = payload.to_vec();
+        data.extend_from_slice(&crc.to_le_bytes());
+        let path = dir.join(name);
+        fs::write(&path, &data).unwrap();
+        path
+    }
+
+    #[test]
+    fn load_file_truncated_payload_errors_not_panics() {
+        // A CRC-valid file whose payload ends right after the magic must return
+        // InvalidData when the loader reaches the next (missing) field — not
+        // panic on an out-of-range slice in the recovery path.
+        let dir = temp_snapshot_dir("truncated");
+        let payload = SNAPSHOT_MAGIC.to_le_bytes().to_vec(); // magic only
+        let path = write_with_crc(&dir, "snapshot_0000_truncated.bin", &payload);
+
+        let mgr = SnapshotManager::new(&dir).unwrap();
+        let r = mgr.load_file(&path);
+        assert!(r.is_err(), "truncated snapshot must error, got {r:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_file_absurd_order_count_errors_not_ooms() {
+        // A CRC-valid header declaring u32::MAX resting orders must be rejected
+        // by the order-count cap BEFORE any multi-GB Vec::with_capacity.
+        let dir = temp_snapshot_dir("absurd_count");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&SNAPSHOT_MAGIC.to_le_bytes());
+        payload.extend_from_slice(&SNAPSHOT_VERSION.to_le_bytes());
+        payload.extend_from_slice(&0u16.to_le_bytes()); // symbol
+        payload.extend_from_slice(&0u64.to_le_bytes()); // sequence
+        payload.extend_from_slice(&0u64.to_le_bytes()); // trade_id_gen
+        payload.extend_from_slice(&0u64.to_le_bytes()); // wal_sequence
+        payload.extend_from_slice(&u32::MAX.to_le_bytes()); // resting_count
+        let path = write_with_crc(&dir, "snapshot_0000_absurd.bin", &payload);
+
+        let mgr = SnapshotManager::new(&dir).unwrap();
+        let r = mgr.load_file(&path);
+        assert!(r.is_err(), "absurd order count must error, got {r:?}");
 
         let _ = fs::remove_dir_all(&dir);
     }

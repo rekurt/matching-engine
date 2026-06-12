@@ -289,13 +289,21 @@ async fn main() {
         }
         match sym_entry.to_symbol_config() {
             Ok(sym) => {
+                let risk_config = match sym_entry.to_risk_config() {
+                    Ok(rc) => rc,
+                    Err(e) => {
+                        error!(error = %e, "Invalid risk configuration");
+                        std::process::exit(1);
+                    }
+                };
                 info!(
                     base = sym.base,
                     quote = sym.quote,
                     id = sym.id.0,
+                    risk_enabled = risk_config.is_some(),
                     "Registering symbol"
                 );
-                router.add_symbol(sym);
+                router.add_symbol_with_risk(sym, risk_config);
             }
             Err(e) => {
                 error!(error = %e, "Invalid symbol configuration");
