@@ -342,7 +342,7 @@ fn parse_decimal_to_raw(s: &str) -> Result<u64, String> {
         // Checked arithmetic: a large integer part must not silently wrap.
         int_part
             .checked_mul(FIXED_SCALE)
-            .and_then(|hi| frac_part.checked_mul(scale_factor).map(|lo| (hi, lo)))
+            .zip(frac_part.checked_mul(scale_factor))
             .and_then(|(hi, lo)| hi.checked_add(lo))
             .ok_or_else(oob)
     } else {
