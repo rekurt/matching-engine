@@ -265,7 +265,9 @@ pub fn decode_frame(
         && conn.state == ConnectionState::HandshakePending;
     if seq <= conn.last_client_seq && !is_first_handshake {
         return Err(DecodeError::SequenceOutOfOrder {
-            expected_min: conn.last_client_seq + 1,
+            expected_min: conn.last_client_seq.checked_add(1).ok_or_else(|| {
+                DecodeError::InvalidPayload("Client sequence exhausted; reconnect".into())
+            })?,
             got: seq,
         });
     }

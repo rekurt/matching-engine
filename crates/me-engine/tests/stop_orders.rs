@@ -954,9 +954,7 @@ fn test_iceberg_refill_does_not_self_trade_a_triggered_same_session_stop() {
     e.process(Command::PlaceOrder(iceberg));
 
     // #3 session-B sell @ 100, qty 1 → trades against the iceberg's visible
-    // slice (cross-session) → last trade 100 → triggers A's sell stop, which
-    // rests @ 100. The iceberg then replenishes a buy slice @ 100 that would
-    // cross A's own resting sell.
+    // slice, which replenishes passively before the newly triggered stop acts.
     let events = e
         .process(limit_sell_session(3, 100.0, 1.0, SESSION_B))
         .to_vec();
@@ -977,18 +975,19 @@ fn test_iceberg_refill_does_not_self_trade_a_triggered_same_session_stop() {
         )),
         "iceberg refill must not self-trade the same-session stop: {events:?}"
     );
-    assert!(
-        e.book().get_order(1).is_some(),
-        "A's triggered sell #1 must still rest (not consumed by a self-trade): {events:?}"
-    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        MatchEvent::OrderRejected {
+            order_id: 1,
+            reason: RejectReason::SelfTradePrevented,
+            ..
+        }
+    )));
+    assert!(e.book().contains_order(2));
 }
 
 #[test]
-fn test_stp_blocked_iceberg_is_cancelled_not_left_in_limbo() {
-    // STP-blocking an iceberg refill must not leave the order tracked-only
-    // (absent from both books): in that state a client CancelOrder returns
-    // OrderNotFound, GTD expiry can't find it, and a later command could
-    // resurrect it. The blocked iceberg's residual must be cancelled instead.
+fn test_stp_rejected_stop_leaves_passive_iceberg_cancellable() {
     let mut e = setup();
     e.set_self_trade_prevention(true);
 
@@ -1018,33 +1017,69 @@ fn test_stp_blocked_iceberg_is_cancelled_not_left_in_limbo() {
     iceberg.client_session_id = SESSION_A;
     e.process(Command::PlaceOrder(iceberg));
 
-    // B's sell fills the visible slice → triggers A's sell stop → the refill is
-    // STP-blocked. The iceberg's residual must then be cancelled.
     let events = e
         .process(limit_sell_session(3, 100.0, 1.0, SESSION_B))
         .to_vec();
-
-    assert!(
-        events
-            .iter()
-            .any(|ev| matches!(ev, MatchEvent::OrderCancelled { order_id: 2, .. })),
-        "STP-blocked iceberg residual must be cancelled, not left tracked-only: {events:?}"
+    assert!(events.iter().any(|event| matches!(
+        event,
+        MatchEvent::OrderRejected {
+            order_id: 1,
+            reason: RejectReason::SelfTradePrevented,
+            ..
+        }
+    )));
+    assert_eq!(
+        e.book().get_order(2).unwrap().open_qty(),
+        FixedQty::from_f64(3.0)
     );
-    assert!(
-        e.book().get_order(2).is_none(),
-        "the cancelled iceberg must not rest in the book: {events:?}"
-    );
-
-    // Not resurrectable: freeing the blocking ask (#1) runs the replenish pass
-    // again; a still-tracked iceberg would re-rest a slice here. A cancelled one
-    // must stay gone.
+    let cancelled = e
+        .process(Command::CancelOrder {
+            order_id: 2,
+            symbol: SymbolId(0),
+            timestamp: 4000,
+        })
+        .to_vec();
+    assert!(cancelled.iter().any(|event| matches!(event, MatchEvent::OrderCancelled { order_id: 2, remaining_qty, .. } if *remaining_qty == FixedQty::from_f64(3.0))));
     e.process(Command::CancelOrder {
         order_id: 1,
         symbol: SymbolId(0),
-        timestamp: 4000,
+        timestamp: 5000,
     });
-    assert!(
-        e.book().get_order(2).is_none(),
-        "cancelled iceberg must not resurrect once the blocking liquidity clears"
+    assert!(!e.book().contains_order(2));
+}
+
+#[test]
+fn triggered_stop_rechecks_current_risk_limits() {
+    let mut e = setup();
+    let stop = Order::new_stop_limit(
+        1,
+        SymbolId(0),
+        Side::Buy,
+        TimeInForce::GTC,
+        FixedPrice::from_f64(101.0),
+        FixedPrice::from_f64(100.0),
+        FixedQty::from_f64(2.0),
+        1000,
+    );
+    e.process(Command::PlaceOrder(stop));
+    let mut risk = me_risk::config::RiskConfig::default_for(SymbolId(0));
+    risk.max_order_qty = FixedQty::from_f64(1.0);
+    e.set_risk_config(Some(risk));
+    e.process(limit_sell(2, 100.0, 3.0));
+    let events = e
+        .process_with_session_at(limit_buy(3, 100.0, 1.0), SessionId::NONE, 12345)
+        .to_vec();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        MatchEvent::OrderRejected {
+            order_id: 1,
+            reason: RejectReason::RiskCheckFailed,
+            timestamp: 12345
+        }
+    )));
+    assert!(!e.stop_book().contains(1));
+    assert_eq!(
+        e.book().get_order(2).unwrap().remaining_qty,
+        FixedQty::from_f64(2.0)
     );
 }

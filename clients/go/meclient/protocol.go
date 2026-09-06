@@ -47,6 +47,7 @@ const (
 	MsgPong                 uint8 = 0x18
 	MsgError                uint8 = 0x19
 	MsgHandshakeAck         uint8 = 0x1A
+	MsgFlowControlWarning   uint8 = 0x23
 )
 
 // Expected payload sizes for outbound messages.
@@ -326,6 +327,11 @@ func DecodeAmendOrder(data []byte) (*AmendOrderRequest, error) {
 // DecodeEvent decodes an outbound message payload into an Event.
 func DecodeEvent(msgType uint8, payload []byte) (*Event, error) {
 	switch msgType {
+	case MsgFlowControlWarning:
+		if len(payload) != 2 || payload[0] > 100 || payload[1] > 1 {
+			return nil, fmt.Errorf("%w: invalid FlowControlWarning", ErrInvalidPayloadSize)
+		}
+		return &Event{FlowControlWarning: &FlowControlWarningEvent{BufferPercent: payload[0], HardLimit: payload[1] == 1}}, nil
 	case MsgOrderAccepted:
 		e, err := decodeOrderAccepted(payload)
 		if err != nil {

@@ -54,6 +54,9 @@ struct AppState {
     metrics: Arc<EngineMetrics>,
     router: Arc<Router>,
     admin_api_key: Option<String>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+    listeners_ready: Vec<Arc<std::sync::atomic::AtomicBool>>,
+    sessions: Arc<SessionStore>,
 }
 
 // ─── Admin authentication middleware ─────────────────────────────────────────
@@ -81,12 +84,12 @@ async fn admin_auth(
 /// timing. Length is intentionally folded in without early-out so the running
 /// time depends only on the longer input, not on the match position.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let mut diff = (a.len() ^ b.len()) as u8;
+    let mut diff = a.len() ^ b.len();
     let n = a.len().max(b.len());
     for i in 0..n {
         let x = a.get(i).copied().unwrap_or(0);
         let y = b.get(i).copied().unwrap_or(0);
-        diff |= x ^ y;
+        diff |= usize::from(x ^ y);
     }
     diff == 0
 }
@@ -94,11 +97,27 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 async fn metrics_handler(State(state): State<AppState>) -> String {
-    state.metrics.encode()
+    let mut text = state.metrics.encode();
+    if let Some(audit) = state.router.audit() {
+        text.push_str(&format!("# TYPE me_audit_dropped_total counter\nme_audit_dropped_total {}\n# TYPE me_audit_disconnected_total counter\nme_audit_disconnected_total {}\n", audit.dropped_count(), audit.disconnected_count()));
+    }
+    text
 }
 
-async fn health_handler() -> &'static str {
-    "OK"
+async fn health_handler(State(state): State<AppState>) -> (StatusCode, String) {
+    if *state.shutdown.borrow()
+        || state
+            .listeners_ready
+            .iter()
+            .any(|ready| !ready.load(std::sync::atomic::Ordering::Acquire))
+        || state.sessions.ensure_healthy().is_err()
+    {
+        return (StatusCode::SERVICE_UNAVAILABLE, "draining".into());
+    }
+    match tokio::task::spawn_blocking(move || state.router.health()).await {
+        Ok(Ok(())) => (StatusCode::OK, "OK".into()),
+        _ => (StatusCode::SERVICE_UNAVAILABLE, "engine unavailable".into()),
+    }
 }
 
 async fn halt_handler(
@@ -106,17 +125,24 @@ async fn halt_handler(
     axum::extract::Path(symbol_id): axum::extract::Path<u16>,
 ) -> impl axum::response::IntoResponse {
     let symbol = me_core::types::SymbolId(symbol_id);
-    let success = state.router.halt_symbol(symbol);
+    let operation = tokio::task::spawn_blocking(move || {
+        let symbols = state.router.symbol_states()?;
+        if !symbols.iter().any(|(id, _)| *id == symbol) {
+            return Ok(None);
+        }
+        Ok::<_, String>(Some(state.router.halt_symbol(symbol)))
+    })
+    .await;
+    let (success, status) = match operation {
+        Ok(Ok(Some(true))) => (true, StatusCode::OK),
+        Ok(Ok(None)) => (false, StatusCode::NOT_FOUND),
+        _ => (false, StatusCode::SERVICE_UNAVAILABLE),
+    };
     if success {
         info!(symbol_id, "Admin: trading HALTED");
     } else {
         warn!(symbol_id, "Admin: halt failed — symbol not found");
     }
-    let status = if success {
-        StatusCode::OK
-    } else {
-        StatusCode::NOT_FOUND
-    };
     (
         status,
         axum::Json(serde_json::json!({
@@ -132,17 +158,24 @@ async fn resume_handler(
     axum::extract::Path(symbol_id): axum::extract::Path<u16>,
 ) -> impl axum::response::IntoResponse {
     let symbol = me_core::types::SymbolId(symbol_id);
-    let success = state.router.resume_symbol(symbol);
+    let operation = tokio::task::spawn_blocking(move || {
+        let symbols = state.router.symbol_states()?;
+        if !symbols.iter().any(|(id, _)| *id == symbol) {
+            return Ok(None);
+        }
+        Ok::<_, String>(Some(state.router.resume_symbol(symbol)))
+    })
+    .await;
+    let (success, status) = match operation {
+        Ok(Ok(Some(true))) => (true, StatusCode::OK),
+        Ok(Ok(None)) => (false, StatusCode::NOT_FOUND),
+        _ => (false, StatusCode::SERVICE_UNAVAILABLE),
+    };
     if success {
         info!(symbol_id, "Admin: trading RESUMED");
     } else {
         warn!(symbol_id, "Admin: resume failed — symbol not found");
     }
-    let status = if success {
-        StatusCode::OK
-    } else {
-        StatusCode::NOT_FOUND
-    };
     (
         status,
         axum::Json(serde_json::json!({
@@ -153,11 +186,29 @@ async fn resume_handler(
     )
 }
 
-async fn status_handler() -> impl axum::response::IntoResponse {
-    axum::Json(serde_json::json!({
-        "status": "running",
-        "message": "Matching engine is operational"
-    }))
+async fn status_handler(State(state): State<AppState>) -> impl axum::response::IntoResponse {
+    let draining = *state.shutdown.borrow()
+        || state
+            .listeners_ready
+            .iter()
+            .any(|ready| !ready.load(std::sync::atomic::Ordering::Acquire))
+        || state.sessions.ensure_healthy().is_err();
+    let result = tokio::task::spawn_blocking(move || state.router.symbol_states()).await;
+    match result {
+        Ok(Ok(symbols)) if !draining => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "status": "ready",
+                "symbols": symbols.into_iter().map(|(id, active)| serde_json::json!({"symbol_id": id.0, "trading_enabled": active})).collect::<Vec<_>>()
+            })),
+        ),
+        _ => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(
+                serde_json::json!({"status": if draining {"draining"} else {"unavailable"}}),
+            ),
+        ),
+    }
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -194,6 +245,10 @@ fn resolve_config(cli: &Cli) -> Config {
         cfg.server.uds_path = cli.uds_path.clone();
     }
 
+    if let Err(e) = cfg.validate() {
+        error!(error = %e, "Invalid configuration");
+        std::process::exit(1);
+    }
     cfg
 }
 
@@ -201,13 +256,25 @@ fn resolve_config(cli: &Cli) -> Config {
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::from_default_env().add_directive("me_server=info".parse().unwrap()),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .with_target(true)
         .init();
 
     let cli = Cli::parse();
     let cfg = resolve_config(&cli);
+    #[cfg(feature = "tls")]
+    let tls_acceptor = match (&cfg.server.tls.cert_path, &cfg.server.tls.key_path) {
+        (Some(cert), Some(key)) => {
+            let config = load_tls_config(cert, key, cfg.server.tls.client_ca_path.as_deref())
+                .unwrap_or_else(|e| {
+                    error!(error = %e, "Cannot initialize TLS");
+                    std::process::exit(1)
+                });
+            Some(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+        }
+        _ => None,
+    };
 
     let num_shards = if cfg.server.shards == 0 {
         std::thread::available_parallelism().map_or(4, |n| n.get())
@@ -253,6 +320,7 @@ async fn main() {
             snapshot_interval: cfg.wal.snapshot_interval,
         })
     } else {
+        warn!("WAL disabled: volatile test mode, restart loses orders");
         None
     };
 
@@ -289,13 +357,21 @@ async fn main() {
         }
         match sym_entry.to_symbol_config() {
             Ok(sym) => {
+                let risk_config = match sym_entry.to_risk_config() {
+                    Ok(rc) => rc,
+                    Err(e) => {
+                        error!(error = %e, "Invalid risk configuration");
+                        std::process::exit(1);
+                    }
+                };
                 info!(
                     base = sym.base,
                     quote = sym.quote,
                     id = sym.id.0,
+                    risk_enabled = risk_config.is_some(),
                     "Registering symbol"
                 );
-                router.add_symbol(sym);
+                router.add_symbol_with_risk(sym, risk_config);
             }
             Err(e) => {
                 error!(error = %e, "Invalid symbol configuration");
@@ -306,6 +382,11 @@ async fn main() {
 
     metrics.set_active_symbols(cfg.symbols.len() as i64);
 
+    if let Err(e) = router.health() {
+        error!(error = %e, "Engine recovery failed");
+        router.shutdown();
+        std::process::exit(1);
+    }
     let router = Arc::new(router);
 
     // Admin API key (None = mutating admin endpoints disabled)
@@ -322,7 +403,8 @@ async fn main() {
 
     // Handle SIGTERM/SIGINT for graceful shutdown.
     let drain_timeout = cfg.server.shutdown.drain_timeout_secs;
-    tokio::spawn(async move {
+    let signal_shutdown = shutdown_tx.clone();
+    let signal_task = tokio::spawn(async move {
         let ctrl_c = tokio::signal::ctrl_c();
         #[cfg(unix)]
         {
@@ -347,21 +429,78 @@ async fn main() {
             drain_timeout_secs = drain_timeout,
             "Received shutdown signal, draining connections"
         );
-        if let Err(e) = shutdown_tx.send(true) {
+        if let Err(e) = signal_shutdown.send(true) {
             tracing::warn!(error = ?e, "shutdown_tx.send failed: all receivers dropped");
         }
     });
+
+    // Shared session store (TCP and UDS share the same store so reconnects across
+    // transports are also supported).
+    let session_path = std::path::Path::new(&cfg.wal.path).join("sessions.wal");
+    let session_file_existed = session_path.exists();
+    let recovered = router.recovered_requests().unwrap_or_else(|e| {
+        error!(error = %e, "Cannot recover request ledger");
+        std::process::exit(1)
+    });
+    if cfg.wal.enabled && !session_file_existed && !recovered.is_empty() {
+        error!("Session journal missing for existing requests; restore a consistent backup");
+        std::process::exit(1);
+    }
+    let session_store = if cfg.wal.enabled {
+        SessionStore::open(
+            &session_path,
+            cfg.server.session.replay_buffer_size,
+            std::time::Duration::from_secs(cfg.server.session.ttl_secs),
+        )
+        .unwrap_or_else(|e| {
+            error!(error = %e, "Cannot recover sessions");
+            std::process::exit(1)
+        })
+    } else {
+        SessionStore::new(
+            cfg.server.session.replay_buffer_size,
+            std::time::Duration::from_secs(cfg.server.session.ttl_secs),
+        )
+    };
+    if let Err(e) = session_store
+        .reconcile(recovered)
+        .and_then(|()| session_store.recover_batches(&router))
+    {
+        error!(error = %e, "Session/request recovery failed");
+        std::process::exit(1);
+    }
+    if let Err(e) = session_store.checkpoint() {
+        error!(error = %e, "Cannot initialize session journal");
+        std::process::exit(1);
+    }
+    let session_store = Arc::new(session_store);
+    let tcp_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let uds_ready = Arc::new(std::sync::atomic::AtomicBool::new(
+        cfg.server.uds_path.is_none(),
+    ));
 
     // Spawn HTTP metrics + admin server
     let app_state = AppState {
         metrics: Arc::clone(&metrics),
         router: Arc::clone(&router),
         admin_api_key,
+        shutdown: shutdown_rx.clone(),
+        listeners_ready: vec![Arc::clone(&tcp_ready), Arc::clone(&uds_ready)],
+        sessions: Arc::clone(&session_store),
     };
 
     let metrics_addr = cfg.server.metrics_addr.clone();
-    let app_state_clone = app_state.clone();
-    tokio::spawn(async move {
+    let app_state_clone = app_state;
+    let listener = match tokio::net::TcpListener::bind(&metrics_addr).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            error!(error = %e, "Cannot bind metrics/admin listener");
+            std::process::exit(1);
+        }
+    };
+    let mut http_shutdown = shutdown_rx.clone();
+    let http_shutdown_tx = shutdown_tx.clone();
+    let mut http_task = tokio::spawn(async move {
         // Public admin status route
         let mut app = AxumRouter::new()
             .route("/admin/status", get(status_handler))
@@ -386,37 +525,32 @@ async fn main() {
         let public_routes = AxumRouter::new()
             .route("/metrics", get(metrics_handler))
             .route("/health", get(health_handler))
+            .route("/ready", get(health_handler))
             .with_state(app_state_clone);
 
         let app = public_routes.merge(app);
 
-        let listener = match tokio::net::TcpListener::bind(&metrics_addr).await {
-            Ok(l) => l,
-            Err(e) => {
-                // Do not panic the task silently — the operator loses metrics
-                // AND the halt circuit-breaker endpoint. Surface it loudly.
-                error!(addr = %metrics_addr, error = %e, "Metrics/admin HTTP bind FAILED — observability and admin endpoints are DOWN");
-                return;
-            }
-        };
         info!(addr = %metrics_addr, "Metrics HTTP server listening");
-        if let Err(e) = axum::serve(listener, app).await {
-            error!(error = %e, "Metrics/admin HTTP server terminated");
+        let result = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                while !*http_shutdown.borrow() {
+                    if http_shutdown.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .await;
+        if result.is_err() {
+            let _ = http_shutdown_tx.send(true);
         }
+        result
     });
-
-    // Shared session store (TCP and UDS share the same store so reconnects across
-    // transports are also supported).
-    let session_store = Arc::new(SessionStore::new(
-        cfg.server.session.replay_buffer_size,
-        std::time::Duration::from_secs(cfg.server.session.ttl_secs),
-    ));
 
     let hb_interval_ms = cfg.server.heartbeat.interval_ms as u32;
     let hb_timeout_ms = cfg.server.heartbeat.timeout_ms;
 
     // Background GC task: evict expired sessions every 30 s.
-    {
+    let gc_task = {
         let gc_store = Arc::clone(&session_store);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -424,11 +558,11 @@ async fn main() {
                 interval.tick().await;
                 gc_store.gc();
             }
-        });
-    }
+        })
+    };
 
     // Spawn optional UDS listener
-    if let Some(ref uds_path) = cfg.server.uds_path {
+    let uds_task = if let Some(ref uds_path) = cfg.server.uds_path {
         let uds_server = UdsServer::new_with_config(
             Arc::clone(&router),
             Some(Arc::clone(&metrics)),
@@ -437,15 +571,22 @@ async fn main() {
             hb_timeout_ms,
             Arc::clone(&clock),
         );
+        let uds_server = uds_server
+            .with_drain_timeout(std::time::Duration::from_secs(drain_timeout))
+            .with_readiness(uds_ready);
         let path = uds_path.clone();
         let uds_shutdown = shutdown_rx.clone();
-        tokio::spawn(async move {
-            info!(path = %path, "UDS listening");
-            if let Err(e) = uds_server.listen(&path, uds_shutdown).await {
-                warn!(error = %e, "UDS server error");
+        let uds_shutdown_tx = shutdown_tx.clone();
+        Some(tokio::spawn(async move {
+            let result = uds_server.listen(&path, uds_shutdown).await;
+            if result.is_err() {
+                let _ = uds_shutdown_tx.send(true);
             }
-        });
-    }
+            result
+        }))
+    } else {
+        None
+    };
 
     // TCP listener (blocks until shutdown)
     #[allow(unused_mut)]
@@ -458,54 +599,59 @@ async fn main() {
         Arc::clone(&clock),
     );
 
-    #[cfg(feature = "tls")]
-    {
-        use tokio_rustls::TlsAcceptor;
+    tcp_server = tcp_server
+        .with_drain_timeout(std::time::Duration::from_secs(drain_timeout))
+        .with_readiness(tcp_ready);
 
-        if let (Some(cert_path), Some(key_path)) =
-            (&cfg.server.tls.cert_path, &cfg.server.tls.key_path)
-        {
-            match load_tls_config(
-                cert_path,
-                key_path,
-                cfg.server.tls.client_ca_path.as_deref(),
-            ) {
-                Ok(rustls_cfg) => {
-                    let acceptor = TlsAcceptor::from(Arc::new(rustls_cfg));
-                    tcp_server = tcp_server.with_tls(acceptor);
-                    info!("TLS enabled");
-                }
-                Err(e) => {
-                    error!(error = %e, "Failed to load TLS certificates");
-                    std::process::exit(1);
-                }
-            }
-        }
+    #[cfg(feature = "tls")]
+    if let Some(acceptor) = tls_acceptor {
+        tcp_server = tcp_server.with_tls(acceptor);
     }
 
     info!(addr = %cfg.server.tcp_addr, "TCP listening");
-    if let Err(e) = tcp_server.listen(&cfg.server.tcp_addr, shutdown_rx).await {
-        warn!(error = %e, "TCP server error");
+    let tcp_result = tcp_server.listen(&cfg.server.tcp_addr, shutdown_rx).await;
+    let _ = shutdown_tx.send(true);
+    signal_task.abort();
+    gc_task.abort();
+    drop(tcp_server);
+    let mut failed = tcp_result.is_err();
+    if let Err(e) = tcp_result {
+        error!(error = %e, "TCP listener failed");
+    }
+    if let Some(task) = uds_task {
+        failed |= !matches!(task.await, Ok(Ok(())));
+    }
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(drain_timeout),
+        &mut http_task,
+    )
+    .await
+    {
+        Ok(Ok(Ok(()))) => {}
+        Ok(error) => {
+            failed = true;
+            error!(?error, "HTTP shutdown failed");
+        }
+        Err(_) => {
+            http_task.abort();
+            let _ = http_task.await;
+            failed = true;
+            error!("HTTP shutdown timed out");
+        }
+    }
+    if let Err(e) = session_store.checkpoint() {
+        error!(error = %e, "Session checkpoint failed");
+        failed = true;
+    }
+    match Arc::try_unwrap(router) {
+        Ok(router) => router.shutdown(),
+        Err(_) => {
+            error!("Engine still has active request owners after drain");
+            failed = true;
+        }
+    }
+    if failed {
         std::process::exit(1);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::constant_time_eq;
-
-    #[test]
-    fn constant_time_eq_matches() {
-        assert!(constant_time_eq(b"secret-key", b"secret-key"));
-        assert!(constant_time_eq(b"", b""));
-    }
-
-    #[test]
-    fn constant_time_eq_rejects() {
-        assert!(!constant_time_eq(b"secret-key", b"secret-keyX")); // length differs
-        assert!(!constant_time_eq(b"secret-key", b"Secret-key")); // first byte differs
-        assert!(!constant_time_eq(b"secret-key", b"secret-keX")); // last byte differs
-        assert!(!constant_time_eq(b"abc", b""));
     }
 }
 
@@ -517,28 +663,22 @@ fn load_tls_config(
     key_path: &str,
     client_ca_path: Option<&str>,
 ) -> Result<tokio_rustls::rustls::ServerConfig, String> {
-    use rustls_pemfile::{certs, private_key};
-    use std::fs::File;
-    use std::io::BufReader;
     use tokio_rustls::rustls;
+    use tokio_rustls::rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
     use tokio_rustls::rustls::server::WebPkiClientVerifier;
     use tokio_rustls::rustls::RootCertStore;
 
-    let cert_file = File::open(cert_path).map_err(|e| format!("cert: {e}"))?;
-    let cert_chain: Vec<_> = certs(&mut BufReader::new(cert_file))
-        .collect::<Result<_, _>>()
+    let cert_chain = CertificateDer::pem_file_iter(cert_path)
+        .map_err(|e| format!("cert: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("cert parse: {e}"))?;
-
-    let key_file = File::open(key_path).map_err(|e| format!("key: {e}"))?;
-    let key = private_key(&mut BufReader::new(key_file))
-        .map_err(|e| format!("key parse: {e}"))?
-        .ok_or_else(|| "no private key found".to_string())?;
+    let key = PrivateKeyDer::from_pem_file(key_path).map_err(|e| format!("key parse: {e}"))?;
 
     let builder = if let Some(ca_path) = client_ca_path {
         // mTLS: require client certificate
-        let ca_file = File::open(ca_path).map_err(|e| format!("client CA: {e}"))?;
-        let ca_certs: Vec<_> = certs(&mut BufReader::new(ca_file))
-            .collect::<Result<_, _>>()
+        let ca_certs = CertificateDer::pem_file_iter(ca_path)
+            .map_err(|e| format!("client CA: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("CA parse: {e}"))?;
         let mut root_store = RootCertStore::empty();
         for cert in ca_certs {
@@ -555,4 +695,27 @@ fn load_tls_config(
     builder
         .with_single_cert(cert_chain, key)
         .map_err(|e| format!("TLS config: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::constant_time_eq;
+
+    #[test]
+    fn constant_time_eq_matches() {
+        assert!(constant_time_eq(b"secret-key", b"secret-key"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects() {
+        assert!(!constant_time_eq(
+            b"secret-key",
+            &[b"secret-key".as_slice(), &[0; 256]].concat()
+        ));
+        assert!(!constant_time_eq(b"secret-key", b"secret-keyX")); // length differs
+        assert!(!constant_time_eq(b"secret-key", b"Secret-key")); // first byte differs
+        assert!(!constant_time_eq(b"secret-key", b"secret-keX")); // last byte differs
+        assert!(!constant_time_eq(b"abc", b""));
+    }
 }

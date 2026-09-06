@@ -13,6 +13,12 @@ const TAG_AMEND_ORDER: u8 = 3;
 pub fn encode_wal_command(cmd: &WalCommand) -> Vec<u8> {
     let mut buf = Vec::with_capacity(128);
     match cmd {
+        WalCommand::Decision { .. }
+        | WalCommand::TradingState { .. }
+        | WalCommand::SymbolConfig { .. } => {
+            buf.push(4);
+            buf.extend(serde_json::to_vec(cmd).expect("serializable journal record"));
+        }
         WalCommand::PlaceOrder(order) => {
             buf.push(TAG_PLACE_ORDER);
             encode_order(order, &mut buf);
@@ -68,13 +74,30 @@ pub fn decode_wal_command(data: &[u8]) -> Result<WalCommand, String> {
     let rest = &data[1..];
 
     match tag {
+        4 => {
+            let command: WalCommand = serde_json::from_slice(rest).map_err(|e| e.to_string())?;
+            if let WalCommand::Decision { command: inner, .. } = &command {
+                if !matches!(
+                    inner.as_ref(),
+                    WalCommand::PlaceOrder(_)
+                        | WalCommand::CancelOrder { .. }
+                        | WalCommand::AmendOrder { .. }
+                ) {
+                    return Err("Decision must contain a single order command".into());
+                }
+            }
+            Ok(command)
+        }
         TAG_PLACE_ORDER => {
+            if ![ORDER_ENCODED_SIZE_V4, ORDER_ENCODED_SIZE].contains(&rest.len()) {
+                return Err("Invalid PlaceOrder length".into());
+            }
             let order = decode_order(rest)?;
             Ok(WalCommand::PlaceOrder(order))
         }
         TAG_CANCEL_ORDER => {
-            if rest.len() < 18 {
-                return Err("CancelOrder too short".to_string());
+            if rest.len() != 18 {
+                return Err("Invalid CancelOrder length".to_string());
             }
             let order_id = u64::from_le_bytes(rest[0..8].try_into().unwrap());
             let symbol = SymbolId(u16::from_le_bytes(rest[8..10].try_into().unwrap()));
@@ -93,22 +116,27 @@ pub fn decode_wal_command(data: &[u8]) -> Result<WalCommand, String> {
             let symbol = SymbolId(u16::from_le_bytes(rest[8..10].try_into().unwrap()));
             let timestamp = u64::from_le_bytes(rest[10..18].try_into().unwrap());
             let mut offset = 18;
-            let new_price = if rest[offset] == 1 {
+            let mut read_option = || -> Result<Option<[u8; 8]>, String> {
+                let tag = *rest.get(offset).ok_or("AmendOrder missing option tag")?;
                 offset += 1;
-                let p = i64::from_le_bytes(rest[offset..offset + 8].try_into().unwrap());
-                offset += 8;
-                Some(FixedPrice::from_raw(p))
-            } else {
-                offset += 1;
-                None
+                match tag {
+                    0 => Ok(None),
+                    1 => {
+                        let value = rest
+                            .get(offset..offset + 8)
+                            .ok_or("AmendOrder truncated option value")?;
+                        offset += 8;
+                        Ok(Some(value.try_into().unwrap()))
+                    }
+                    _ => Err("AmendOrder invalid option tag".into()),
+                }
             };
-            let new_qty = if rest[offset] == 1 {
-                offset += 1;
-                let q = u64::from_le_bytes(rest[offset..offset + 8].try_into().unwrap());
-                Some(FixedQty::from_raw(q))
-            } else {
-                None
-            };
+            let new_price =
+                read_option()?.map(|value| FixedPrice::from_raw(i64::from_le_bytes(value)));
+            let new_qty = read_option()?.map(|value| FixedQty::from_raw(u64::from_le_bytes(value)));
+            if offset != rest.len() {
+                return Err("AmendOrder trailing bytes".into());
+            }
             Ok(WalCommand::AmendOrder {
                 order_id,
                 symbol,
@@ -462,5 +490,116 @@ mod tests {
             }
             _ => panic!("Expected AmendOrder"),
         }
+    }
+    #[test]
+    fn malformed_amends_return_errors_without_panicking() {
+        for price in [None, Some(FixedPrice::from_raw(1))] {
+            for qty in [None, Some(FixedQty::from_raw(1))] {
+                let bytes = encode_wal_command(&WalCommand::AmendOrder {
+                    order_id: 1,
+                    symbol: SymbolId(0),
+                    timestamp: 1,
+                    new_price: price,
+                    new_qty: qty,
+                });
+                for end in 0..bytes.len() {
+                    assert!(decode_wal_command(&bytes[..end]).is_err(), "prefix {end}");
+                }
+                for offset in [19, if price.is_some() { 28 } else { 20 }] {
+                    let mut invalid = bytes.clone();
+                    invalid[offset] = 2;
+                    assert!(
+                        decode_wal_command(&invalid).is_err(),
+                        "invalid option at {offset}"
+                    );
+                }
+                let mut extra = bytes;
+                extra.push(0);
+                assert!(decode_wal_command(&extra).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn wal_records_reject_trailing_bytes() {
+        let commands = [
+            WalCommand::PlaceOrder(Order::new_limit(
+                1,
+                SymbolId(0),
+                Side::Buy,
+                TimeInForce::GTC,
+                FixedPrice::from_raw(1),
+                FixedQty::from_raw(1),
+                1,
+            )),
+            WalCommand::CancelOrder {
+                order_id: 1,
+                symbol: SymbolId(0),
+                timestamp: 1,
+            },
+            WalCommand::TradingState {
+                symbol: SymbolId(0),
+                halted: true,
+            },
+            WalCommand::SymbolConfig {
+                symbol: SymbolId(0),
+                fingerprint: "test".into(),
+            },
+            WalCommand::Decision {
+                command: Box::new(WalCommand::CancelOrder {
+                    order_id: 1,
+                    symbol: SymbolId(0),
+                    timestamp: 1,
+                }),
+                session_id: me_core::SessionId::NONE,
+                request_id: Some(1),
+                item_index: 0,
+                events: Vec::new(),
+                expirations: Vec::new(),
+                expiration_owners: Vec::new(),
+                owners: Vec::new(),
+                processing_timestamp: 1,
+                apply: true,
+            },
+        ];
+        for command in commands {
+            let mut encoded = encode_wal_command(&command);
+            assert!(decode_wal_command(&encoded).is_ok());
+            encoded.push(0);
+            assert!(decode_wal_command(&encoded).is_err());
+        }
+    }
+    #[test]
+    fn decision_journal_rejects_control_or_nested_commands() {
+        let control = WalCommand::TradingState {
+            symbol: SymbolId(0),
+            halted: true,
+        };
+        let decision = WalCommand::Decision {
+            command: Box::new(control),
+            session_id: me_core::SessionId::NONE,
+            request_id: None,
+            item_index: 0,
+            events: Vec::new(),
+            expirations: Vec::new(),
+            expiration_owners: Vec::new(),
+            owners: Vec::new(),
+            processing_timestamp: 1,
+            apply: true,
+        };
+        assert!(decode_wal_command(&encode_wal_command(&decision)).is_err());
+        let nested = WalCommand::Decision {
+            command: Box::new(decision),
+            session_id: me_core::SessionId::NONE,
+            request_id: None,
+            item_index: 0,
+            events: Vec::new(),
+            expirations: Vec::new(),
+            expiration_owners: Vec::new(),
+            owners: Vec::new(),
+            processing_timestamp: 1,
+            apply: true,
+        };
+        assert!(decode_wal_command(&encode_wal_command(&nested)).is_err());
     }
 }

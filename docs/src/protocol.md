@@ -661,3 +661,8 @@ Offset  Hex                                              Поле
   replay пропущенных событий из серверного буфера.
 - Exactly-once: дедупликация команд по `request_id` предотвращает повторную обработку
   при переподключении.
+
+
+## Durable session semantics
+
+Protocol v2 uses a 22-byte header. Positive server sequences belong to the durable per-session stream; retries preserve original frame bytes and sequences. Clients must deduplicate these sequences. Sequence zero is out-of-band control and must not advance the receive cursor or be acknowledged. Passive execution events use request_id zero. A ReplayGap requires GetOpenOrders plus separate historical execution reconciliation; an order snapshot is not a settlement history. Batch items are individually durable, not globally atomic.

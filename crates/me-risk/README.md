@@ -7,7 +7,7 @@ Pre-trade risk checks performed before orders reach the matching engine. All che
 | Rate limiting | Token-bucket per symbol (`max_orders_per_second`) |
 | Fat finger protection | `max_order_qty` — maximum single order quantity |
 | Notional limit | `max_order_notional` — maximum order value in quote currency |
-| Position limit | `max_position` — maximum net position (0 = unlimited) |
+| Position limit | Unsupported without an account ledger; nonzero `max_position` is rejected |
 | Price band | `price_band_bps` — max % deviation from reference price (basis points) |
 | Open orders cap | `max_open_orders` — maximum open orders per symbol |
 | Circuit breaker | `trading_enabled` per symbol — admin-controlled halt |
@@ -17,7 +17,7 @@ Pre-trade risk checks performed before orders reach the matching engine. All che
 ```rust
 use me_risk::engine::RiskEngine;
 use me_risk::config::RiskConfig;
-use me_core::types::SymbolId;
+use me_core::types::{FixedQty, SymbolId};
 
 let mut risk = RiskEngine::new();
 
@@ -30,7 +30,7 @@ let config = RiskConfig {
 risk.add_symbol(config);
 
 // Before forwarding to matching engine:
-match risk.check_order(SymbolId(1), &order) {
+match risk.check_order(&order) {
     Ok(()) => { /* forward to engine */ }
     Err(reason) => { /* reject with reason */ }
 }

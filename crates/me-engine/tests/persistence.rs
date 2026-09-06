@@ -36,6 +36,10 @@ fn config() -> SymbolConfig {
 /// Convert a WalCommand into an engine Command.
 fn wal_to_command(wal: &WalCommand) -> Command {
     match wal {
+        WalCommand::Decision { command, .. } => wal_to_command(command),
+        WalCommand::TradingState { .. } | WalCommand::SymbolConfig { .. } => {
+            panic!("not a matching command")
+        }
         WalCommand::PlaceOrder(order) => Command::PlaceOrder(*order),
         WalCommand::CancelOrder {
             order_id,

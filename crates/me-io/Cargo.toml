@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-tls = ["dep:tokio-rustls", "dep:rustls-pemfile"]
+tls = ["dep:tokio-rustls"]
 
 [dependencies]
 me-core = { workspace = true }
@@ -12,11 +12,13 @@ me-engine = { workspace = true }
 me-metrics = { workspace = true }
 me-clock = { workspace = true }
 tokio = { workspace = true }
-bytes = { workspace = true }
+bytes = { workspace = true, features = ["serde"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+crc32fast = { workspace = true }
 tracing = { workspace = true }
 rand = { workspace = true }
 rustc-hash = { workspace = true }
 
 # Optional TLS support
 tokio-rustls = { workspace = true, optional = true }
-rustls-pemfile = { workspace = true, optional = true }

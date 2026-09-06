@@ -10,6 +10,19 @@ use me_core::types::{FixedPrice, FixedQty, OrderId, Side};
 use crate::book::OrderBook;
 use crate::price_level::PriceLevelIter;
 
+pub const MAX_MATCHING_FILLS: usize = 4096;
+pub const MAX_ICEBERG_SLICES: u64 = 4096;
+
+pub fn remaining_work(events: &EventBuffer) -> usize {
+    MAX_MATCHING_FILLS.saturating_sub(
+        events
+            .events()
+            .iter()
+            .filter(|event| matches!(event, MatchEvent::Trade(_)))
+            .count(),
+    )
+}
+
 /// Emit an `InternalError` rejection for an order that cannot be processed
 /// due to a book-invariant violation. Used by hot-path matching helpers
 /// when they need to abort after calling `record_invariant_violation`.
@@ -29,7 +42,23 @@ fn emit_internal_error(events: &mut EventBuffer, order_id: OrderId, timestamp: u
 /// Returns a RejectReason if invalid.
 pub fn validate_order(order: &Order, config: &SymbolConfig) -> Option<RejectReason> {
     // Quantity validations
-    if order.qty.is_zero() || order.remaining_qty.is_zero() {
+    if order.qty.is_zero()
+        || order.remaining_qty.is_zero()
+        || order
+            .remaining_qty
+            .raw()
+            .checked_add(order.cumulative_qty.raw())
+            .is_none_or(|sum| sum > order.qty.raw())
+    {
+        return Some(RejectReason::InvalidQuantity);
+    }
+    if !order.is_iceberg()
+        && order
+            .remaining_qty
+            .raw()
+            .checked_add(order.cumulative_qty.raw())
+            != Some(order.qty.raw())
+    {
         return Some(RejectReason::InvalidQuantity);
     }
     if order.qty < config.min_qty || order.qty > config.max_qty {
@@ -62,6 +91,9 @@ pub fn validate_order(order: &Order, config: &SymbolConfig) -> Option<RejectReas
         // The visible slice rests on the book, so it must obey the lot step.
         if !order.display_qty.is_multiple_of(config.qty_step) {
             return Some(RejectReason::InvalidLotSize);
+        }
+        if (order.qty.raw() - 1) / order.display_qty.raw() + 1 > MAX_ICEBERG_SLICES {
+            return Some(RejectReason::InvalidQuantity);
         }
     }
 
@@ -137,6 +169,27 @@ pub fn process_order(book: &mut OrderBook, mut order: Order, events: &mut EventB
         return;
     }
 
+    if order.order_type == OrderType::Limit
+        && matches!(order.tif, TimeInForce::GTC | TimeInForce::GTD)
+        && !book.can_rest(&order)
+    {
+        events.push(MatchEvent::OrderRejected {
+            order_id: order.id,
+            reason: RejectReason::InvalidQuantity,
+            timestamp: order.timestamp,
+        });
+        return;
+    }
+
+    if book.matching_work_exceeds(&order, remaining_work(events)) {
+        events.push(MatchEvent::OrderRejected {
+            order_id: order.id,
+            reason: RejectReason::RiskCheckFailed,
+            timestamp: order.timestamp,
+        });
+        return;
+    }
+
     // Dispatch by order type
     match order.order_type {
         OrderType::Limit => {
@@ -190,16 +243,21 @@ pub fn process_order(book: &mut OrderBook, mut order: Order, events: &mut EventB
 /// normal limit order so a crossing slice executes instead of resting into a
 /// crossed book. Used by the engine's iceberg replenishment.
 pub fn rematch_limit(book: &mut OrderBook, order: &mut Order, events: &mut EventBuffer) {
+    if book.matching_work_exceeds(order, remaining_work(events)) {
+        events.push(MatchEvent::OrderCancelled {
+            order_id: order.id,
+            remaining_qty: order.open_qty(),
+            timestamp: order.timestamp,
+        });
+        return;
+    }
     match_limit(book, order, events);
 }
 
 fn match_limit(book: &mut OrderBook, order: &mut Order, events: &mut EventBuffer) {
     // FOK: check if we can fill entirely before doing anything
     if order.tif == TimeInForce::FOK {
-        let available = match order.side {
-            Side::Buy => book.available_ask_qty(Some(order.price)),
-            Side::Sell => book.available_bid_qty(Some(order.price)),
-        };
+        let available = book.executable_qty(order.side, Some(order.price));
         if available < order.remaining_qty {
             order.status = OrderStatus::Rejected;
             events.push(MatchEvent::OrderRejected {
@@ -253,7 +311,14 @@ fn match_limit(book: &mut OrderBook, order: &mut Order, events: &mut EventBuffer
                 // Rest on book. GTD additionally carries an expiry that the
                 // engine layer enforces (lazy expiry sweep) — the book itself
                 // treats GTD identically to GTC.
-                book.insert_order(*order);
+                if !book.insert_order(*order) {
+                    order.status = OrderStatus::Cancelled;
+                    events.push(MatchEvent::OrderCancelled {
+                        order_id: order.id,
+                        remaining_qty: order.remaining_qty,
+                        timestamp: order.timestamp,
+                    });
+                }
             }
         }
     }
@@ -303,10 +368,7 @@ fn match_sell_limit(book: &mut OrderBook, taker: &mut Order, events: &mut EventB
 fn match_market(book: &mut OrderBook, order: &mut Order, events: &mut EventBuffer) {
     // FOK: check entire opposite side
     if order.tif == TimeInForce::FOK {
-        let available = match order.side {
-            Side::Buy => book.available_ask_qty(None),
-            Side::Sell => book.available_bid_qty(None),
-        };
+        let available = book.executable_qty(order.side, None);
         if available < order.remaining_qty {
             order.status = OrderStatus::Rejected;
             events.push(MatchEvent::OrderRejected {
@@ -502,9 +564,18 @@ fn match_taker_against_ask_level(
 
     // Remove fully-filled makers (remaining already 0 → PriceLevel::remove
     // subtracts 0; their quantity left total_qty in the loop above).
-    for (maker_id, _, fully_filled) in &fills {
+    for (maker_id, fill_qty, fully_filled) in &fills {
         if *fully_filled {
-            book.remove_order(*maker_id);
+            if let Some(mut maker) = book.remove_order(*maker_id) {
+                if maker.is_iceberg() && !maker.open_qty().is_zero() {
+                    maker.remaining_qty = maker.display_qty.min(maker.open_qty());
+                    maker.status = OrderStatus::PartiallyFilled;
+                    if !book.can_rest(&maker) {
+                        maker.remaining_qty = (*fill_qty).min(maker.open_qty());
+                    }
+                    book.insert_order(maker);
+                }
+            }
         }
     }
 
@@ -665,9 +736,18 @@ fn match_taker_against_bid_level(
 
     // Remove fully-filled makers (remaining already 0 → PriceLevel::remove
     // subtracts 0; their quantity left total_qty in the loop above).
-    for (maker_id, _, fully_filled) in &fills {
+    for (maker_id, fill_qty, fully_filled) in &fills {
         if *fully_filled {
-            book.remove_order(*maker_id);
+            if let Some(mut maker) = book.remove_order(*maker_id) {
+                if maker.is_iceberg() && !maker.open_qty().is_zero() {
+                    maker.remaining_qty = maker.display_qty.min(maker.open_qty());
+                    maker.status = OrderStatus::PartiallyFilled;
+                    if !book.can_rest(&maker) {
+                        maker.remaining_qty = (*fill_qty).min(maker.open_qty());
+                    }
+                    book.insert_order(maker);
+                }
+            }
         }
     }
 
@@ -790,10 +870,59 @@ pub fn amend_order(
         }
     }
 
+    let mut replacement = current_order;
+    replacement.price = final_price;
+    replacement.qty = final_qty;
+    replacement.remaining_qty = FixedQty::from_raw(
+        final_qty
+            .raw()
+            .saturating_sub(current_order.cumulative_qty.raw()),
+    );
+    if !book.can_rest(&replacement) {
+        events.push(MatchEvent::OrderRejected {
+            order_id,
+            reason: RejectReason::InvalidQuantity,
+            timestamp,
+        });
+        return;
+    }
+
+    if book.matching_work_exceeds(&replacement, remaining_work(events)) {
+        events.push(MatchEvent::OrderRejected {
+            order_id,
+            reason: RejectReason::RiskCheckFailed,
+            timestamp,
+        });
+        return;
+    }
+
     let price_changed = matches!(new_price, Some(p) if p != current_order.price);
     let qty_increased = matches!(new_qty, Some(q) if q > current_order.qty);
 
     if price_changed || qty_increased {
+        // A maker-only (POST_ONLY / MAKER_OR_CANCEL) order amended into a
+        // crossing price must NOT become a taker. Reject the amend WITHOUT
+        // touching the resting order, so it keeps its place. The previous path
+        // removed the order and re-ran `process_order`, which (a) emitted a
+        // duplicate `OrderAccepted` for an already-accepted order, breaking
+        // client state machines, and (b) for a crossing maker-only order
+        // emitted `OrderRejected{WouldTakeMarket}` AFTER removal, silently
+        // dropping the order from the book.
+        if current_order.flags & (ORDER_FLAG_POST_ONLY | ORDER_FLAG_MAKER_OR_CANCEL) != 0 {
+            let would_cross = match current_order.side {
+                Side::Buy => book.best_ask().is_some_and(|ask| ask <= final_price),
+                Side::Sell => book.best_bid().is_some_and(|bid| bid >= final_price),
+            };
+            if would_cross {
+                events.push(MatchEvent::OrderRejected {
+                    order_id,
+                    reason: RejectReason::WouldTakeMarket,
+                    timestamp,
+                });
+                return;
+            }
+        }
+
         // Cancel and re-insert — loses time priority.
         // Invariant: we just verified the order exists via get_order_location.
         let mut order = match book.remove_order(order_id) {
@@ -826,8 +955,16 @@ pub fn amend_order(
         });
 
         if !order.remaining_qty.is_zero() {
-            // Re-insert. If new price crosses, it will match.
-            process_order(book, order, events);
+            // Re-insert via the matching path WITHOUT re-emitting `OrderAccepted`
+            // (the order was accepted at original placement). If the new price
+            // crosses, it matches; otherwise it rests at the new level.
+            rematch_limit(book, &mut order, events);
+        } else {
+            events.push(MatchEvent::OrderCancelled {
+                order_id,
+                remaining_qty: FixedQty::ZERO,
+                timestamp,
+            });
         }
     } else {
         // In-place modification — retains time priority.
@@ -857,7 +994,7 @@ pub fn amend_order(
                 order.remaining_qty = FixedQty::from_raw(old_remaining.raw() - reduction.raw());
             }
             order.qty = final_qty;
-            reduction
+            reduction.min(old_remaining)
         } else {
             FixedQty::ZERO
         };
@@ -869,31 +1006,28 @@ pub fn amend_order(
             timestamp,
         });
 
-        // If remaining is zero after reduction, remove from book
-        if order.remaining_qty.is_zero() {
+        let fully_cancelled = order.remaining_qty.is_zero();
+        if !qty_delta.is_zero() {
+            match loc.side {
+                Side::Buy => {
+                    if let Some(level) = book.bids_level_mut(loc.price) {
+                        level.total_qty -= qty_delta;
+                    }
+                }
+                Side::Sell => {
+                    if let Some(level) = book.asks_level_mut(loc.price) {
+                        level.total_qty -= qty_delta;
+                    }
+                }
+            }
+        }
+        if fully_cancelled {
             book.remove_order(order_id);
             events.push(MatchEvent::OrderCancelled {
                 order_id,
                 remaining_qty: FixedQty::ZERO,
                 timestamp,
             });
-        } else {
-            // Update price level total_qty
-            // We need to adjust the level's total_qty by the reduction
-            if !qty_delta.is_zero() {
-                match loc.side {
-                    Side::Buy => {
-                        if let Some(level) = book.bids_level_mut(loc.price) {
-                            level.total_qty -= qty_delta;
-                        }
-                    }
-                    Side::Sell => {
-                        if let Some(level) = book.asks_level_mut(loc.price) {
-                            level.total_qty -= qty_delta;
-                        }
-                    }
-                }
-            }
         }
     }
 }

@@ -13,3 +13,9 @@ docs/plans/*
 
 # mdBook build output
 docs/book/
+
+/data/
+__pycache__/
+examples/typescript/node_modules/
+examples/typescript/dist/
+examples/rust/target/

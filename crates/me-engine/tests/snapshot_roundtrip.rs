@@ -183,3 +183,29 @@ fn empty_engine_snapshot_roundtrip() {
     assert!(again.resting_orders.is_empty());
     assert!(again.stop_orders.is_empty());
 }
+
+#[test]
+fn invalid_snapshot_is_rejected_atomically() {
+    let mut engine = Engine::new(config());
+    place_limit(&mut engine, 1, Side::Buy, 100.0, 1.0, 1);
+    let mut snapshot = engine.snapshot();
+    snapshot.resting_orders.push(snapshot.resting_orders[0]);
+    assert!(engine.try_apply_snapshot(snapshot).is_err());
+    assert_eq!(engine.book().order_count(), 1);
+    assert!(engine.book().contains_order(1));
+}
+
+#[test]
+fn snapshot_rejects_nonresting_order_types_and_tifs() {
+    let mut engine = Engine::new(config());
+    place_limit(&mut engine, 1, Side::Buy, 100.0, 1.0, 1);
+    let snapshot = engine.snapshot();
+    let mut market = snapshot.clone();
+    market.resting_orders[0].order_type = me_core::order::OrderType::Market;
+    market.resting_orders[0].price = FixedPrice::ZERO;
+    assert!(engine.try_apply_snapshot(market).is_err());
+    let mut ioc = snapshot;
+    ioc.resting_orders[0].tif = TimeInForce::IOC;
+    assert!(engine.try_apply_snapshot(ioc).is_err());
+    assert!(engine.book().contains_order(1));
+}

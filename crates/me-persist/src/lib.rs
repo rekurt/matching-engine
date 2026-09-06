@@ -10,10 +10,35 @@
 //!
 //! ## Recovery
 //!
-//! 1. Load the latest snapshot (if any)
-//! 2. Replay WAL entries from the snapshot's sequence number forward
-//! 3. Engine state is fully restored — deterministic replay guaranteed
+//! The router validates and replays the complete decision journal, comparing
+//! recovered events with recorded outcomes. Snapshots are checkpoints; they do
+//! not replace decision history or the session journal.
 
 pub mod codec;
 pub mod snapshot;
 pub mod wal;
+
+/// Persist newly created directory entries before publishing durable files inside them.
+pub fn create_dir_all_durable(path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+    let path = path.as_ref();
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut missing = Vec::new();
+    for directory in absolute.ancestors() {
+        if directory.is_dir() {
+            break;
+        }
+        missing.push(directory.to_path_buf());
+    }
+    std::fs::create_dir_all(&absolute)?;
+    for directory in missing {
+        std::fs::File::open(&directory)?.sync_all()?;
+        if let Some(parent) = directory.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+    }
+    Ok(())
+}

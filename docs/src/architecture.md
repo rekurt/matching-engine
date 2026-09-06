@@ -76,7 +76,7 @@ me-datagen ──> me-core    (генератор потока ордеров)
 | `me-io`      | Бинарный протокол v2 (22-байт заголовок), async TCP и UDS серверы (tokio) |
 | `me-server`  | Точка входа, CLI (clap), TOML конфиг, REST admin API (Axum, порт 9091)    |
 | `me-metrics` | 50+ метрик Prometheus: ордера, сделки, книга, соединения, WAL              |
-| `me-risk`    | Pre-trade риск: token-bucket rate limiting, price bands, position limits   |
+| `me-risk`    | Pre-trade риск: token-bucket rate limiting, price bands, qty/notional limits   |
 | `me-audit`   | Структурированные JSON-события аудита через tracing                         |
 | `me-clock`   | Абстракция часов: SystemClock, CoarseClock, RdtscClock                     |
 | `me-bench`   | Criterion-бенчмарки: 18 сценариев по throughput, latency, e2e матчинг     |
@@ -450,9 +450,9 @@ Halt **eventually consistent**: команды, уже стоящие в оче�
 
 ## Характеристики производительности
 
-- Аллокации кучи в горячем пути: **0** (slab + EventBuffer)
-- Блокировки в потоке матчинга: **0** (shared-nothing)
+- Slab переиспользует память ордеров; временные коллекции, события и журналирование могут выделять память.
+- Стакан принадлежит одному worker; сервер использует очереди, блокировки сессий и синхронное сохранение.
 - Задержка отмены: **O(1)** (FxHashMap lookup + интрузивный список)
 - Задержка вставки: **O(log P)** где P = количество ценовых уровней
 - Каскад стопов: ограничен 100 итерациями
-- WAL запись: одна `BufWriter` append операция на команду
+- Durable decision записывается и синхронизируется до подтверждения; session journal сохраняется отдельно.

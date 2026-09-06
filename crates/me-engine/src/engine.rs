@@ -21,6 +21,8 @@ use crate::command::Command;
 
 /// Maximum number of cascading stop trigger iterations to prevent infinite loops.
 const MAX_STOP_CASCADE: usize = 100;
+pub const MAX_PENDING_STOPS: usize = 4096;
+pub const MAX_LIVE_GTD: usize = 4096;
 
 /// Trading state for circuit breaker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +57,8 @@ pub struct Engine {
     /// fills and a hidden reserve remains, the next slice is re-inserted at the
     /// back of the queue.
     icebergs: FxHashMap<OrderId, Order>,
+    risk_config: Option<me_risk::config::RiskConfig>,
+    processing_timestamp: u64,
 }
 
 impl Engine {
@@ -73,7 +77,62 @@ impl Engine {
             self_trade_prevention: false,
             gtd_expiry: BinaryHeap::new(),
             icebergs: FxHashMap::default(),
+            risk_config: None,
+            processing_timestamp: 0,
         }
+    }
+
+    pub fn set_risk_config(&mut self, config: Option<me_risk::config::RiskConfig>) {
+        self.risk_config = config;
+    }
+
+    pub fn amended_order(
+        &self,
+        order_id: OrderId,
+        new_price: Option<FixedPrice>,
+        new_qty: Option<FixedQty>,
+    ) -> Result<Order, RejectReason> {
+        if self.icebergs.contains_key(&order_id) || self.stop_book.contains(order_id) {
+            return Err(RejectReason::AmendNotSupported);
+        }
+        let mut order = self
+            .book
+            .get_order(order_id)
+            .copied()
+            .ok_or(RejectReason::OrderNotFound)?;
+        if self.risk_config.is_some()
+            && !order.cumulative_qty.is_zero()
+            && (new_price.is_some_and(|price| price > order.price)
+                || new_qty.is_some_and(|qty| qty > order.qty))
+        {
+            return Err(RejectReason::AmendNotSupported);
+        }
+        if let Some(price) = new_price {
+            if !self.book.config.validate_price(price) {
+                return Err(RejectReason::InvalidTickSize);
+            }
+            order.price = price;
+        }
+        if let Some(qty) = new_qty {
+            if !self.book.config.validate_qty(qty) {
+                return Err(RejectReason::InvalidQuantity);
+            }
+            order.qty = qty;
+        }
+        order.remaining_qty =
+            FixedQty::from_raw(order.qty.raw().saturating_sub(order.cumulative_qty.raw()));
+        Ok(order)
+    }
+
+    fn execution_notional_blocked(&self, order: &Order) -> bool {
+        let Some(config) = self.risk_config.as_ref() else {
+            return false;
+        };
+        let Some(price) = self.book.execution_price_bound(order) else {
+            return false;
+        };
+        let notional = (price.raw().unsigned_abs() as u128).saturating_mul(order.qty.raw() as u128);
+        notional > (config.max_order_notional as u128) * (me_core::types::SCALE_U64 as u128)
     }
 
     /// Enable or disable self-trade prevention for this symbol.
@@ -111,12 +170,105 @@ impl Engine {
         }
     }
 
+    /// Owning session of a resting order (live book first, then stop book).
+    /// `None` if the order is not currently resting in either book.
+    fn order_owner(&self, order_id: OrderId) -> Option<me_core::SessionId> {
+        self.book
+            .get_order(order_id)
+            .or_else(|| self.stop_book.get(order_id))
+            .map(|o| o.client_session_id)
+    }
+
+    /// Authorize a cancel/amend issued by `requesting_session` against
+    /// `order_id`. Returns `true` when the mutation is permitted.
+    ///
+    /// Rules:
+    /// - `requesting_session == NONE` is a privileged/internal caller (WAL
+    ///   replay, admin, direct `process`): always allowed.
+    /// - A resting order owned by `NONE` (legacy/unattributed) is manageable by
+    ///   anyone — preserves operability without re-opening the cross-session
+    ///   hole, since an attacker with a real session can never match a victim's
+    ///   real session this way.
+    /// - Otherwise the owning session must equal the requesting session.
+    /// - A non-resting order returns `true` so the normal path emits the
+    ///   ordinary `OrderNotFound` rejection.
+    pub(crate) fn is_mutation_authorized(
+        &self,
+        order_id: OrderId,
+        requesting_session: me_core::SessionId,
+    ) -> bool {
+        if requesting_session.is_none() {
+            return true;
+        }
+        match self.order_owner(order_id) {
+            Some(owner) if owner.is_none() => true,
+            Some(owner) => owner == requesting_session,
+            None => true,
+        }
+    }
+
     /// Process a single command and return the resulting events.
     ///
     /// This is the main entry point. Commands are processed STRICTLY SEQUENTIALLY.
     /// The caller must ensure that commands for one symbol are never processed concurrently.
+    ///
+    /// Equivalent to [`Engine::process_with_session`] with a privileged
+    /// (`SessionId::NONE`) caller — i.e. no per-session ownership enforcement.
     pub fn process(&mut self, cmd: Command) -> &[MatchEvent] {
+        self.process_with_session(cmd, me_core::SessionId::NONE)
+    }
+
+    /// Process a command on behalf of `requesting_session`, enforcing order
+    /// ownership for cancel/amend. A client may only cancel or amend an order
+    /// its own session placed; an attempt against another session's order is
+    /// rejected with `OrderNotFound` (without revealing the order exists).
+    pub fn process_with_session(
+        &mut self,
+        cmd: Command,
+        requesting_session: me_core::SessionId,
+    ) -> &[MatchEvent] {
+        self.process_with_session_at(cmd, requesting_session, self.clock.now_ns())
+    }
+
+    pub fn process_with_session_at(
+        &mut self,
+        cmd: Command,
+        requesting_session: me_core::SessionId,
+        timestamp: u64,
+    ) -> &[MatchEvent] {
+        self.processing_timestamp = timestamp;
+        if let Command::CancelOrder {
+            order_id,
+            timestamp,
+            ..
+        }
+        | Command::AmendOrder {
+            order_id,
+            timestamp,
+            ..
+        } = &cmd
+        {
+            let (order_id, timestamp) = (*order_id, *timestamp);
+            if !self.is_mutation_authorized(order_id, requesting_session) {
+                self.events.clear();
+                self.events.push(MatchEvent::OrderRejected {
+                    order_id,
+                    reason: RejectReason::OrderNotFound,
+                    timestamp,
+                });
+                return self.events.events();
+            }
+        }
+        self.process_inner(cmd)
+    }
+
+    fn process_inner(&mut self, cmd: Command) -> &[MatchEvent] {
         self.events.clear();
+        let mut stop_scanned = 0;
+        let gtd_candidate = match &cmd {
+            Command::PlaceOrder(order) if order.is_gtd() => Some((order.id, order.expire_at)),
+            _ => None,
+        };
 
         match cmd {
             Command::PlaceOrder(order) => {
@@ -125,6 +277,34 @@ impl Engine {
                     self.events.push(MatchEvent::OrderRejected {
                         order_id: order.id,
                         reason: RejectReason::TradingHalted,
+                        timestamp: order.timestamp,
+                    });
+                    return self.events.events();
+                }
+
+                if order.is_gtd() && self.gtd_expiry.len() >= MAX_LIVE_GTD {
+                    let mut ids = rustc_hash::FxHashSet::default();
+                    self.gtd_expiry.retain(|Reverse((expiry, id))| {
+                        self.book
+                            .get_order(*id)
+                            .or_else(|| self.stop_book.get(*id))
+                            .is_some_and(|live| {
+                                live.is_gtd() && live.expire_at == *expiry && ids.insert(*id)
+                            })
+                    });
+                    if self.gtd_expiry.len() >= MAX_LIVE_GTD {
+                        self.events.push(MatchEvent::OrderRejected {
+                            order_id: order.id,
+                            reason: RejectReason::RiskCheckFailed,
+                            timestamp: order.timestamp,
+                        });
+                        return self.events.events();
+                    }
+                }
+                if order.is_stop() && self.stop_book.len() >= MAX_PENDING_STOPS {
+                    self.events.push(MatchEvent::OrderRejected {
+                        order_id: order.id,
+                        reason: RejectReason::RiskCheckFailed,
                         timestamp: order.timestamp,
                     });
                     return self.events.events();
@@ -181,6 +361,19 @@ impl Engine {
                         return self.events.events();
                     }
 
+                    if self.execution_notional_blocked(&order)
+                        || self
+                            .book
+                            .matching_work_exceeds(&order, matching::MAX_MATCHING_FILLS)
+                    {
+                        self.events.push(MatchEvent::OrderRejected {
+                            order_id: order.id,
+                            reason: RejectReason::RiskCheckFailed,
+                            timestamp: order.timestamp,
+                        });
+                        return self.events.events();
+                    }
+
                     // Iceberg: only the display slice is visible on the book; the
                     // hidden reserve is replenished as slices fill. Applies to
                     // resting tifs only (GTC/GTD); IOC/FOK ignore display_qty.
@@ -203,20 +396,7 @@ impl Engine {
                     } else {
                         matching::process_order(&mut self.book, order, &mut self.events);
                     }
-                    self.check_stop_triggers();
-                }
-
-                // Enqueue GTD expiry only if the order is actually resting after
-                // matching (live book or stop book). A GTD that was rejected,
-                // fully filled on arrival, or that never rests (e.g. a GTD market
-                // order) has no resting order for expire_gtd_now to cancel, so
-                // enqueuing it would leak a stale heap entry that accumulates
-                // under repeated such orders until their (far-future) expiry.
-                if order.is_gtd()
-                    && order.expire_at != 0
-                    && (self.book.contains_order(order.id) || self.stop_book.contains(order.id))
-                {
-                    self.gtd_expiry.push(Reverse((order.expire_at, order.id)));
+                    self.check_stop_triggers(&mut stop_scanned);
                 }
             }
             Command::CancelOrder {
@@ -270,6 +450,37 @@ impl Engine {
                     return self.events.events();
                 }
 
+                let replacement = match self.amended_order(order_id, new_price, new_qty) {
+                    Ok(order) => order,
+                    Err(reason) => {
+                        self.events.push(MatchEvent::OrderRejected {
+                            order_id,
+                            reason,
+                            timestamp,
+                        });
+                        return self.events.events();
+                    }
+                };
+                if !replacement.remaining_qty.is_zero() && self.self_trade_blocked(&replacement) {
+                    self.events.push(MatchEvent::OrderRejected {
+                        order_id,
+                        reason: RejectReason::SelfTradePrevented,
+                        timestamp,
+                    });
+                    return self.events.events();
+                }
+
+                if !replacement.remaining_qty.is_zero()
+                    && self.execution_notional_blocked(&replacement)
+                {
+                    self.events.push(MatchEvent::OrderRejected {
+                        order_id,
+                        reason: RejectReason::RiskCheckFailed,
+                        timestamp,
+                    });
+                    return self.events.events();
+                }
+
                 matching::amend_order(
                     &mut self.book,
                     order_id,
@@ -278,7 +489,7 @@ impl Engine {
                     timestamp,
                     &mut self.events,
                 );
-                self.check_stop_triggers();
+                self.check_stop_triggers(&mut stop_scanned);
             }
         }
 
@@ -298,7 +509,7 @@ impl Engine {
         let mut settle = 0;
         loop {
             let before = self.events.len();
-            self.check_stop_triggers();
+            self.check_stop_triggers(&mut stop_scanned);
             self.replenish_iceberg_slices(&mut folded, &mut touched);
             if self.events.len() == before || settle >= MAX_STOP_CASCADE {
                 break;
@@ -311,6 +522,15 @@ impl Engine {
         // Cancel such residuals so the order is never in an uncancellable /
         // unexpirable / resurrectable limbo.
         self.cancel_unrestable_icebergs();
+        if let Some((id, expiry)) = gtd_candidate {
+            let accepted = self.events.events().iter().any(|event| matches!(event, MatchEvent::OrderAccepted { order_id, .. } if *order_id == id));
+            if accepted
+                && expiry != 0
+                && (self.book.contains_order(id) || self.stop_book.contains(id))
+            {
+                self.gtd_expiry.push(Reverse((expiry, id)));
+            }
+        }
 
         self.events.events()
     }
@@ -419,7 +639,13 @@ impl Engine {
                 //   - self-cross same-session liquidity (self-trade prevention), or
                 //   - cross at all while carrying a maker-only flag (POST_ONLY /
                 //     MAKER_OR_CANCEL), which forbids taking.
-                if self.self_trade_blocked(&slice) || self.maker_only_would_cross(&slice) {
+                if self.self_trade_blocked(&slice)
+                    || self.maker_only_would_cross(&slice)
+                    || self.execution_notional_blocked(&slice)
+                    || self
+                        .book
+                        .matching_work_exceeds(&slice, matching::remaining_work(&self.events))
+                {
                     blocked.insert(id);
                     continue;
                 }
@@ -537,7 +763,7 @@ impl Engine {
         if blocked.is_empty() {
             return;
         }
-        let now = self.clock.now_ns();
+        let now = self.processing_timestamp;
         for (id, remaining) in blocked {
             self.icebergs.remove(&id);
             self.events.push(MatchEvent::OrderCancelled {
@@ -557,17 +783,14 @@ impl Engine {
     /// intra-command extreme and fixed stops must see every threshold the path
     /// crossed. Using only the last price loses both — e.g. a sell sweep trading
     /// 105 then 95 would leave a sell trailing stop unratcheted and never fire.
-    fn check_stop_triggers(&mut self) {
+    fn check_stop_triggers(&mut self, scanned: &mut usize) {
         if self.stop_book.is_empty() {
             return;
         }
 
         // `scanned` marks how far into the event buffer we have consumed trades.
-        // Each generation replays the trades appended since the last scan (the
-        // original sweep first, then any trades its triggered orders produce).
-        // Re-feeding an already-seen price is harmless: ratcheting is idempotent
-        // and a triggered stop is removed from the book, so it cannot re-fire.
-        let mut scanned = 0usize;
+        // Keep the cursor across settle passes: replaying an older price after
+        // a trailing stop ratchets can falsely trigger it.
         let mut cascade_count = 0;
 
         loop {
@@ -575,20 +798,20 @@ impl Engine {
                 break;
             }
 
-            let path: Vec<FixedPrice> = self.events.events()[scanned..]
+            let path: Vec<FixedPrice> = self.events.events()[*scanned..]
                 .iter()
                 .filter_map(|e| match e {
                     MatchEvent::Trade(t) => Some(t.price),
                     _ => None,
                 })
                 .collect();
-            scanned = self.events.len();
+            *scanned = self.events.len();
 
             if path.is_empty() {
                 break;
             }
 
-            let timestamp = self.clock.now_ns();
+            let timestamp = self.processing_timestamp;
             let mut triggered_any = false;
 
             for price in path {
@@ -605,6 +828,24 @@ impl Engine {
                     // A triggered stop is the newest aggressor — honor STP just
                     // like the normal place path, cancelling it rather than
                     // self-matching a resting order from the same session.
+                    if self.risk_config.as_ref().is_some_and(|config| {
+                        me_risk::engine::RiskEngine::check_limits(config, &order).is_err()
+                    }) {
+                        self.events.push(MatchEvent::OrderRejected {
+                            order_id: order.id,
+                            reason: RejectReason::RiskCheckFailed,
+                            timestamp,
+                        });
+                        continue;
+                    }
+                    if self.execution_notional_blocked(&order) {
+                        self.events.push(MatchEvent::OrderRejected {
+                            order_id: order.id,
+                            reason: RejectReason::RiskCheckFailed,
+                            timestamp,
+                        });
+                        continue;
+                    }
                     if self.self_trade_blocked(&order) {
                         self.events.push(MatchEvent::OrderRejected {
                             order_id: order.id,
@@ -770,6 +1011,77 @@ impl Engine {
     /// and stop book. Used during WAL replay where the engine is created
     /// first and then rewound to a snapshot.
     pub fn apply_snapshot(&mut self, snapshot: BookSnapshot) {
+        self.try_apply_snapshot(snapshot)
+            .expect("invalid engine snapshot");
+    }
+
+    pub fn try_apply_snapshot(&mut self, mut snapshot: BookSnapshot) -> Result<(), String> {
+        if snapshot.stop_orders.len() > MAX_PENDING_STOPS
+            || snapshot
+                .resting_orders
+                .iter()
+                .chain(&snapshot.stop_orders)
+                .filter(|order| order.is_gtd())
+                .count()
+                > MAX_LIVE_GTD
+        {
+            return Err("snapshot exceeds deferred order capacity".into());
+        }
+
+        if snapshot.sequence == u64::MAX || snapshot.trade_id_gen == u64::MAX {
+            return Err("snapshot counters exhausted".into());
+        }
+        if snapshot.symbol != self.book.config.id {
+            return Err("snapshot symbol mismatch".into());
+        }
+        let mut verified = OrderBook::new(self.book.config.clone());
+        let mut ids = rustc_hash::FxHashSet::default();
+        let mut resting_sequences = rustc_hash::FxHashSet::default();
+        for (orders, stops) in [
+            (&snapshot.resting_orders, false),
+            (&snapshot.stop_orders, true),
+        ] {
+            for order in orders {
+                if order.symbol != snapshot.symbol
+                    || order.is_stop() != stops
+                    || !ids.insert(order.id)
+                {
+                    return Err("snapshot order symbol, type, or duplicate id invalid".into());
+                }
+                if (!stops
+                    && (order.order_type != me_core::order::OrderType::Limit
+                        || !matches!(order.tif, TimeInForce::GTC | TimeInForce::GTD)))
+                    || matching::validate_order(order, &self.book.config).is_some()
+                    || order
+                        .remaining_qty
+                        .raw()
+                        .checked_add(order.cumulative_qty.raw())
+                        .is_none_or(|sum| sum > order.qty.raw())
+                {
+                    return Err("snapshot order values invalid".into());
+                }
+                if !stops
+                    && (order.sequence == 0
+                        || order.sequence > snapshot.sequence
+                        || !resting_sequences.insert(order.sequence))
+                {
+                    return Err("snapshot resting order sequence invalid".into());
+                }
+                if !stops && !verified.insert_order(*order) {
+                    return Err("snapshot price level capacity exceeded".into());
+                }
+            }
+        }
+        if verified
+            .best_bid()
+            .zip(verified.best_ask())
+            .is_some_and(|(bid, ask)| bid >= ask)
+        {
+            return Err("snapshot book is crossed".into());
+        }
+        snapshot
+            .resting_orders
+            .sort_unstable_by_key(|order| order.sequence);
         // Reset both books to empty, then re-insert.
         let cfg = self.book.config.clone();
         self.book = OrderBook::new(cfg);
@@ -788,6 +1100,11 @@ impl Engine {
                 self.icebergs.insert(order.id, order);
             }
             self.book.insert_order(order);
+            if let Some(location) = self.book.get_order_location(order.id).copied() {
+                if let Some(restored) = self.book.get_order_mut_by_key(location.slab_key) {
+                    restored.sequence = order.sequence;
+                }
+            }
         }
         let mut scratch = EventBuffer::default();
         for order in snapshot.stop_orders {
@@ -803,5 +1120,6 @@ impl Engine {
 
         self.book.sequence = snapshot.sequence;
         self.book.trade_id_gen = snapshot.trade_id_gen;
+        Ok(())
     }
 }

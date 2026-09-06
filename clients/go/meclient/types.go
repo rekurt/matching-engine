@@ -262,6 +262,11 @@ type StopTriggered struct {
 // PongEvent is received in response to a Ping.
 type PongEvent struct{}
 
+type FlowControlWarningEvent struct {
+	BufferPercent uint8
+	HardLimit     bool
+}
+
 // ErrorEvent is received when the server sends a protocol-level error.
 type ErrorEvent struct {
 	Code    uint16 // ErrorCode from the protocol (see ErrorCode* constants)
@@ -286,6 +291,7 @@ const (
 // Event is a union type for all outbound messages from the engine.
 // Exactly one field will be non-nil.
 type Event struct {
+	FlowControlWarning   *FlowControlWarningEvent
 	OrderAccepted        *OrderAccepted
 	OrderRejected        *OrderRejected
 	Trade                *Trade

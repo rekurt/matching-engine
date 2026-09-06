@@ -7,7 +7,7 @@
 //!
 //! # Wire Protocol
 //!
-//! Every frame on the wire has a 14-byte header followed by a variable-length
+//! Every frame on the wire has a 22-byte header followed by a variable-length
 //! payload:
 //!
 //! ```text
@@ -17,7 +17,7 @@
 //! +----------+----------+----------+----------+-----------------+
 //! ```
 //!
-//! - `len` is the payload size only (does not include the 14-byte header).
+//! - `len` is the payload size only (does not include the 22-byte header).
 //! - All multi-byte integers are **little-endian**.
 //! - Prices are `i64` with implicit scale 10^8 (1.0 = 100_000_000).
 //! - Quantities are `u64` with implicit scale 10^8.
@@ -32,10 +32,10 @@ use tokio::net::TcpStream;
 // ---------------------------------------------------------------------------
 
 /// Size of the frame header: len(4) + ver(1) + type(1) + seq(8) = 14 bytes.
-const HEADER_SIZE: usize = 14;
+const HEADER_SIZE: usize = 22;
 
 /// Current wire protocol version.
-const PROTOCOL_VERSION: u8 = 1;
+const PROTOCOL_VERSION: u8 = 2;
 
 /// Decimal scale factor: all prices and quantities are fixed-point with 10^8.
 const DECIMAL_SCALE: f64 = 100_000_000.0;
@@ -107,7 +107,7 @@ fn side_name(side: u8) -> &'static str {
 
 /// Encode a protocol frame (header + payload) ready for transmission.
 ///
-/// Layout: `len(u32 LE) + ver(u8) + type(u8) + seq(u64 LE) + payload`.
+/// Layout: `len(u32 LE) + ver(u8) + type(u8) + seq(u64 LE) + request_id(u64 LE) + payload`.
 fn encode_frame(msg_type: u8, seq: u64, payload: &[u8]) -> Vec<u8> {
     let payload_len = payload.len() as u32;
     let mut buf = Vec::with_capacity(HEADER_SIZE + payload.len());
@@ -116,6 +116,8 @@ fn encode_frame(msg_type: u8, seq: u64, payload: &[u8]) -> Vec<u8> {
     buf.push(PROTOCOL_VERSION);                         // 1 byte:  version
     buf.push(msg_type);                                 // 1 byte:  message type
     buf.extend_from_slice(&seq.to_le_bytes());          // 8 bytes: sequence number
+    let request_id = if matches!(msg_type, 0x01 | 0x02 | 0x03 | 0x07 | 0x09 | 0x0B | 0x0C) { seq } else { 0 };
+    buf.extend_from_slice(&request_id.to_le_bytes());
     buf.extend_from_slice(payload);                     // N bytes: payload
 
     buf
@@ -125,7 +127,7 @@ fn encode_frame(msg_type: u8, seq: u64, payload: &[u8]) -> Vec<u8> {
 ///
 /// Returns `(message_type, sequence_number, payload_bytes)`.
 async fn read_frame(stream: &mut TcpStream) -> Result<(u8, u64, Vec<u8>), String> {
-    // Read the 14-byte header.
+    // Read the 22-byte header.
     let mut hdr = [0u8; HEADER_SIZE];
     stream
         .read_exact(&mut hdr)
@@ -133,7 +135,9 @@ async fn read_frame(stream: &mut TcpStream) -> Result<(u8, u64, Vec<u8>), String
         .map_err(|e| format!("failed to read frame header: {e}"))?;
 
     let payload_len = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as usize;
-    let _version = hdr[4];
+    if hdr[4] != PROTOCOL_VERSION || payload_len > 1024 * 1024 {
+        return Err("invalid response version or oversized payload".into());
+    }
     let msg_type = hdr[5];
     let seq = u64::from_le_bytes([hdr[6], hdr[7], hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13]]);
 
@@ -555,4 +559,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n--- Demo complete ---");
     Ok(())
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+
+    #[test]
+    fn cancel_uses_v2_request_header() {
+        let frame = encode_frame(0x02, 7, &[0; 10]);
+        assert_eq!(frame.len(), 32);
+        assert_eq!(frame[4], 2);
+        assert_eq!(&frame[14..22], &7u64.to_le_bytes());
+    }
 }

@@ -10,7 +10,7 @@ use crate::Clock;
 /// A background thread updates an `AtomicU64` every ~100 µs with the current
 /// wall-clock time. Reading the clock is a single `Relaxed` atomic load (~1 ns).
 ///
-/// Accuracy: ±100 µs (sufficient for order timestamps).
+/// The refresh target is 100 µs; scheduling delays can make cached values older.
 /// Latency:  ~1-2 ns (atomic load, no syscall).
 pub struct CoarseClock {
     nanos: Arc<AtomicU64>,
@@ -80,26 +80,26 @@ mod tests {
     }
 
     #[test]
-    fn coarse_clock_updates() {
+    fn coarse_clock_updates_from_wall_time() {
+        let before = CoarseClock::wall_clock_ns();
         let clock = CoarseClock::new();
-        let t1 = clock.now_ns();
-        // Wait longer than the update interval (100µs)
-        thread::sleep(Duration::from_millis(2));
-        let t2 = clock.now_ns();
-        assert!(t2 > t1, "clock should advance: t1={t1}, t2={t2}");
-    }
-
-    #[test]
-    fn coarse_clock_accuracy() {
-        let clock = CoarseClock::new();
-        thread::sleep(Duration::from_millis(1)); // let updater run once
-        let coarse = clock.now_ns();
-        let system = CoarseClock::wall_clock_ns();
-        let diff = coarse.abs_diff(system);
-        // Should be within 1ms (generous, actual is ±100µs)
+        let initial = clock.now_ns();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let updated = loop {
+            let current = clock.now_ns();
+            if current > initial {
+                break current;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background clock did not update"
+            );
+            thread::sleep(Duration::from_micros(100));
+        };
+        let after = CoarseClock::wall_clock_ns();
         assert!(
-            diff < 1_000_000,
-            "coarse clock too far from system: diff={diff} ns"
+            updated >= before && updated <= after,
+            "clock must report sampled wall time"
         );
     }
 }

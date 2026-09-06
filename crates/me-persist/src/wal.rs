@@ -18,8 +18,28 @@ pub struct WalEntry {
 
 /// Commands that can be written to the WAL.
 /// Mirrors me_engine::command::Command but is self-contained for persistence.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum WalCommand {
+    Decision {
+        command: Box<WalCommand>,
+        session_id: me_core::SessionId,
+        request_id: Option<u64>,
+        item_index: u32,
+        events: Vec<me_core::events::MatchEvent>,
+        expirations: Vec<me_core::events::MatchEvent>,
+        expiration_owners: Vec<(OrderId, me_core::SessionId)>,
+        owners: Vec<(OrderId, me_core::SessionId)>,
+        processing_timestamp: u64,
+        apply: bool,
+    },
+    TradingState {
+        symbol: SymbolId,
+        halted: bool,
+    },
+    SymbolConfig {
+        symbol: SymbolId,
+        fingerprint: String,
+    },
     PlaceOrder(Order),
     CancelOrder {
         order_id: OrderId,
@@ -40,6 +60,10 @@ impl WalCommand {
     /// correct engine during recovery.
     pub fn symbol(&self) -> SymbolId {
         match self {
+            WalCommand::Decision { command, .. } => command.symbol(),
+            WalCommand::TradingState { symbol, .. } | WalCommand::SymbolConfig { symbol, .. } => {
+                *symbol
+            }
             WalCommand::PlaceOrder(order) => order.symbol,
             WalCommand::CancelOrder { symbol, .. } => *symbol,
             WalCommand::AmendOrder { symbol, .. } => *symbol,
@@ -59,20 +83,46 @@ pub struct WalWriter {
     path: PathBuf,
     sync_interval: u64,
     writes_since_sync: u64,
+    failed: bool,
 }
 
 impl WalWriter {
     /// Open or create a WAL file.
     pub fn open(path: impl AsRef<Path>, sync_interval: u64) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&path)?;
+        file.try_lock().map_err(io::Error::other)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        file.sync_all()?;
+        File::open(
+            path.parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(Path::new(".")),
+        )?
+        .sync_all()?;
 
+        let sequence = WalReader::open(&path)?
+            .read_all()?
+            .last()
+            .map_or(0, |entry| entry.sequence);
         Ok(Self {
             writer: BufWriter::new(file),
-            sequence: 0,
+            sequence,
             path,
             sync_interval,
             writes_since_sync: 0,
+            failed: false,
         })
     }
 
@@ -81,49 +131,52 @@ impl WalWriter {
         self.sequence = seq;
     }
 
-    /// Append a command to the WAL.
+    fn ensure_healthy(&self) -> io::Result<()> {
+        if self.failed {
+            return Err(io::Error::other(
+                "WAL writer failed; reopen and recover before writing",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Append, synchronizing at the configured interval.
     pub fn append(&mut self, command: &WalCommand) -> io::Result<u64> {
-        self.sequence += 1;
-        let seq = self.sequence;
-
-        let cmd_bytes = codec::encode_wal_command(command);
-        let crc = crc32fast::hash(&cmd_bytes);
-        let len = cmd_bytes.len() as u32;
-
-        self.writer.write_all(&len.to_le_bytes())?;
-        self.writer.write_all(&crc.to_le_bytes())?;
-        self.writer.write_all(&seq.to_le_bytes())?;
-        self.writer.write_all(&cmd_bytes)?;
-
-        self.writes_since_sync += 1;
-        // sync_interval == 0 means "fsync every write" (maximum durability).
+        let seq = self.append_nosync(command)?;
         if self.sync_interval == 0 || self.writes_since_sync >= self.sync_interval {
             self.sync()?;
         }
-
         Ok(seq)
     }
 
-    /// Append a command WITHOUT fsyncing. The record is written into the OS
-    /// page cache only; the caller is responsible for calling [`sync`] to make
-    /// it durable. Used by the shard's group-commit path, which batches many
-    /// records and fsyncs once per batch.
-    ///
-    /// [`sync`]: WalWriter::sync
+    /// Buffer a record. Call `sync` before acknowledging its outcome.
     pub fn append_nosync(&mut self, command: &WalCommand) -> io::Result<u64> {
-        self.sequence += 1;
-        let seq = self.sequence;
-
+        self.ensure_healthy()?;
+        let seq = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("WAL sequence exhausted"))?;
         let cmd_bytes = codec::encode_wal_command(command);
-        let crc = crc32fast::hash(&cmd_bytes);
-        let len = cmd_bytes.len() as u32;
-
-        self.writer.write_all(&len.to_le_bytes())?;
-        self.writer.write_all(&crc.to_le_bytes())?;
-        self.writer.write_all(&seq.to_le_bytes())?;
-        self.writer.write_all(&cmd_bytes)?;
-        self.writes_since_sync += 1;
-
+        if cmd_bytes.len() > MAX_WAL_RECORD_LEN {
+            return Err(io::Error::other("WAL record too large"));
+        }
+        let mut checksum = crc32fast::Hasher::new();
+        checksum.update(&seq.to_le_bytes());
+        checksum.update(&cmd_bytes);
+        let crc = checksum.finalize();
+        let len = (cmd_bytes.len() as u32) | 0x8000_0000;
+        let result = (|| {
+            self.writer.write_all(&len.to_le_bytes())?;
+            self.writer.write_all(&crc.to_le_bytes())?;
+            self.writer.write_all(&seq.to_le_bytes())?;
+            self.writer.write_all(&cmd_bytes)
+        })();
+        if result.is_err() {
+            self.failed = true;
+        }
+        result?;
+        self.sequence = seq;
+        self.writes_since_sync = self.writes_since_sync.saturating_add(1);
         Ok(seq)
     }
 
@@ -134,8 +187,15 @@ impl WalWriter {
     /// `sync_data` forces the data (not necessarily metadata) to disk, which
     /// is what the Pre-mode durability contract actually requires.
     pub fn sync(&mut self) -> io::Result<()> {
-        self.writer.flush()?;
-        self.writer.get_ref().sync_data()?;
+        self.ensure_healthy()?;
+        let result = self
+            .writer
+            .flush()
+            .and_then(|_| self.writer.get_ref().sync_data());
+        if result.is_err() {
+            self.failed = true;
+        }
+        result?;
         self.writes_since_sync = 0;
         Ok(())
     }
@@ -145,16 +205,20 @@ impl WalWriter {
         self.sync()
     }
 
-    /// Truncate the WAL file to empty after a successful snapshot of all
-    /// symbols on this shard. The append sequence counter keeps advancing, so
-    /// records written after truncation still carry sequences strictly greater
-    /// than the snapshot watermark — recovery filters on that, so truncation is
-    /// purely an optimization to bound file growth and replay time.
+    /// Low-level truncation for callers with their own complete recovery protocol.
+    /// Keeps the writer sequence counter. The server never calls this: truncating
+    /// its authoritative decision journal invalidates recovery and request history.
     pub fn rotate_truncate(&mut self) -> io::Result<()> {
-        self.writer.flush()?;
-        let file = self.writer.get_ref();
-        file.set_len(0)?;
-        file.sync_all()?;
+        self.ensure_healthy()?;
+        let result = (|| {
+            self.writer.flush()?;
+            self.writer.get_ref().set_len(0)?;
+            self.writer.get_ref().sync_all()
+        })();
+        if result.is_err() {
+            self.failed = true;
+        }
+        result?;
         self.writes_since_sync = 0;
         Ok(())
     }
@@ -214,12 +278,13 @@ impl WalReader {
     pub fn next_entry(&mut self) -> io::Result<Option<WalEntry>> {
         // Read len
         let mut len_buf = [0u8; 4];
-        match self.reader.read_exact(&mut len_buf) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e),
+        if self.reader.read(&mut len_buf[..1])? == 0 {
+            return Ok(None);
         }
-        let len = u32::from_le_bytes(len_buf) as usize;
+        self.reader.read_exact(&mut len_buf[1..])?;
+        let raw_len = u32::from_le_bytes(len_buf);
+        let protected_sequence = raw_len & 0x8000_0000 != 0;
+        let len = (raw_len & 0x7fff_ffff) as usize;
 
         // Reject implausible lengths BEFORE allocating.
         if len > MAX_WAL_RECORD_LEN {
@@ -244,7 +309,12 @@ impl WalReader {
         self.reader.read_exact(&mut cmd_bytes)?;
 
         // Verify CRC
-        let computed_crc = crc32fast::hash(&cmd_bytes);
+        let mut checksum = crc32fast::Hasher::new();
+        if protected_sequence {
+            checksum.update(&seq_buf);
+        }
+        checksum.update(&cmd_bytes);
+        let computed_crc = checksum.finalize();
         if computed_crc != stored_crc {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -454,6 +524,88 @@ mod tests {
         assert_eq!(result.valid_bytes, good_size);
 
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sequence_corruption_is_detected() {
+        let path = temp_wal_path("sequence_corruption.wal");
+        let _ = fs::remove_file(&path);
+        write_two_records(&path);
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[8] ^= 1;
+        fs::write(&path, bytes).unwrap();
+        assert!(WalReader::open(&path).unwrap().read_all().is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn partial_length_header_is_not_clean_eof() {
+        for length in 1..=3 {
+            let path = temp_wal_path(&format!("partial_header_{length}.wal"));
+            fs::write(&path, vec![0u8; length]).unwrap();
+            assert!(WalReader::open(&path).unwrap().read_all().is_err());
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn bare_relative_wal_path_is_supported() {
+        let path = PathBuf::from(format!(
+            "me-relative-{}-{}.wal",
+            std::process::id(),
+            me_core::SessionId::random().log_prefix()
+        ));
+        let result = WalWriter::open(&path, 1);
+        let _ = fs::remove_file(&path);
+        assert!(
+            result.is_ok(),
+            "relative WAL path failed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn oversized_record_does_not_advance_sequence() {
+        let path = temp_wal_path("oversized_sequence.wal");
+        let _ = fs::remove_file(&path);
+        let mut writer = WalWriter::open(&path, 1).unwrap();
+        let oversized = WalCommand::SymbolConfig {
+            symbol: SymbolId(0),
+            fingerprint: "x".repeat(MAX_WAL_RECORD_LEN),
+        };
+        assert!(writer.append_nosync(&oversized).is_err());
+        assert_eq!(writer.sequence(), 0);
+        assert_eq!(
+            writer
+                .append(&WalCommand::TradingState {
+                    symbol: SymbolId(0),
+                    halted: true
+                })
+                .unwrap(),
+            1
+        );
+        drop(writer);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn failed_sync_poison_prevents_further_writes() {
+        let path = temp_wal_path("failed_sync_poison.wal");
+        let _ = fs::remove_file(&path);
+        let mut writer = WalWriter::open(&path, 100).unwrap();
+        writer.writer = BufWriter::new(File::open(&path).unwrap());
+        let command = WalCommand::TradingState {
+            symbol: SymbolId(0),
+            halted: true,
+        };
+        writer.append_nosync(&command).unwrap();
+        assert!(writer.sync().is_err());
+        assert!(
+            writer.append_nosync(&command).is_err(),
+            "writer accepted new bytes after failed fsync"
+        );
+        drop(writer);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

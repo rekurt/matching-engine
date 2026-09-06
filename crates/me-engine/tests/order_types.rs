@@ -1567,8 +1567,7 @@ fn test_post_only_iceberg_refill_does_not_take() {
         "post-only iceberg must rest on an empty book: {placed:?}"
     );
 
-    // A sell @ 100 qty 3 fills the visible slice (1) and rests the remaining 2
-    // as an ask @ 100. The next refill slice @ 100 would now cross it.
+    // The active sell consumes three passive slices in FIFO order.
     let events = e.process(limit_sell(2, 100.0, 3.0)).to_vec();
 
     // The post-only iceberg must NOT take the resting ask on replenishment.
@@ -1578,12 +1577,16 @@ fn test_post_only_iceberg_refill_does_not_take() {
             .any(|ev| matches!(ev, MatchEvent::Trade(t) if t.taker_order_id == 1)),
         "post-only iceberg refill must not execute as a taker: {events:?}"
     );
-    // It cannot post (would cross) and cannot take (post-only) → its residual is
-    // cancelled rather than left in limbo.
-    assert!(
-        events
-            .iter()
-            .any(|ev| matches!(ev, MatchEvent::OrderCancelled { order_id: 1, .. })),
-        "post-only iceberg that cannot post its refill must be cancelled: {events:?}"
+    let maker_fills: u64 = events
+        .iter()
+        .filter_map(|event| match event {
+            MatchEvent::Trade(trade) if trade.maker_order_id == 1 => Some(trade.qty.raw()),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(maker_fills, FixedQty::from_f64(3.0).raw());
+    assert_eq!(
+        e.book().get_order(1).unwrap().open_qty(),
+        FixedQty::from_f64(1.0)
     );
 }

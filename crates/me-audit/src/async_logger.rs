@@ -17,7 +17,7 @@ use crate::types::AuditEntry;
 pub enum AuditFormat {
     /// JSON via serde_json — human-readable, ~1.2 µs per event.
     Json,
-    /// Binary via bincode — compact, ~50 ns per event.
+    /// Portable little-endian binary encoding.
     Binary,
 }
 
@@ -235,14 +235,7 @@ fn emit_entry(entry: &AuditEntry, format: AuditFormat) {
             }
         }
         AuditFormat::Binary => {
-            // Emit raw binary representation: just the fixed-size AuditEntry bytes.
-            // Consumer applications decode using the same struct layout.
-            let bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(
-                    entry as *const AuditEntry as *const u8,
-                    std::mem::size_of::<AuditEntry>(),
-                )
-            };
+            let bytes = entry.to_bytes();
             info!(
                 target: "audit_binary",
                 bytes = ?bytes,
@@ -329,5 +322,45 @@ mod tests {
         });
         // Drop triggers clean shutdown — should not hang
         drop(logger);
+    }
+}
+
+#[cfg(test)]
+mod binary_output_tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn binary_logger_emits_portable_encoding_without_struct_padding() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = Arc::clone(&output);
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .json()
+            .with_writer(move || Capture(Arc::clone(&writer)))
+            .finish();
+        let entry = AuditEntry {
+            order_id: 42,
+            ..Default::default()
+        };
+        tracing::subscriber::with_default(subscriber, || emit_entry(&entry, AuditFormat::Binary));
+        let output = output.lock().unwrap();
+        let event: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let bytes: Vec<u8> =
+            serde_json::from_str(event["fields"]["bytes"].as_str().unwrap()).unwrap();
+        assert_eq!(bytes.len(), 71);
+        assert_eq!(&bytes[9..17], &42u64.to_le_bytes());
     }
 }

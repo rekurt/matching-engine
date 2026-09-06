@@ -4,7 +4,7 @@
 #   Computes a "recipe" (dependency manifest) so the next stage can cache deps
 #   independently from source code changes.
 # ─────────────────────────────────────────────────────────────────────────────
-FROM rust:1.88-slim-bookworm AS chef
+FROM rust:1.96-slim-bookworm AS chef
 RUN cargo install cargo-chef --locked
 WORKDIR /build
 
@@ -18,7 +18,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS cacher
 COPY --from=planner /build/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json -p me-server
+RUN cargo chef cook --release --recipe-path recipe.json -p me-server --features tls
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 3 — full build
@@ -28,7 +28,7 @@ COPY . .
 
 # Reuse pre-built deps from cacher stage
 COPY --from=cacher /build/target target
-RUN cargo build --release -p me-server
+RUN cargo build --release --locked -p me-server --features tls
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 4 — minimal runtime image
@@ -39,6 +39,7 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        curl \
         libssl3 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 meuser \
@@ -56,13 +57,16 @@ LABEL org.opencontainers.image.title="matching-engine" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.licenses="MIT"
 
+RUN mkdir -p /data && chown meuser:meuser /data
+WORKDIR /data
+VOLUME ["/data"]
 USER meuser
 
 # TCP order gateway | HTTP metrics+admin
 EXPOSE 9090 8080
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+    CMD curl -f http://127.0.0.1:8080/ready || exit 1
 
 ENTRYPOINT ["/usr/local/bin/me-server"]
-CMD ["--tcp-addr", "0.0.0.0:9090", "--metrics-addr", "0.0.0.0:8080"]
+CMD ["--metrics-addr", "127.0.0.1:8080"]

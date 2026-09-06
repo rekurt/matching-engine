@@ -30,6 +30,8 @@ pub struct UdsServer {
     heartbeat_timeout_ms: u64,
     clock: Arc<dyn Clock>,
     max_connections: usize,
+    drain_timeout: Duration,
+    readiness: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl UdsServer {
@@ -71,10 +73,22 @@ impl UdsServer {
             heartbeat_timeout_ms,
             clock,
             max_connections: crate::tcp_server::DEFAULT_MAX_CONNECTIONS,
+            drain_timeout: Duration::from_secs(30),
+            readiness: None,
         }
     }
 
     /// Override the maximum number of concurrent connections.
+    pub fn with_readiness(mut self, readiness: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.readiness = Some(readiness);
+        self
+    }
+
+    pub fn with_drain_timeout(mut self, timeout: Duration) -> Self {
+        self.drain_timeout = timeout;
+        self
+    }
+
     pub fn with_max_connections(mut self, max: usize) -> Self {
         self.max_connections = max.max(1);
         self
@@ -86,15 +100,40 @@ impl UdsServer {
         path: &str,
         mut shutdown_rx: watch::Receiver<bool>,
     ) -> std::io::Result<()> {
-        // Pre-bind cleanup: remove any stale socket. NotFound is normal
-        // (first start); other errors are logged at debug for traceability
-        // — if bind() then fails, the root cause is visible.
-        if let Err(e) = std::fs::remove_file(path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::debug!(path, error = %e, "UDS pre-bind remove_file failed");
+        if *shutdown_rx.borrow() {
+            return Ok(());
+        }
+        if let Ok(metadata) = std::fs::symlink_metadata(path) {
+            use std::os::unix::fs::FileTypeExt;
+            if !metadata.file_type().is_socket() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "UDS path is not a socket",
+                ));
+            }
+            match UnixStream::connect(path).await {
+                Ok(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AddrInUse,
+                        "UDS listener already active",
+                    ))
+                }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                    ) =>
+                {
+                    std::fs::remove_file(path)?;
+                }
+                Err(e) => return Err(e),
             }
         }
         let listener = UnixListener::bind(path)?;
+        let _readiness_guard = ReadinessGuard(self.readiness.clone());
+        if let Some(flag) = &self.readiness {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
         info!(path = path, "UDS server listening");
 
         // Advertise all v2 capabilities — mirrors tcp_server::build_capabilities.
@@ -108,12 +147,13 @@ impl UdsServer {
 
         let conn_limiter = Arc::new(tokio::sync::Semaphore::new(self.max_connections));
 
+        let mut connections = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 biased;
 
-                _ = shutdown_rx.changed() => {
-                    if *shutdown_rx.borrow() {
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
                         info!("UDS server shutting down");
                         if let Err(e) = std::fs::remove_file(path) {
                             tracing::debug!(path, error = %e, "UDS shutdown remove_file failed");
@@ -121,6 +161,8 @@ impl UdsServer {
                         break;
                     }
                 }
+
+                Some(_) = connections.join_next(), if !connections.is_empty() => {}
 
                 result = listener.accept() => {
                     let (stream, _) = result?;
@@ -141,7 +183,7 @@ impl UdsServer {
                     let clock = Arc::clone(&self.clock);
 
                     let span = info_span!("uds_conn");
-                    tokio::spawn(async move {
+                    connections.spawn(async move {
                         let _permit = permit;
                         if let Err(e) = handle_uds_connection(stream, router, conn_shutdown, metrics, session_store, hb_interval, hb_timeout, caps, clock).await {
                             warn!(error = %e, "connection error");
@@ -151,6 +193,17 @@ impl UdsServer {
             }
         }
 
+        drop(_readiness_guard);
+        if tokio::time::timeout(self.drain_timeout, async {
+            while connections.join_next().await.is_some() {}
+        })
+        .await
+        .is_err()
+        {
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
+        }
+        self.session_store.checkpoint()?;
         Ok(())
     }
 }
@@ -208,14 +261,17 @@ async fn handle_uds_connection_inner(
     let mut read_buf = BytesMut::with_capacity(4096);
     let mut write_buf = BytesMut::with_capacity(4096);
     let mut conn = ConnectionCodecState::new();
+    let mut _session_lease = None;
     let timeout = Duration::from_millis(heartbeat_timeout_ms);
+    let mut read_deadline = tokio::time::Instant::now() + timeout;
+    let mut outbound_tick = tokio::time::interval(Duration::from_millis(10));
 
     loop {
         tokio::select! {
             biased;
 
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
                     // Emit a final ServerShuttingDown error frame and exit.
                     // No need to transition conn.state — the connection is
                     // terminating, state is never read again.
@@ -226,14 +282,20 @@ async fn handle_uds_connection_inner(
                         "Server shutting down",
                         &mut write_buf,
                     );
-                    if let Err(e) = stream.write_all(&write_buf).await {
+                    if let Err(e) = write_bounded(stream, &write_buf, timeout, metrics.as_deref()).await {
                         tracing::debug!(error = %e, "failed to send final error frame (client likely disconnected)");
                     }
                     return Ok(());
                 }
             }
 
-            read_result = tokio::time::timeout(timeout, stream.read_buf(&mut read_buf)) => {
+            _ = outbound_tick.tick(), if conn.state == ConnectionState::Active => {
+                let next = session_store.pending(&conn.session_id, conn.server_frame_seq.peek(), &mut write_buf)?;
+                write_bounded(stream, &write_buf, timeout, metrics.as_deref()).await?;
+                conn.server_frame_seq.reset_to(next);
+            }
+
+            read_result = tokio::time::timeout_at(read_deadline, stream.read_buf(&mut read_buf)) => {
                 match read_result {
                     Err(_elapsed) => {
                         write_buf.clear();
@@ -246,7 +308,7 @@ async fn handle_uds_connection_inner(
                         if let Some(ref m) = metrics {
                             m.record_protocol_error("heartbeat_timeout");
                         }
-                        if let Err(e) = stream.write_all(&write_buf).await {
+                        if let Err(e) = write_bounded(stream, &write_buf, timeout, metrics.as_deref()).await {
                             tracing::debug!(error = %e, "failed to send HeartbeatTimeout frame");
                         }
                         return Err(std::io::Error::new(
@@ -257,6 +319,7 @@ async fn handle_uds_connection_inner(
                     Ok(Err(e)) => return Err(e),
                     Ok(Ok(0)) => return Ok(()),
                     Ok(Ok(n)) => {
+                        read_deadline = tokio::time::Instant::now() + timeout;
                         if let Some(ref m) = metrics {
                             m.record_bytes_in("uds", n);
                         }
@@ -264,6 +327,56 @@ async fn handle_uds_connection_inner(
                         loop {
                             match codec::decode_frame(&read_buf, &mut conn, clock) {
                                 Ok((frame, consumed)) => {
+                                    if conn.state == ConnectionState::Active && matches!(frame, DecodedFrame::Handshake { .. } | DecodedFrame::ResumeSession { .. }) {
+                                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "connection already has an active session"));
+                                    }
+                                    let symbols = match &frame {
+                                        DecodedFrame::Command(command, ..) => vec![command.symbol().0],
+                                        DecodedFrame::Batch(commands, ..) => commands.iter().map(|command| command.symbol().0).collect(),
+                                        DecodedFrame::GetOpenOrders { .. } => (0..64).collect(),
+                                        _ => Vec::new(),
+                                    };
+                                    let execution_guard = session_store.execution_guards(symbols).await;
+                                    session_store.ensure_healthy()?;
+                                    let request = match &frame {
+                                        DecodedFrame::Command(_, _, request) | DecodedFrame::Batch(_, _, request) => Some(*request),
+                                        DecodedFrame::QueryOrder { request_id, .. } | DecodedFrame::GetOpenOrders { request_id, .. } => Some(*request_id),
+                                        _ => None,
+                                    };
+                                    if let Some(request) = request {
+                                        if session_store.dedup_lookup(&conn.session_id, request).is_none() {
+                                            let commands: Vec<_> = match &frame {
+                                                DecodedFrame::Command(command, ..) => vec![command],
+                                                DecodedFrame::Batch(commands, ..) => commands.iter().collect(),
+                                                _ => Vec::new(),
+                                            };
+                                            let mut cancel_ids = std::collections::HashSet::new();
+                                            let valid = commands.iter().all(|command| match command {
+                                                me_engine::command::Command::CancelOrder { order_id, symbol, .. } =>
+                                                    cancel_ids.insert((*symbol, *order_id)) && router.query_order_for_session(*order_id, *symbol, conn.session_id).iter().any(|event| matches!(event, me_core::MatchEvent::OrderStatus { .. })),
+                                                _ => true,
+                                            });
+                                            if !valid {
+                                                read_buf.advance(consumed);
+                                                write_buf.clear();
+                                                codec::encode_error(0, ErrorCode::InvalidPayload, "cancel requires an active order owned by this session", &mut write_buf);
+                                                drop(execution_guard);
+                                                write_bounded(stream, &write_buf, timeout, metrics.as_deref()).await?;
+                                                continue;
+                                            }
+                                        }
+                                        let mut payload = vec![read_buf[5]];
+                                        payload.extend_from_slice(&read_buf[crate::protocol::FRAME_HEADER_SIZE..consumed]);
+                                        if let Err(error) = session_store.admit_request(conn.session_id, request, payload) {
+                                            session_store.ensure_healthy()?;
+                                            read_buf.advance(consumed);
+                                            write_buf.clear();
+                                            codec::encode_error(0, ErrorCode::InvalidPayload, &error.to_string(), &mut write_buf);
+                                            drop(execution_guard);
+                                            write_bounded(stream, &write_buf, timeout, metrics.as_deref()).await?;
+                                            continue;
+                                        }
+                                    }
                                     read_buf.advance(consumed);
 
                                     if let Some(ref m) = metrics {
@@ -279,21 +392,19 @@ async fn handle_uds_connection_inner(
                                             debug!(version = client_version, "handshake received");
                                             if client_version != PROTOCOL_VERSION {
                                                 codec::encode_error(
-                                                    seq,
+                                                    0,
                                                     ErrorCode::UnsupportedVersion,
                                                     &format!(
                                                         "Server requires protocol v{PROTOCOL_VERSION}, client sent v{client_version}"
                                                     ),
                                                     &mut write_buf,
                                                 );
-                                                stream.write_all(&write_buf).await?;
-                                                if let Some(ref m) = metrics {
-                                                    m.record_bytes_out("uds", write_buf.len());
-                                                    m.record_frame_out("uds", 1);
-                                                }
+                                                write_bounded(stream, &write_buf, timeout, metrics.as_deref()).await?;
                                                 return Ok(());
                                             }
-                                            let session_id = session_store.create();
+                                            let session_id = session_store.try_create()?;
+                                            _session_lease = Some(session_store.claim(session_id)?);
+                                            session_store.checkpoint()?;
                                             conn.state = ConnectionState::Active;
                                             conn.session_id = session_id;
                                             codec::encode_handshake_ack(
@@ -306,7 +417,9 @@ async fn handle_uds_connection_inner(
                                         }
                                         DecodedFrame::ResumeSession { session_id, last_recv_seq, seq } => {
                                             use crate::session_store::ReplayResult;
-                                            match session_store.resume(&session_id, last_recv_seq) {
+                                            _session_lease = Some(session_store.claim(session_id)?);
+                                            let (replay, replay_next) = session_store.delivery_snapshot(&session_id, last_recv_seq)?;
+                                            match replay {
                                                 ReplayResult::Ok(replay_frames) => {
                                                     let count = replay_frames.len() as u32;
                                                     conn.state = ConnectionState::Active;
@@ -314,16 +427,25 @@ async fn handle_uds_connection_inner(
                                                     // CRITICAL: re-sync outbound seq counter with the
                                                     // session's replay buffer state.
                                                     conn.server_frame_seq
-                                                        .reset_to(session_store.next_outbound_seq(&session_id));
-                                                    codec::encode_session_resumed(count, seq, &mut write_buf);
-                                                    codec::encode_replay_frames(&replay_frames, &mut write_buf);
+                                                        .reset_to(replay_next);
+                                                    codec::encode_session_resumed(count, 0, &mut write_buf);
+                                                    session_store.checkpoint()?;
+                                                    drop(execution_guard);
+                                                    tokio::time::timeout(timeout, async {
+                                                        write_bounded(stream, &write_buf, timeout, metrics.as_deref()).await?;
+                                                        for replay_frame in replay_frames {
+                                                            write_chunks(stream, &replay_frame, timeout, metrics.as_deref()).await?;
+                                                        }
+                                                        Ok::<_, std::io::Error>(())
+                                                    }).await.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "replay timeout"))??;
                                                     debug!(replayed = count, next_seq = conn.server_frame_seq.peek(), "session resumed");
+                                                    continue;
                                                 }
                                                 ReplayResult::Gap { missing_from, missing_to } => {
                                                     conn.state = ConnectionState::Active;
                                                     conn.session_id = session_id;
                                                     conn.server_frame_seq
-                                                        .reset_to(session_store.next_outbound_seq(&session_id));
+                                                        .reset_to(replay_next);
                                                     codec::encode_replay_gap(
                                                         seq,
                                                         missing_from,
@@ -338,19 +460,10 @@ async fn handle_uds_connection_inner(
                                                     );
                                                 }
                                                 ReplayResult::SessionNotFound => {
-                                                    let new_id = session_store.create();
-                                                    conn.state = ConnectionState::Active;
-                                                    conn.session_id = new_id;
-                                                    conn.server_frame_seq
-                                                        .reset_to(session_store.next_outbound_seq(&new_id));
-                                                    codec::encode_handshake_ack(
-                                                        seq,
-                                                        new_id,
-                                                        capabilities,
-                                                        heartbeat_interval_ms,
-                                                        &mut write_buf,
-                                                    );
-                                                    debug!("session not found, issuing new handshake ack");
+                                                    codec::encode_error(0, ErrorCode::InvalidPayload,
+                                                        "Unknown session; explicitly open a new session", &mut write_buf);
+                                                    write_bounded(stream, &write_buf, timeout, metrics.as_deref()).await?;
+                                                    return Ok(());
                                                 }
                                             }
                                         }
@@ -360,7 +473,7 @@ async fn handle_uds_connection_inner(
                                             }
                                             codec::encode_pong(seq, conn.last_client_seq, &mut write_buf);
                                         }
-                                        DecodedFrame::Command(mut cmd, seq, request_id) => {
+                                        DecodedFrame::Command(mut cmd, _seq, request_id) => {
                                             if let Some(cached) = session_store.dedup_lookup(&conn.session_id, request_id) {
                                                 write_buf.extend_from_slice(&cached);
                                                 dedup_cache_hit = true;
@@ -368,24 +481,26 @@ async fn handle_uds_connection_inner(
                                                 if let me_engine::command::Command::PlaceOrder(ref mut ord) = cmd {
                                                     ord.client_session_id = conn.session_id;
                                                 }
-                                                let events = router.process(cmd);
-                                                codec::encode_events(&events, seq, request_id, &mut write_buf);
-                                                new_dedup_request_id = Some(request_id);
+                                                // Enforce order ownership on cancel/amend.
+                                                let _events = router.process_with_request(cmd, conn.session_id, request_id);
+                                                let record = router.request_record(conn.session_id, request_id)
+                                                    .map_err(std::io::Error::other)?
+                                                    .ok_or_else(|| std::io::Error::other("durable request outcome missing"))?;
+                                                session_store.commit_request(record)?;
+                                                let next = session_store.pending(&conn.session_id, conn.server_frame_seq.peek(), &mut write_buf)?;
+                                                conn.server_frame_seq.reset_to(next);
+                                                dedup_cache_hit = true;
                                             }
                                         }
-                                        DecodedFrame::Batch(cmds, seq, request_id) => {
+                                        DecodedFrame::Batch(cmds, _seq, request_id) => {
                                             if let Some(cached) = session_store.dedup_lookup(&conn.session_id, request_id) {
                                                 write_buf.extend_from_slice(&cached);
                                                 dedup_cache_hit = true;
                                             } else {
-                                                for mut cmd in cmds {
-                                                    if let me_engine::command::Command::PlaceOrder(ref mut ord) = cmd {
-                                                        ord.client_session_id = conn.session_id;
-                                                    }
-                                                    let events = router.process(cmd);
-                                                    codec::encode_events(&events, seq, request_id, &mut write_buf);
-                                                }
-                                                new_dedup_request_id = Some(request_id);
+                                                session_store.process_batch(&router, conn.session_id, request_id, cmds)?;
+                                                let next = session_store.pending(&conn.session_id, conn.server_frame_seq.peek(), &mut write_buf)?;
+                                                conn.server_frame_seq.reset_to(next);
+                                                dedup_cache_hit = true;
                                             }
                                         }
                                         DecodedFrame::QueryOrder { order_id, symbol_id, seq, request_id } => {
@@ -394,7 +509,7 @@ async fn handle_uds_connection_inner(
                                                 dedup_cache_hit = true;
                                             } else {
                                                 let symbol = me_core::types::SymbolId(symbol_id);
-                                                let events = router.query_order(order_id, symbol);
+                                                let events = router.query_order_for_session(order_id, symbol, conn.session_id);
                                                 codec::encode_events(&events, seq, request_id, &mut write_buf);
                                                 new_dedup_request_id = Some(request_id);
                                             }
@@ -402,11 +517,12 @@ async fn handle_uds_connection_inner(
                                         DecodedFrame::Acknowledge { last_processed_server_seq, seq: _ } => {
                                             session_store.apply_ack(&conn.session_id, last_processed_server_seq);
                                         }
-                                        DecodedFrame::GetOpenOrders { seq, request_id } => {
+                                        DecodedFrame::GetOpenOrders { seq: _, request_id } => {
                                             // Dedup: retry MUST return cached snapshot, not re-fan-out.
                                             if let Some(cached) = session_store.dedup_lookup(&conn.session_id, request_id) {
-                                                write_buf.extend_from_slice(&cached);
-                                                dedup_cache_hit = true;
+                                                drop(execution_guard);
+                                                write_chunks(stream, &cached, timeout, metrics.as_deref()).await?;
+                                                continue;
                                             } else {
                                                 // `get_open_orders_by_session` blocks on sync recv
                                                 // from each shard — wrap in spawn_blocking so the
@@ -437,32 +553,22 @@ async fn handle_uds_connection_inner(
                                                 };
 
                                                 if let Some(orders) = orders {
-                                                    let snapshot_seq = conn.server_frame_seq.peek();
-                                                    codec::encode_open_orders_begin(
-                                                        seq,
-                                                        request_id,
-                                                        orders.len() as u32,
-                                                        snapshot_seq,
-                                                        &mut write_buf,
-                                                    );
-                                                    for ord in &orders {
-                                                        codec::encode_open_order(
-                                                            seq,
-                                                            request_id,
-                                                            ord,
-                                                            &mut write_buf,
-                                                        );
+                                                    let next = session_store.pending(&conn.session_id, conn.server_frame_seq.peek(), &mut write_buf)?;
+                                                    conn.server_frame_seq.reset_to(next);
+                                                    let cached = session_store.cache_open_orders(&conn.session_id, request_id, &orders)?;
+                                                    if let Some(next) = crate::session_store::next_sequence_in_block(&cached) {
+                                                        conn.server_frame_seq.reset_to(next);
                                                     }
-                                                    codec::encode_open_orders_end(
-                                                        seq,
-                                                        request_id,
-                                                        snapshot_seq,
-                                                        &mut write_buf,
-                                                    );
-                                                    new_dedup_request_id = Some(request_id);
+                                                    drop(execution_guard);
+                                                    tokio::time::timeout(timeout, async {
+                                                        write_chunks(stream, &write_buf, timeout, metrics.as_deref()).await?;
+                                                        write_chunks(stream, &cached, timeout, metrics.as_deref()).await?;
+                                                        Ok::<_, std::io::Error>(())
+                                                    }).await.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "snapshot timeout"))??;
+                                                    continue;
                                                 } else {
                                                     codec::encode_error(
-                                                        seq,
+                                                        0,
                                                         ErrorCode::InternalError,
                                                         "GetOpenOrders failed: incomplete snapshot",
                                                         &mut write_buf,
@@ -484,7 +590,7 @@ async fn handle_uds_connection_inner(
                                             conn.server_frame_seq.peek(),
                                             &mut write_buf,
                                         );
-                                        conn.server_frame_seq.advance_by(frames_pushed);
+                                        let _ = frames_pushed;
 
                                         if let Some(req_id) = new_dedup_request_id {
                                             let frame_bytes = Bytes::copy_from_slice(&write_buf);
@@ -507,7 +613,7 @@ async fn handle_uds_connection_inner(
                                                     conn.server_frame_seq.peek(),
                                                     &mut warn_buf,
                                                 );
-                                            conn.server_frame_seq.advance_by(warn_pushed);
+                                            let _ = warn_pushed;
                                             write_buf.extend_from_slice(&warn_buf);
                                             if is_hard {
                                                 warn!(buffer_pct = pct, "slow consumer: hard limit");
@@ -527,7 +633,7 @@ async fn handle_uds_connection_inner(
                                             "Write buffer overflow",
                                             &mut err_buf,
                                         );
-                                        if let Err(e) = stream.write_all(&err_buf).await {
+                                        if let Err(e) = write_bounded(stream, &err_buf, timeout, metrics.as_deref()).await {
                                             tracing::debug!(error = %e, "failed to send Backpressure frame");
                                         }
                                         return Err(std::io::Error::new(
@@ -535,12 +641,13 @@ async fn handle_uds_connection_inner(
                                             "Write buffer backpressure limit exceeded",
                                         ));
                                     }
-
-                                    if let Some(ref m) = metrics {
-                                        m.record_bytes_out("uds", write_buf.len());
-                                        m.record_frame_out("uds", 1);
+                                    session_store.checkpoint()?;
+                                    if !dedup_cache_hit && conn.state == ConnectionState::Active {
+                                        let next = session_store.pending(&conn.session_id, conn.server_frame_seq.peek(), &mut write_buf)?;
+                                        conn.server_frame_seq.reset_to(next);
                                     }
-                                    stream.write_all(&write_buf).await?;
+                                    drop(execution_guard);
+                                    write_bounded(stream, &write_buf, timeout, metrics.as_deref()).await?;
                                 }
                                 Err(codec::DecodeError::Incomplete) => break,
                                 Err(codec::DecodeError::SequenceOutOfOrder { expected_min, got }) => {
@@ -550,16 +657,12 @@ async fn handle_uds_connection_inner(
                                     }
                                     write_buf.clear();
                                     codec::encode_error(
-                                        got,
+                                        0,
                                         ErrorCode::SequenceOutOfOrder,
                                         &format!("Expected seq >= {expected_min}, got {got}"),
                                         &mut write_buf,
                                     );
-                                    if let Some(ref m) = metrics {
-                                        m.record_bytes_out("uds", write_buf.len());
-                                        m.record_frame_out("uds", 1);
-                                    }
-                                    stream.write_all(&write_buf).await?;
+                                    write_bounded(stream, &write_buf, timeout, metrics.as_deref()).await?;
                                     return Err(std::io::Error::new(
                                         std::io::ErrorKind::InvalidData,
                                         "Sequence out of order",
@@ -577,11 +680,7 @@ async fn handle_uds_connection_inner(
                                         "Send a Handshake message first",
                                         &mut write_buf,
                                     );
-                                    if let Some(ref m) = metrics {
-                                        m.record_bytes_out("uds", write_buf.len());
-                                        m.record_frame_out("uds", 1);
-                                    }
-                                    stream.write_all(&write_buf).await?;
+                                    write_bounded(stream, &write_buf, timeout, metrics.as_deref()).await?;
                                     return Err(std::io::Error::new(
                                         std::io::ErrorKind::InvalidData,
                                         "Handshake required",
@@ -599,11 +698,7 @@ async fn handle_uds_connection_inner(
                                         "Command messages require non-zero request_id (v2)",
                                         &mut write_buf,
                                     );
-                                    if let Some(ref m) = metrics {
-                                        m.record_bytes_out("uds", write_buf.len());
-                                        m.record_frame_out("uds", 1);
-                                    }
-                                    stream.write_all(&write_buf).await?;
+                                    write_bounded(stream, &write_buf, timeout, metrics.as_deref()).await?;
                                     return Err(std::io::Error::new(
                                         std::io::ErrorKind::InvalidData,
                                         "Invalid request_id",
@@ -621,11 +716,7 @@ async fn handle_uds_connection_inner(
                                         &format!("Unsupported version: {v}"),
                                         &mut write_buf,
                                     );
-                                    if let Some(ref m) = metrics {
-                                        m.record_bytes_out("uds", write_buf.len());
-                                        m.record_frame_out("uds", 1);
-                                    }
-                                    stream.write_all(&write_buf).await?;
+                                    write_bounded(stream, &write_buf, timeout, metrics.as_deref()).await?;
                                     return Err(std::io::Error::new(
                                         std::io::ErrorKind::InvalidData,
                                         format!("Unsupported protocol version: {v}"),
@@ -643,11 +734,7 @@ async fn handle_uds_connection_inner(
                                         &format!("{e}"),
                                         &mut write_buf,
                                     );
-                                    if let Some(ref m) = metrics {
-                                        m.record_bytes_out("uds", write_buf.len());
-                                        m.record_frame_out("uds", 1);
-                                    }
-                                    if let Err(we) = stream.write_all(&write_buf).await {
+                                    if let Err(we) = write_bounded(stream, &write_buf, timeout, metrics.as_deref()).await {
                                         tracing::debug!(write_error = %we, decode_error = %e, "failed to send InvalidPayload frame");
                                     }
                                     return Err(std::io::Error::new(
@@ -660,6 +747,63 @@ async fn handle_uds_connection_inner(
                     }
                 }
             }
+        }
+    }
+}
+
+async fn write_chunks<S: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut S,
+    bytes: &[u8],
+    timeout: Duration,
+    metrics: Option<&EngineMetrics>,
+) -> std::io::Result<()> {
+    tokio::time::timeout(timeout, async {
+        for chunk in bytes.chunks(MAX_WRITE_BUFFER_SIZE) {
+            stream.write_all(chunk).await?;
+        }
+        Ok::<_, std::io::Error>(())
+    })
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "write timeout"))??;
+    record_sent(metrics, bytes);
+    Ok(())
+}
+
+async fn write_bounded<S: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut S,
+    bytes: &[u8],
+    timeout: Duration,
+    metrics: Option<&EngineMetrics>,
+) -> std::io::Result<()> {
+    tokio::time::timeout(timeout, stream.write_all(bytes))
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "write timeout"))??;
+    record_sent(metrics, bytes);
+    Ok(())
+}
+
+fn record_sent(metrics: Option<&EngineMetrics>, bytes: &[u8]) {
+    if let Some(metrics) = metrics {
+        let mut offset = 0;
+        let mut frames = 0;
+        while offset + crate::protocol::FRAME_HEADER_SIZE <= bytes.len() {
+            let size = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += crate::protocol::FRAME_HEADER_SIZE + size;
+            if offset > bytes.len() {
+                break;
+            }
+            frames += 1;
+        }
+        metrics.record_bytes_out("uds", bytes.len());
+        metrics.record_frame_out("uds", frames);
+    }
+}
+
+struct ReadinessGuard(Option<Arc<std::sync::atomic::AtomicBool>>);
+impl Drop for ReadinessGuard {
+    fn drop(&mut self) {
+        if let Some(flag) = &self.0 {
+            flag.store(false, std::sync::atomic::Ordering::Release);
         }
     }
 }

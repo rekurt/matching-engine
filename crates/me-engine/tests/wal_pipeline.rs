@@ -3,10 +3,50 @@ use me_core::events::MatchEvent;
 use me_core::order::{Order, TimeInForce};
 use me_core::symbol::SymbolConfig;
 use me_core::types::*;
-use me_core::RejectReason;
 use me_engine::command::Command;
 use me_engine::router::{Router, WalConfig, WalMode};
-use me_persist::wal::{WalCommand, WalReader};
+use me_persist::wal::{WalCommand, WalEntry, WalReader};
+
+fn commands(entries: Vec<WalEntry>) -> Vec<WalEntry> {
+    let mut commands = Vec::new();
+    for entry in entries {
+        match entry.command {
+            WalCommand::Decision {
+                command,
+                expirations,
+                ..
+            } => {
+                for expiration in expirations {
+                    if let MatchEvent::OrderCancelled {
+                        order_id,
+                        timestamp,
+                        ..
+                    } = expiration
+                    {
+                        commands.push(WalEntry {
+                            sequence: entry.sequence,
+                            command: WalCommand::CancelOrder {
+                                order_id,
+                                timestamp,
+                                symbol: command.symbol(),
+                            },
+                        });
+                    }
+                }
+                commands.push(WalEntry {
+                    sequence: entry.sequence,
+                    command: *command,
+                });
+            }
+            WalCommand::SymbolConfig { .. } | WalCommand::TradingState { .. } => {}
+            command => commands.push(WalEntry {
+                sequence: entry.sequence,
+                command,
+            }),
+        }
+    }
+    commands
+}
 
 fn btc_config() -> SymbolConfig {
     SymbolConfig::default_btc_usdt()
@@ -94,12 +134,12 @@ fn test_wal_pre_mode_writes_before_matching() {
     // Read WAL and verify entries
     let wal_path = format!("{}/shard_0.wal", wal_dir);
     let mut reader = WalReader::open(&wal_path).unwrap();
-    let entries = reader.read_all().unwrap();
+    let entries = commands(reader.read_all().unwrap());
 
     assert_eq!(entries.len(), 3, "All 3 commands should be in WAL");
-    assert_eq!(entries[0].sequence, 1);
-    assert_eq!(entries[1].sequence, 2);
-    assert_eq!(entries[2].sequence, 3);
+    assert_eq!(entries[0].sequence, 2);
+    assert_eq!(entries[1].sequence, 3);
+    assert_eq!(entries[2].sequence, 4);
 
     // First entry should be PlaceOrder (sell)
     match &entries[0].command {
@@ -131,35 +171,11 @@ fn test_wal_pre_mode_open_failure_rejects_and_preserves_state() {
         ..Default::default()
     };
 
-    let mut router = Router::new_with_wal(1, None, None, wal_cfg);
-    router.add_symbol(btc_config());
-
-    let events = router.process(limit_buy(1, 100.0, 1.0));
-    assert!(
-        events.iter().any(|e| matches!(
-            e,
-            MatchEvent::OrderRejected {
-                order_id: 1,
-                reason: RejectReason::InternalError,
-                ..
-            }
-        )),
-        "command must be rejected when pre-mode WAL writer is unavailable"
-    );
-
-    let order_status = router.query_order(1, SymbolId(0));
-    assert!(
-        order_status
-            .iter()
-            .any(|e| matches!(e, MatchEvent::OrderNotFound { order_id: 1 })),
-        "rejected order must not be present in the order book"
-    );
-
-    router.shutdown();
+    assert!(std::panic::catch_unwind(|| Router::new_with_wal(1, None, None, wal_cfg)).is_err());
 }
 
 #[test]
-fn test_wal_post_mode_skips_risk_rejected() {
+fn test_wal_post_mode_persists_risk_decisions() {
     let wal_dir = temp_wal_dir("post_mode");
     let wal_cfg = WalConfig {
         mode: WalMode::Post,
@@ -200,19 +216,19 @@ fn test_wal_post_mode_skips_risk_rejected() {
     // In post-mode, only accepted commands are journaled
     let wal_path = format!("{}/shard_0.wal", wal_dir);
     let mut reader = WalReader::open(&wal_path).unwrap();
-    let entries = reader.read_all().unwrap();
+    let entries = commands(reader.read_all().unwrap());
 
     // Risk-rejected order should NOT be in WAL
     assert_eq!(
         entries.len(),
-        2,
-        "Only 2 accepted commands should be in WAL (risk-rejected excluded)"
+        3,
+        "Accepted and rejected decisions must both be durable"
     );
     match &entries[0].command {
         WalCommand::PlaceOrder(o) => assert_eq!(o.id, 1),
         _ => panic!("Expected PlaceOrder id=1"),
     }
-    match &entries[1].command {
+    match &entries[2].command {
         WalCommand::PlaceOrder(o) => assert_eq!(o.id, 3),
         _ => panic!("Expected PlaceOrder id=3"),
     }
@@ -267,10 +283,10 @@ fn test_wal_batch_flush() {
 
     let wal_path = format!("{}/shard_0.wal", wal_dir);
     let mut reader = WalReader::open(&wal_path).unwrap();
-    let entries = reader.read_all().unwrap();
+    let entries = commands(reader.read_all().unwrap());
 
     assert_eq!(entries.len(), 100);
-    assert_eq!(entries.last().unwrap().sequence, 100);
+    assert_eq!(entries.last().unwrap().sequence, 101);
 }
 
 #[test]
@@ -305,13 +321,16 @@ fn test_wal_recovery_restores_book_state() {
     // Phase 2: Read WAL and replay on a fresh engine
     let wal_path = format!("{}/shard_0.wal", wal_dir);
     let mut reader = WalReader::open(&wal_path).unwrap();
-    let entries = reader.read_all().unwrap();
+    let entries = commands(reader.read_all().unwrap());
     assert_eq!(entries.len(), 6); // 5 place + 1 cancel
 
     // Replay on a fresh engine
     let mut engine = me_engine::engine::Engine::new(btc_config());
     for entry in &entries {
         let cmd = match &entry.command {
+            WalCommand::Decision { .. }
+            | WalCommand::SymbolConfig { .. }
+            | WalCommand::TradingState { .. } => panic!("unwrapped commands only"),
             WalCommand::PlaceOrder(order) => Command::PlaceOrder(*order),
             WalCommand::CancelOrder {
                 order_id,
@@ -493,8 +512,8 @@ fn test_wal_multi_shard() {
     let wal0 = format!("{}/shard_0.wal", wal_dir);
     let wal1 = format!("{}/shard_1.wal", wal_dir);
 
-    let entries0 = WalReader::open(&wal0).unwrap().read_all().unwrap();
-    let entries1 = WalReader::open(&wal1).unwrap().read_all().unwrap();
+    let entries0 = commands(WalReader::open(&wal0).unwrap().read_all().unwrap());
+    let entries1 = commands(WalReader::open(&wal1).unwrap().read_all().unwrap());
 
     assert_eq!(entries0.len(), 1);
     assert_eq!(entries1.len(), 1);
@@ -538,7 +557,7 @@ fn test_gtd_expiry_is_journaled_before_triggering_command() {
 
     let wal_path = format!("{}/shard_0.wal", wal_dir);
     let mut reader = WalReader::open(&wal_path).unwrap();
-    let entries = reader.read_all().unwrap();
+    let entries = commands(reader.read_all().unwrap());
 
     assert_eq!(
         entries.len(),

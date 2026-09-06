@@ -20,6 +20,9 @@ impl RateLimiter {
 
     /// Try to consume one token. Returns true if allowed.
     pub fn try_acquire(&mut self) -> bool {
+        if self.capacity == 0.0 {
+            return true;
+        }
         self.refill();
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
@@ -38,8 +41,14 @@ impl RateLimiter {
 
     /// Update the rate limit. Clamps current tokens to new capacity.
     pub fn set_rate(&mut self, max_per_second: u32) {
+        self.refill();
+        let was_disabled = self.capacity == 0.0;
         self.capacity = max_per_second as f64;
-        self.tokens = self.tokens.min(self.capacity);
+        self.tokens = if was_disabled {
+            self.capacity
+        } else {
+            self.tokens.min(self.capacity)
+        };
     }
 }
 
@@ -73,5 +82,22 @@ impl std::fmt::Display for RiskRejectReason {
             Self::MaxOpenOrdersExceeded => write!(f, "max_open_orders_exceeded"),
             Self::ExceedsMaxPosition => write!(f, "exceeds_max_position"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn zero_rate_disables_limiting() {
+        let mut limiter = RateLimiter::new(0);
+        for _ in 0..1000 {
+            assert!(limiter.try_acquire());
+        }
+        limiter.set_rate(1);
+        assert!(limiter.try_acquire());
+        assert!(!limiter.try_acquire());
+        limiter.set_rate(0);
+        assert!(limiter.try_acquire());
     }
 }

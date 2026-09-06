@@ -28,15 +28,10 @@ impl RiskEngine {
     /// Register a symbol with its risk config.
     pub fn add_symbol(&mut self, config: RiskConfig) {
         let symbol = config.symbol;
-        // `max_position` requires per-account net-position tracking, which does
-        // not exist yet. Warn loudly rather than silently ignoring a control an
-        // operator may believe is active.
-        if !config.max_position.is_zero() {
-            warn!(
-                symbol = symbol.0,
-                "max_position is configured but NOT enforced (no account/position model yet) — control is inactive"
-            );
-        }
+        assert!(
+            config.max_position.is_zero(),
+            "max_position is unsupported: no account position ledger"
+        );
         let rate = config.max_orders_per_second;
         self.rate_limiters.insert(symbol, RateLimiter::new(rate));
         self.open_order_counts.insert(symbol, 0);
@@ -55,11 +50,8 @@ impl RiskEngine {
 
     /// Update the reference price for a symbol (called after each trade).
     ///
-    /// The per-update movement is clamped to one band-width so a burst of
-    /// orders cannot "walk" the reference arbitrarily far: each trade can move
-    /// the reference by at most `price_band_bps`. Without this, an attacker
-    /// could chain orders just inside the band, each fill ratcheting the
-    /// reference, to eventually price orders far from the true market.
+    /// Each update moves at most one band width. This rolling reference is not
+    /// an external fair-value oracle; successive trades can move it further.
     pub fn update_reference_price(&mut self, symbol: SymbolId, price: FixedPrice) {
         if let Some(cfg) = self.configs.get_mut(&symbol) {
             if cfg.price_band_bps > 0 && cfg.reference_price.is_positive() {
@@ -77,7 +69,8 @@ impl RiskEngine {
 
     /// Notify the risk engine that an order was added to the book.
     pub fn on_order_added(&mut self, symbol: SymbolId) {
-        *self.open_order_counts.entry(symbol).or_insert(0) += 1;
+        let count = self.open_order_counts.entry(symbol).or_insert(0);
+        *count = count.saturating_add(1);
     }
 
     /// Notify the risk engine that an order was removed from the book.
@@ -135,11 +128,45 @@ impl RiskEngine {
 
         // 2. Rate limit check
         if let Some(limiter) = self.rate_limiters.get_mut(&symbol) {
+            limiter.set_rate(config.max_orders_per_second);
             if !limiter.try_acquire() {
                 return Err(RiskRejectReason::RateLimitExceeded);
             }
         }
 
+        Self::check_limits(config, order)?;
+
+        // 6. Max open orders
+        let open = self.open_order_counts.get(&symbol).copied().unwrap_or(0);
+        if config.max_open_orders > 0 && open >= config.max_open_orders {
+            return Err(RiskRejectReason::MaxOpenOrdersExceeded);
+        }
+
+        Ok(())
+    }
+
+    /// Validate a replacement without charging another open-order slot.
+    pub fn check_amend(&mut self, order: &Order) -> Result<(), RiskRejectReason> {
+        let Some(config) = self.configs.get(&order.symbol) else {
+            return Ok(());
+        };
+        Self::check_limits(config, order)?;
+        if let Some(limiter) = self.rate_limiters.get_mut(&order.symbol) {
+            limiter.set_rate(config.max_orders_per_second);
+            if !limiter.try_acquire() {
+                return Err(RiskRejectReason::RateLimitExceeded);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn check_limits(config: &RiskConfig, order: &Order) -> Result<(), RiskRejectReason> {
+        if !config.trading_enabled {
+            return Err(RiskRejectReason::TradingHalted);
+        }
+        if !config.max_position.is_zero() {
+            return Err(RiskRejectReason::ExceedsMaxPosition);
+        }
         // 3. Fat finger: max order quantity
         if order.qty > config.max_order_qty {
             return Err(RiskRejectReason::ExceedsMaxOrderQty);
@@ -154,7 +181,7 @@ impl RiskEngine {
                 if config.reference_price.is_positive() {
                     Some(config.reference_price.raw().unsigned_abs())
                 } else {
-                    None
+                    return Err(RiskRejectReason::ExceedsMaxNotional);
                 }
             }
         };
@@ -181,12 +208,6 @@ impl RiskEngine {
             if order.price.raw() < lower || order.price.raw() > upper {
                 return Err(RiskRejectReason::PriceBandViolation);
             }
-        }
-
-        // 6. Max open orders
-        let open = self.open_order_counts.get(&symbol).copied().unwrap_or(0);
-        if config.max_open_orders > 0 && open >= config.max_open_orders {
-            return Err(RiskRejectReason::MaxOpenOrdersExceeded);
         }
 
         Ok(())
@@ -233,6 +254,56 @@ mod tests {
             FixedQty::from_f64(qty),
             1000,
         )
+    }
+
+    #[test]
+    fn amend_checks_resulting_limits_without_extra_open_slot() {
+        let mut engine = RiskEngine::new();
+        let mut config = risk_config();
+        config.max_open_orders = 1;
+        engine.add_symbol(config);
+        engine.on_order_added(btc_symbol());
+        assert!(engine.check_amend(&limit_buy(50000.0, 1.0)).is_ok());
+        assert_eq!(
+            engine.check_amend(&limit_buy(50000.0, 101.0)),
+            Err(RiskRejectReason::ExceedsMaxOrderQty)
+        );
+        assert_eq!(
+            engine.check_amend(&limit_buy(60000.0, 1.0)),
+            Err(RiskRejectReason::PriceBandViolation)
+        );
+        engine.config_mut(btc_symbol()).unwrap().max_order_notional = 1;
+        assert_eq!(
+            engine.check_amend(&limit_buy(50000.0, 1.0)),
+            Err(RiskRejectReason::ExceedsMaxNotional)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "max_position is unsupported")]
+    fn unsupported_position_control_fails_configuration() {
+        let mut engine = RiskEngine::new();
+        let mut config = risk_config();
+        config.max_position = FixedQty::from_raw(1);
+        engine.add_symbol(config);
+    }
+
+    #[test]
+    fn market_without_reference_fails_closed() {
+        let mut engine = RiskEngine::new();
+        engine.add_symbol(RiskConfig::default_for(btc_symbol()));
+        let order = Order::new_market(
+            1,
+            btc_symbol(),
+            Side::Buy,
+            TimeInForce::IOC,
+            FixedQty::from_f64(1.0),
+            1,
+        );
+        assert_eq!(
+            engine.check_order(&order),
+            Err(RiskRejectReason::ExceedsMaxNotional)
+        );
     }
 
     #[test]

@@ -39,7 +39,8 @@ func main() {
 		os.Exit(1)
 	}
 	defer client.Close()
-	fmt.Println("Connected and handshake completed.\n")
+	fmt.Println("Connected and handshake completed.")
+	fmt.Println()
 
 	// ---------------------------------------------------------------
 	// 2. Ping — verify the connection is alive
@@ -49,7 +50,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "ERROR ping: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("Pong received — connection is healthy.\n")
+	fmt.Println("Pong received — connection is healthy.")
+	fmt.Println()
+	done := make(chan struct{})
+	defer close(done)
+	events := readStream(client, done)
 
 	// ---------------------------------------------------------------
 	// 3. Place a Buy Limit order: 1.5 BTC @ $50,000.00
@@ -73,11 +78,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "ERROR place buy: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("  → sent (seq=%d)\n", buySeq)
+	fmt.Printf("  → sent (request_id=%d)\n", buySeq)
 
 	// Read the response: should be OrderAccepted (the buy rests on the book
 	// because there are no asks yet).
-	readAndPrint(client)
+	readAndPrint(events)
 	fmt.Println()
 
 	// ---------------------------------------------------------------
@@ -103,7 +108,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "ERROR place sell: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("  → sent (seq=%d)\n", sellSeq)
+	fmt.Printf("  → sent (request_id=%d)\n", sellSeq)
 
 	// Read all response events. The matching engine will emit:
 	//   - OrderAccepted (for the sell)
@@ -111,7 +116,7 @@ func main() {
 	//   - OrderPartiallyFilled (buy order 1001 partially filled)
 	//   - OrderFilled (sell order 1002 completely filled)
 	// Read until we hit a timeout (no more events).
-	readAllEvents(client)
+	readAllEvents(events)
 	fmt.Println()
 
 	// ---------------------------------------------------------------
@@ -128,9 +133,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "ERROR cancel: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("  → sent (seq=%d)\n", cancelSeq)
+	fmt.Printf("  → sent (request_id=%d)\n", cancelSeq)
 
-	readAndPrint(client)
+	readAndPrint(events)
 	fmt.Println()
 
 	// ---------------------------------------------------------------
@@ -157,54 +162,72 @@ func main() {
 	}
 
 	// This will likely be rejected with NoLiquidity since the book is empty.
-	readAllEvents(client)
+	readAllEvents(events)
 
 	fmt.Println("\n=== Done ===")
 }
 
-// readAndPrint reads a single event and prints it.
-func readAndPrint(client *meclient.Client) {
-	event, seq, err := client.ReadEvent()
-	if err != nil {
-		if err == io.EOF {
-			fmt.Println("  [connection closed]")
-			return
-		}
-		fmt.Fprintf(os.Stderr, "  ERROR read: %v\n", err)
-		return
-	}
-	printEvent(event, seq)
+type readResult struct {
+	event     *meclient.Event
+	requestID uint64
+	err       error
 }
 
-// readAllEvents reads events until a short timeout with no data.
-func readAllEvents(client *meclient.Client) {
-	// Use a goroutine-based approach with a channel and timeout.
-	type result struct {
-		event *meclient.Event
-		seq   uint64
-		err   error
-	}
-
-	for {
-		ch := make(chan result, 1)
-		go func() {
-			event, seq, err := client.ReadEvent()
-			ch <- result{event, seq, err}
-		}()
-
-		select {
-		case r := <-ch:
-			if r.err != nil {
-				if r.err == io.EOF {
-					fmt.Println("  [connection closed]")
-					return
-				}
-				fmt.Fprintf(os.Stderr, "  ERROR read: %v\n", r.err)
+func readStream(client *meclient.Client, done <-chan struct{}) <-chan readResult {
+	results := make(chan readResult)
+	go func() {
+		defer close(results)
+		for {
+			event, requestID, err := client.ReadEvent()
+			select {
+			case results <- readResult{event, requestID, err}:
+			case <-done:
 				return
 			}
-			printEvent(r.event, r.seq)
-		case <-time.After(500 * time.Millisecond):
-			// No more events within timeout.
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return results
+}
+
+func printResult(r readResult) bool {
+	if r.err != nil {
+		if r.err == io.EOF {
+			fmt.Println("  [connection closed]")
+		} else {
+			fmt.Fprintf(os.Stderr, "  ERROR read: %v\n", r.err)
+		}
+		return false
+	}
+	printEvent(r.event, r.requestID)
+	return true
+}
+
+func readAndPrint(events <-chan readResult) {
+	if r, ok := <-events; ok {
+		printResult(r)
+	}
+}
+
+func readAllEvents(events <-chan readResult) {
+	timer := time.NewTimer(500 * time.Millisecond)
+	defer timer.Stop()
+	for {
+		select {
+		case r, ok := <-events:
+			if !ok || !printResult(r) {
+				return
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(500 * time.Millisecond)
+		case <-timer.C:
 			return
 		}
 	}
@@ -215,60 +238,60 @@ func printEvent(event *meclient.Event, seq uint64) {
 	switch {
 	case event.OrderAccepted != nil:
 		e := event.OrderAccepted
-		fmt.Printf("  [seq=%d] OrderAccepted: order_id=%d, ts=%d\n",
+		fmt.Printf("  [request_id=%d] OrderAccepted: order_id=%d, ts=%d\n",
 			seq, e.OrderId, e.Timestamp)
 
 	case event.OrderRejected != nil:
 		e := event.OrderRejected
-		fmt.Printf("  [seq=%d] OrderRejected: order_id=%d, reason=%s, ts=%d\n",
+		fmt.Printf("  [request_id=%d] OrderRejected: order_id=%d, reason=%s, ts=%d\n",
 			seq, e.OrderId, e.Reason, e.Timestamp)
 
 	case event.Trade != nil:
 		e := event.Trade
-		fmt.Printf("  [seq=%d] Trade: trade_id=%d, symbol=%d, price=%s, qty=%s, "+
+		fmt.Printf("  [request_id=%d] Trade: trade_id=%d, symbol=%d, price=%s, qty=%s, "+
 			"maker=%d, taker=%d, maker_side=%s\n",
 			seq, e.TradeId, e.SymbolId, e.Price, e.Qty,
 			e.MakerOrderId, e.TakerOrderId, e.MakerSide)
 
 	case event.OrderFilled != nil:
 		e := event.OrderFilled
-		fmt.Printf("  [seq=%d] OrderFilled: order_id=%d, filled_qty=%s, price=%s\n",
+		fmt.Printf("  [request_id=%d] OrderFilled: order_id=%d, filled_qty=%s, price=%s\n",
 			seq, e.OrderId, e.FilledQty, e.Price)
 
 	case event.OrderPartiallyFilled != nil:
 		e := event.OrderPartiallyFilled
-		fmt.Printf("  [seq=%d] OrderPartiallyFilled: order_id=%d, filled=%s, remaining=%s, price=%s\n",
+		fmt.Printf("  [request_id=%d] OrderPartiallyFilled: order_id=%d, filled=%s, remaining=%s, price=%s\n",
 			seq, e.OrderId, e.FilledQty, e.RemainingQty, e.Price)
 
 	case event.OrderCancelled != nil:
 		e := event.OrderCancelled
-		fmt.Printf("  [seq=%d] OrderCancelled: order_id=%d, remaining_qty=%s\n",
+		fmt.Printf("  [request_id=%d] OrderCancelled: order_id=%d, remaining_qty=%s\n",
 			seq, e.OrderId, e.RemainingQty)
 
 	case event.OrderAmended != nil:
 		e := event.OrderAmended
-		fmt.Printf("  [seq=%d] OrderAmended: order_id=%d, new_price=%s, new_qty=%s\n",
+		fmt.Printf("  [request_id=%d] OrderAmended: order_id=%d, new_price=%s, new_qty=%s\n",
 			seq, e.OrderId, e.NewPrice, e.NewQty)
 
 	case event.StopTriggered != nil:
 		e := event.StopTriggered
-		fmt.Printf("  [seq=%d] StopTriggered: order_id=%d, trigger_price=%s\n",
+		fmt.Printf("  [request_id=%d] StopTriggered: order_id=%d, trigger_price=%s\n",
 			seq, e.OrderId, e.TriggerPrice)
 
 	case event.Pong != nil:
-		fmt.Printf("  [seq=%d] Pong\n", seq)
+		fmt.Printf("  [request_id=%d] Pong\n", seq)
 
 	case event.Error != nil:
 		e := event.Error
-		fmt.Printf("  [seq=%d] Error: code=%d, message=%q\n",
+		fmt.Printf("  [request_id=%d] Error: code=%d, message=%q\n",
 			seq, e.Code, e.Message)
 
 	case event.HandshakeAck != nil:
 		e := event.HandshakeAck
-		fmt.Printf("  [seq=%d] HandshakeAck: server_version=%d\n",
+		fmt.Printf("  [request_id=%d] HandshakeAck: server_version=%d\n",
 			seq, e.ServerVersion)
 
 	default:
-		fmt.Printf("  [seq=%d] <unknown event>\n", seq)
+		fmt.Printf("  [request_id=%d] <unknown event>\n", seq)
 	}
 }

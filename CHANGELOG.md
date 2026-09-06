@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Order ownership enforcement** — `CancelOrder`, `AmendOrder`, and
+  `GetOrderStatus` now verify the requesting session owns the target order.
+  A client can no longer cancel/amend/enumerate another client's orders by
+  guessing the sequential `order_id`; cross-session attempts return
+  `OrderNotFound` without revealing the order exists. WAL replay / admin
+  (`SessionId::NONE`) remain privileged. (`Engine::process_with_session`,
+  `Router::process_with_session`, `Router::query_order_for_session`)
+- **Pre-trade risk controls are now wired in the server** — the previously
+  inert `me-risk` engine is activated via the new `[symbols.risk]` config
+  table (fat-finger qty, max notional, price band, rate limit, max open
+  orders, trading-enabled, self-trade prevention). Built-in defaults enable
+  it for the bundled symbols.
+- **Metrics/admin bind to loopback by default** — `config.toml` `metrics_addr`
+  changed from `0.0.0.0:9091` to `127.0.0.1:9091`; unauthenticated `/metrics`
+  is no longer exposed on all interfaces by the shipped config.
+
+### Fixed
+- **Undefined behaviour in the binary audit logger** — replaced a
+  `slice::from_raw_parts` over `AuditEntry` (which read `repr(C)` padding) with
+  an explicit, portable little-endian field encoding (`AuditEntry::to_bytes` /
+  `from_bytes`).
+- **Duplicate `OrderAccepted` on amend** — amending an order's price/qty no
+  longer re-emits `OrderAccepted` for the already-accepted order. A maker-only
+  (`POST_ONLY` / `MAKER_OR_CANCEL`) order amended into a crossing price is now
+  rejected with `WouldTakeMarket` and keeps its place instead of silently
+  vanishing.
+- **WAL tail-truncation durability** — `fsync` the WAL after truncating a
+  torn/corrupt tail during recovery, before the writer reopens it in append
+  mode, preventing a resurrected tail from being replayed as a phantom command.
+- **Snapshot loader hardening** — bounds-check every field read and cap the
+  declared order count, so a corrupt-but-CRC-valid snapshot returns
+  `InvalidData` instead of panicking or OOM-ing during startup recovery.
+- **`unreachable!()` removed from the shard hot path** — the risk-rejected
+  branch now matches command variants exhaustively, so a future refactor
+  cannot silently panic a shard worker.
+- **Go client: monetary precision** — added `NewDecimalFromString` (exact
+  parsing, no float64 intermediate) and reimplemented `Decimal.Mul`/`Div`
+  with `math/big` to eliminate float rounding error in notional math.
+- **Go client: data race on the socket reader** — all reads of the shared
+  `bufio.Reader` are now serialized; documented the synchronous-vs-streaming
+  read model.
+
 ### Added
 - **Protocol v2** — 22-byte frame header with `request_id` field for idempotency and response correlation
 - Session recovery: `ResumeSession` (0x06), `SessionResumed` (0x1B), replay buffer

@@ -1,12 +1,10 @@
-version: "3.8"
-
 services:
   prometheus:
     image: prom/prometheus:v2.53.0
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "9090:9090"
+      - "127.0.0.1:19090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
       - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml
@@ -18,9 +16,9 @@ services:
   grafana:
     image: grafana/grafana:11.1.0
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD before starting monitoring}
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning

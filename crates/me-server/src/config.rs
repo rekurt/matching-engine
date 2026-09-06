@@ -1,10 +1,12 @@
 use me_core::symbol::SymbolConfig;
 use me_core::types::{FixedPrice, FixedQty, SymbolId};
+use me_risk::config::RiskConfig;
 use serde::Deserialize;
 use std::path::Path;
 
 /// Top-level configuration loaded from TOML.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
@@ -15,9 +17,12 @@ pub struct Config {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     #[serde(default = "default_tcp_addr")]
     pub tcp_addr: String,
+    #[serde(default)]
+    pub allow_plaintext_remote: bool,
     #[serde(default = "default_metrics_addr")]
     pub metrics_addr: String,
     #[serde(default)]
@@ -47,6 +52,7 @@ pub struct ServerConfig {
 
 /// Heartbeat / keepalive configuration.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HeartbeatConfig {
     /// Interval (ms) the server advertises to clients via TLV_HEARTBEAT_MS.
     #[serde(default = "default_heartbeat_interval_ms")]
@@ -59,11 +65,12 @@ pub struct HeartbeatConfig {
 
 /// Session recovery configuration.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionConfig {
     /// Number of outbound frames buffered per session for replay after reconnect.
     #[serde(default = "default_replay_buffer_size")]
     pub replay_buffer_size: usize,
-    /// Seconds an idle session is retained before GC evicts it.
+    /// Seconds an unused idle session is retained; durable activity is preserved.
     #[serde(default = "default_session_ttl_secs")]
     pub ttl_secs: u64,
 }
@@ -72,6 +79,7 @@ pub struct SessionConfig {
 /// Fields are consumed by `main.rs` only when built with `--features tls`.
 #[derive(Debug, Deserialize, Default)]
 #[cfg_attr(not(feature = "tls"), allow(dead_code))]
+#[serde(deny_unknown_fields)]
 pub struct TlsConfig {
     pub cert_path: Option<String>,
     pub key_path: Option<String>,
@@ -80,18 +88,21 @@ pub struct TlsConfig {
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct AdminConfig {
     #[serde(default)]
     pub api_key: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShutdownConfig {
     #[serde(default = "default_drain_timeout")]
     pub drain_timeout_secs: u64,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SymbolEntry {
     pub id: u16,
     pub base: String,
@@ -115,12 +126,52 @@ pub struct SymbolEntry {
     /// See `me_core::invariant::InvariantPolicy` for semantics.
     #[serde(default = "default_invariant_policy")]
     pub invariant_policy: me_core::invariant::InvariantPolicy,
+    /// Optional pre-trade risk controls for this symbol. When present, the
+    /// engine enforces fat-finger qty, max notional, price band, rate limit,
+    /// max open orders, trading-enabled, and self-trade prevention. When
+    /// absent, NO risk checks run for the symbol (back-compat).
+    #[serde(default)]
+    pub risk: Option<RiskSettings>,
+}
+
+/// Per-symbol pre-trade risk controls (deserialized from `[[symbols.risk]]`).
+/// Decimal fields are strings (parsed to fixed-point) to avoid float rounding,
+/// consistent with the symbol qty/price fields.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct RiskSettings {
+    /// Fat-finger guard: maximum single-order quantity.
+    #[serde(default = "default_risk_max_order_qty")]
+    pub max_order_qty: String,
+    /// Maximum single-order notional (price * qty) in quote currency.
+    #[serde(default = "default_risk_max_order_notional")]
+    pub max_order_notional: String,
+    /// Price band: maximum deviation from reference price, in basis points
+    /// (1 = 0.01%). 0 disables the band.
+    #[serde(default = "default_risk_price_band_bps")]
+    pub price_band_bps: u32,
+    #[serde(default = "default_reference_price")]
+    pub reference_price: String,
+    /// Maximum orders per second (token-bucket rate limit). 0 disables.
+    #[serde(default = "default_risk_max_orders_per_second")]
+    pub max_orders_per_second: u32,
+    /// Maximum simultaneously open orders for this symbol. 0 disables.
+    #[serde(default = "default_risk_max_open_orders")]
+    pub max_open_orders: u32,
+    /// Whether trading is enabled for this symbol.
+    #[serde(default = "default_true")]
+    pub trading_enabled: bool,
+    /// Reject (cancel-newest) any order that would match a resting order from
+    /// the same client session.
+    #[serde(default)]
+    pub self_trade_prevention: bool,
 }
 
 /// WAL (Write-Ahead Log) configuration.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WalConfig {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
     /// WAL mode: "pre" (before matching), "post" (after matching)
     #[serde(default = "default_wal_mode")]
@@ -132,11 +183,11 @@ pub struct WalConfig {
     #[serde(default = "default_wal_sync_interval")]
     pub sync_interval: u64,
     /// Directory for periodic book snapshots. Empty string = derive from
-    /// `{path}/snapshots`. Snapshots bound recovery time and WAL growth.
+    /// `{path}/snapshots`. Snapshots checkpoint book state; the decision journal is retained.
     #[serde(default)]
     pub snapshot_dir: String,
     /// Take a snapshot of all symbols on a shard every N processed commands,
-    /// then truncate that shard's WAL. 0 disables periodic snapshots (recovery
+    /// retaining that shard's WAL. 0 disables periodic snapshots (recovery
     /// then replays the entire WAL).
     #[serde(default = "default_snapshot_interval")]
     pub snapshot_interval: u64,
@@ -145,7 +196,7 @@ pub struct WalConfig {
 impl Default for WalConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             mode: default_wal_mode(),
             path: default_wal_path(),
             sync_interval: default_wal_sync_interval(),
@@ -173,11 +224,34 @@ fn default_invariant_policy() -> me_core::invariant::InvariantPolicy {
     me_core::invariant::InvariantPolicy::HaltSymbol
 }
 
+fn default_true() -> bool {
+    true
+}
+fn default_risk_max_order_qty() -> String {
+    "10000.0".to_string()
+}
+fn default_risk_max_order_notional() -> String {
+    "100000000.0".to_string() // $100M
+}
+fn default_reference_price() -> String {
+    "0".into()
+}
+
+fn default_risk_price_band_bps() -> u32 {
+    1000 // ±10%
+}
+fn default_risk_max_orders_per_second() -> u32 {
+    1000
+}
+fn default_risk_max_open_orders() -> u32 {
+    100_000
+}
+
 fn default_clock() -> String {
     "coarse".to_string()
 }
 fn default_tcp_addr() -> String {
-    "0.0.0.0:9090".to_string()
+    "127.0.0.1:9090".to_string()
 }
 fn default_metrics_addr() -> String {
     "127.0.0.1:9091".to_string()
@@ -220,6 +294,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             tcp_addr: default_tcp_addr(),
+            allow_plaintext_remote: false,
             metrics_addr: default_metrics_addr(),
             shards: 0,
             uds_path: None,
@@ -265,6 +340,9 @@ const FIXED_SCALE: u64 = 100_000_000; // 10^8
 
 fn parse_decimal_to_raw(s: &str) -> Result<u64, String> {
     let s = s.trim();
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        return Err("expected an unsigned decimal".into());
+    }
     let oob = || "value out of range for fixed-point u64".to_string();
     if let Some(dot_pos) = s.find('.') {
         let int_part: u64 = s[..dot_pos]
@@ -286,7 +364,7 @@ fn parse_decimal_to_raw(s: &str) -> Result<u64, String> {
         // Checked arithmetic: a large integer part must not silently wrap.
         int_part
             .checked_mul(FIXED_SCALE)
-            .and_then(|hi| frac_part.checked_mul(scale_factor).map(|lo| (hi, lo)))
+            .zip(frac_part.checked_mul(scale_factor))
             .and_then(|(hi, lo)| hi.checked_add(lo))
             .ok_or_else(oob)
     } else {
@@ -342,6 +420,140 @@ impl SymbolEntry {
             invariant_policy: self.invariant_policy,
         })
     }
+
+    /// Build the per-symbol [`RiskConfig`], or `None` when no `risk` table is
+    /// configured for this symbol. Decimal fields are parsed via the same
+    /// fixed-point parser as qty/price to avoid float rounding.
+    pub fn to_risk_config(&self) -> Result<Option<RiskConfig>, String> {
+        let Some(r) = &self.risk else {
+            return Ok(None);
+        };
+        let id = self.id;
+        let max_order_qty = FixedQty::from_raw(
+            parse_decimal_to_raw(&r.max_order_qty)
+                .map_err(|e| format!("symbol {id}: risk.max_order_qty: {e}"))?,
+        );
+        let max_order_notional = parse_decimal_to_raw(&r.max_order_notional)
+            .map_err(|e| format!("symbol {id}: risk.max_order_notional: {e}"))?;
+        Ok(Some(RiskConfig {
+            symbol: SymbolId(id),
+            max_order_qty,
+            max_order_notional,
+            // RESERVED until an account/position model exists. Keep unlimited.
+            max_position: FixedQty::ZERO,
+            price_band_bps: r.price_band_bps,
+            reference_price: FixedPrice::from_raw(
+                i64::try_from(parse_decimal_to_raw(&r.reference_price)?)
+                    .map_err(|_| "reference price exceeds i64")?,
+            ),
+            max_orders_per_second: r.max_orders_per_second,
+            max_open_orders: r.max_open_orders,
+            trading_enabled: r.trading_enabled,
+            self_trade_prevention: r.self_trade_prevention,
+        }))
+    }
+}
+
+/// Permissive-but-real default risk controls applied to the built-in symbols
+/// when the server runs without a config file. Enabling risk by default closes
+/// the "risk engine never activates in production" gap.
+fn default_risk_settings() -> RiskSettings {
+    RiskSettings {
+        max_order_qty: default_risk_max_order_qty(),
+        max_order_notional: default_risk_max_order_notional(),
+        price_band_bps: default_risk_price_band_bps(),
+        reference_price: default_reference_price(),
+        max_orders_per_second: default_risk_max_orders_per_second(),
+        max_open_orders: default_risk_max_open_orders(),
+        trading_enabled: true,
+        self_trade_prevention: false,
+    }
+}
+
+impl Config {
+    pub fn validate(&self) -> Result<(), String> {
+        let tcp: std::net::SocketAddr = self
+            .server
+            .tcp_addr
+            .parse()
+            .map_err(|_| "invalid tcp_addr")?;
+        let _: std::net::SocketAddr = self
+            .server
+            .metrics_addr
+            .parse()
+            .map_err(|_| "invalid metrics_addr")?;
+        let tls = &self.server.tls;
+        if tls.cert_path.is_some() != tls.key_path.is_some()
+            || (tls.client_ca_path.is_some() && tls.cert_path.is_none())
+        {
+            return Err("TLS requires both cert_path and key_path".into());
+        }
+        if !cfg!(feature = "tls") && tls.cert_path.is_some() {
+            return Err("TLS configured but binary was built without --features tls".into());
+        }
+        if !tcp.ip().is_loopback() && tls.cert_path.is_none() && !self.server.allow_plaintext_remote
+        {
+            return Err("remote plaintext TCP requires explicit server.allow_plaintext_remote=true behind a trusted gateway".into());
+        }
+        if self.server.shards > 1024 {
+            return Err("server.shards must be <= 1024".into());
+        }
+        if !matches!(self.server.clock.as_str(), "system" | "coarse" | "rdtsc") {
+            return Err("unsupported server.clock".into());
+        }
+        let hb = &self.server.heartbeat;
+        if hb.interval_ms == 0
+            || hb.interval_ms > u32::MAX as u64
+            || hb.timeout_ms <= hb.interval_ms
+        {
+            return Err("heartbeat timeout must exceed a positive u32 interval".into());
+        }
+        if self.server.shutdown.drain_timeout_secs == 0
+            || self.server.shutdown.drain_timeout_secs > 3600
+        {
+            return Err("drain_timeout_secs must be in 1..=3600".into());
+        }
+        if self.server.session.replay_buffer_size == 0
+            || self.server.session.replay_buffer_size > 1_000_000
+            || self.server.session.ttl_secs == 0
+        {
+            return Err("invalid session replay capacity or TTL".into());
+        }
+        if !self.server.admin.api_key.is_empty()
+            && (self.server.admin.api_key.len() < 16
+                || !self
+                    .server
+                    .admin
+                    .api_key
+                    .bytes()
+                    .all(|b| (33..=126).contains(&b)))
+        {
+            return Err(
+                "admin key must contain at least 16 printable non-space ASCII bytes".into(),
+            );
+        }
+        if !matches!(self.wal.mode.as_str(), "pre" | "post") {
+            return Err("wal.mode must be pre or post".into());
+        }
+        if self.wal.enabled && self.wal.path.trim().is_empty() {
+            return Err("wal.path must not be empty".into());
+        }
+        if self.symbols.is_empty() {
+            return Err("at least one symbol is required".into());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for entry in &self.symbols {
+            if !seen.insert(entry.id) {
+                return Err(format!("duplicate symbol {}", entry.id));
+            }
+            if entry.base.is_empty() || entry.quote.is_empty() {
+                return Err("symbol currencies must not be empty".into());
+            }
+            entry.to_symbol_config()?;
+            entry.to_risk_config()?;
+        }
+        Ok(())
+    }
 }
 
 /// Load configuration from a TOML file. Returns default config on any error
@@ -349,7 +561,10 @@ impl SymbolEntry {
 pub fn load_config(path: &Path) -> Result<Config, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    toml::from_str(&content).map_err(|e| format!("parse error in {}: {e}", path.display()))
+    let cfg: Config =
+        toml::from_str(&content).map_err(|e| format!("parse error in {}: {e}", path.display()))?;
+    cfg.validate()?;
+    Ok(cfg)
 }
 
 /// Build the default config (same as the hardcoded symbols that existed before).
@@ -369,6 +584,7 @@ pub fn default_config() -> Config {
                 qty_step: "0.00001".into(),
                 price_step: "0.01".into(),
                 invariant_policy: default_invariant_policy(),
+                risk: Some(default_risk_settings()),
             },
             SymbolEntry {
                 id: 1,
@@ -381,6 +597,7 @@ pub fn default_config() -> Config {
                 qty_step: "0.0001".into(),
                 price_step: "0.01".into(),
                 invariant_policy: default_invariant_policy(),
+                risk: Some(default_risk_settings()),
             },
             SymbolEntry {
                 id: 2,
@@ -393,6 +610,7 @@ pub fn default_config() -> Config {
                 qty_step: "0.001".into(),
                 price_step: "0.0001".into(),
                 invariant_policy: default_invariant_policy(),
+                risk: Some(default_risk_settings()),
             },
         ],
     }
@@ -495,5 +713,69 @@ price_step = "0.01"
         assert_eq!(cfg.symbols[0].base, "BTC");
         let sc = cfg.symbols[0].to_symbol_config().unwrap();
         assert_eq!(sc.id, SymbolId(0));
+    }
+}
+
+#[cfg(test)]
+mod startup_validation_tests {
+    use super::*;
+
+    fn load(text: &str) -> Result<Config, String> {
+        let path = std::env::temp_dir().join(format!(
+            "me-config-{}-{}.toml",
+            std::process::id(),
+            me_core::SessionId::random().log_prefix()
+        ));
+        std::fs::write(&path, text).unwrap();
+        let result = load_config(&path);
+        std::fs::remove_file(path).unwrap();
+        result
+    }
+
+    #[test]
+    fn invalid_durability_mode_is_rejected_before_startup() {
+        assert!(load(
+            "[wal]\nenabled=true\nmode='prre'\n[[symbols]]\nid=0\nbase='BTC'\nquote='USD'"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn partial_tls_configuration_is_rejected() {
+        assert!(load(
+            "[server.tls]\ncert_path='cert.pem'\n[[symbols]]\nid=0\nbase='BTC'\nquote='USD'"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn unsupported_position_control_is_not_silently_ignored() {
+        assert!(load(
+            "[[symbols]]\nid=0\nbase='BTC'\nquote='USD'\n[symbols.risk]\nmax_position='1'"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn heartbeat_timeout_must_exceed_interval() {
+        assert!(load("[server.heartbeat]\ninterval_ms=5000\ntimeout_ms=10\n[[symbols]]\nid=0\nbase='BTC'\nquote='USD'").is_err());
+    }
+
+    #[test]
+    fn shipped_defaults_preserve_orders_and_limit_network_exposure() {
+        let cfg = default_config();
+        assert!(cfg.wal.enabled);
+        assert!(cfg
+            .server
+            .tcp_addr
+            .parse::<std::net::SocketAddr>()
+            .unwrap()
+            .ip()
+            .is_loopback());
+    }
+
+    #[test]
+    fn decimal_parser_rejects_embedded_sign() {
+        assert!(parse_decimal_to_raw("1.+2").is_err());
     }
 }

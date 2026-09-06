@@ -38,7 +38,7 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   check:
     name: Check
@@ -56,7 +56,7 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
-      - run: cargo build --release
+      - run: cargo build --release --workspace --all-features --locked
       - run: cargo build -p me-datagen
 
   test:
@@ -75,7 +75,16 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
-      - run: cargo test --workspace
+      - run: cargo test --workspace --all-features --locked
+      - run: cargo build -p me-server --features tls --locked
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+      - run: python3 scripts/runtime_smoke.py
+        env:
+          ME_TEST_TLS: "1"
+      - run: python3 -m unittest discover -s examples/python
+      - run: cargo test --manifest-path examples/rust/Cargo.toml --locked
 
   go-test:
     name: Go Tests
@@ -85,7 +94,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "stable"
-      - run: cd clients/go/meclient && go test ./...
+      - run: cd clients/go/meclient && go test -race ./...
+      - run: cd examples/go && go test ./...
 
   audit:
     name: Cargo Audit (CVE scan)
@@ -101,5 +111,18 @@ jobs:
             ~/.cargo/registry/cache/
           key: ${{ runner.os }}-cargo-audit
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked || true
+        run: cargo install cargo-audit --locked
       - run: cargo audit
+
+  typescript-example:
+    name: TypeScript protocol integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci --ignore-scripts
+        working-directory: examples/typescript
+      - run: npm test
+        working-directory: examples/typescript

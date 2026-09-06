@@ -2,7 +2,7 @@ use me_core::order::Order;
 use me_core::types::{FixedPrice, FixedQty, OrderId, SymbolId};
 
 /// Commands that can be sent to the matching engine.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Command {
     /// Place a new order (any type: limit, market, stop-limit, stop-market).
     PlaceOrder(Order),

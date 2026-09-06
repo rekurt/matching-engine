@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "scripts": {
     "build": "tsc",
-    "start": "npx ts-node client.ts"
+    "start": "npx ts-node client.ts",
+    "test": "npm run build && node --test protocol.test.cjs"
   },
   "devDependencies": {
     "typescript": "^5.0.0",

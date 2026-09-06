@@ -8,15 +8,15 @@ wire protocol over plain TCP.
 
 Protocol overview
 -----------------
-Every frame on the wire looks like this (14-byte header + variable payload):
+Every frame on the wire looks like this (22-byte header + variable payload):
 
     +----------+--------+--------+----------+-----------------+
     | len: u32 | ver:u8 | type:u8| seq: u64 | payload: [u8]   |
     | 4 bytes  | 1 byte | 1 byte | 8 bytes  | `len` bytes     |
     +----------+--------+--------+----------+-----------------+
 
-* ``len``  -- payload size in bytes (does **not** include the 14-byte header).
-* ``ver``  -- protocol version, currently ``1``.
+* ``len``  -- payload size in bytes (does **not** include the 22-byte header).
+* ``ver``  -- protocol version, currently ``2``.
 * ``type`` -- message type tag (see MSG_* constants below).
 * ``seq``  -- monotonically increasing sequence number per connection.
 * All multi-byte integers are **little-endian**.
@@ -55,8 +55,8 @@ from typing import Any, Dict, Optional, Tuple
 # Protocol constants
 # ---------------------------------------------------------------------------
 
-PROTOCOL_VERSION = 1
-HEADER_SIZE = 14  # len(4) + ver(1) + type(1) + seq(8)
+PROTOCOL_VERSION = 2
+HEADER_SIZE = 22  # len(4) + ver(1) + type(1) + seq(8) + request_id(8)
 PRICE_SCALE = 10**8
 
 # -- Message types (client -> engine) --
@@ -319,10 +319,11 @@ class MEClient:
         return self._seq
 
     def _send_frame(self, msg_type: int, payload: bytes) -> None:
-        """Build a frame (14-byte header + payload) and send it."""
+        """Build a frame (22-byte header + payload) and send it."""
         assert self._sock is not None, "Not connected"
         seq = self._next_seq()
-        header = struct.pack("<IBBQ", len(payload), PROTOCOL_VERSION, msg_type, seq)
+        request_id = seq if msg_type in (0x01, 0x02, 0x03, 0x07, 0x09, 0x0B, 0x0C) else 0
+        header = struct.pack("<IBBQQ", len(payload), PROTOCOL_VERSION, msg_type, seq, request_id)
         assert len(header) == HEADER_SIZE
         self._sock.sendall(header + payload)
 
@@ -335,7 +336,9 @@ class MEClient:
             return None
 
         # Parse header.
-        payload_len, ver, msg_type, seq = struct.unpack_from("<IBBQ", self._buf, 0)
+        payload_len, ver, msg_type, seq, request_id = struct.unpack_from("<IBBQQ", self._buf, 0)
+        if payload_len > 1024 * 1024:
+            raise RuntimeError("Response payload exceeds 1 MiB")
         total = HEADER_SIZE + payload_len
         if len(self._buf) < total:
             return None  # Incomplete frame.
@@ -347,7 +350,9 @@ class MEClient:
         if ver != PROTOCOL_VERSION:
             raise RuntimeError(f"Unsupported protocol version: {ver}")
 
-        return self._decode_payload(msg_type, seq, payload)
+        event = self._decode_payload(msg_type, seq, payload)
+        event["request_id"] = request_id
+        return event
 
     def _decode_payload(self, msg_type: int, seq: int, payload: bytes) -> Dict[str, Any]:
         """Decode a frame payload into a human-friendly dictionary."""

@@ -74,13 +74,13 @@ groups:
           description: "Shard {{ $labels.shard }} has queue depth {{ $value }}, risk of backpressure"
 
       - alert: ZeroSpread
-        expr: me_book_spread == 0 and me_book_bid_levels > 0 and me_book_ask_levels > 0
+        expr: me_book_spread <= 0 and me_book_bid_levels > 0 and me_book_ask_levels > 0
         for: 10s
         labels:
           severity: critical
         annotations:
-          summary: "Crossed/locked book detected (spread = 0)"
-          description: "Symbol {{ $labels.symbol }} has zero spread — possible book corruption"
+          summary: "Crossed/locked book detected (spread <= 0)"
+          description: "Symbol {{ $labels.symbol }} has non-positive spread — possible book corruption"
 
       - alert: StopCascadeDepth
         expr: histogram_quantile(0.99, rate(me_stop_cascade_depth_bucket[5m])) > 10
@@ -137,3 +137,25 @@ groups:
         annotations:
           summary: "Price band violations detected"
           description: "{{ $value }}/sec orders rejected for price band violation on {{ $labels.symbol }}"
+
+      - alert: MatchingEngineUnavailable
+        expr: up{job="matching-engine"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Matching engine metrics endpoint unavailable"
+
+      - alert: AuditRecordsLost
+        expr: increase(me_audit_dropped_total[5m]) > 0 or increase(me_audit_disconnected_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Matching engine audit telemetry lost records"
+
+      - alert: BookInvariantViolation
+        expr: increase(me_invariant_violations_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Matching engine book invariant violated"

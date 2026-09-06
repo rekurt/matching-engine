@@ -14,8 +14,7 @@ pub struct RiskConfig {
     pub max_order_notional: u64, // raw fixed-point
 
     /// Maximum net position per account. 0 = unlimited.
-    /// RESERVED / NOT ENFORCED: requires an account+position model that does
-    /// not exist yet. `RiskEngine::add_symbol` warns if this is set non-zero.
+    /// Unsupported until an account ledger exists; nonzero configuration is rejected.
     pub max_position: FixedQty,
 
     /// Price band: maximum % deviation from reference price.
@@ -25,7 +24,7 @@ pub struct RiskConfig {
     /// Reference price for price band checks. Updated on each trade.
     pub reference_price: FixedPrice,
 
-    /// Maximum orders per second per connection (rate limiting).
+    /// Maximum orders and amendments per second per symbol. 0 = disabled.
     pub max_orders_per_second: u32,
 
     /// Maximum open orders per symbol.

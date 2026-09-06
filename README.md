@@ -1,46 +1,47 @@
 # Matching Engine
 
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.96%2B-orange)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://rekurt.github.io/matching-engine/)
 
 **HFT Cryptocurrency Spot Matching Engine** written in Rust.
 
-A high-performance, deterministic order matching engine designed for cryptocurrency spot trading. Built as a Rust workspace with clear separation of concerns, zero-allocation hot paths, and a binary wire protocol for sub-microsecond network overhead.
+A deterministic order matching engine for cryptocurrency spot trading, with per-symbol workers, a binary protocol, durable command decisions and recoverable execution delivery. Read the [operational contract](docs/OPERATIONS.md) before deployment.
 
 ---
 
 **HFT Криптовалютный Спот Матчинг-Движок** на Rust.
 
-Высокопроизводительный детерминированный движок сведения ордеров, спроектированный для спотовой торговли криптовалютами. Построен как Rust workspace с четким разделением ответственности, нулевыми аллокациями на горячем пути и бинарным сетевым протоколом для минимальных сетевых задержек.
+Высокопроизводительный детерминированный движок сведения ордеров, спроектированный для спотовой торговли криптовалютами. Построен как Rust workspace с четким разделением ответственности, журналом решений и бинарным протоколом с восстановлением доставки исполнений.
 
 ---
 
 ## 5-Minute Quickstart
 
 ```bash
-# 1. Build
-cargo build --release
-
-# 2. Run (BTC/USDT, ETH/USDT, SOL/USDT by default)
-./target/release/me-server
-
-# 3. Place your first order (Go)
-go run examples/go/place_order/main.go
+cargo build --release --locked -p me-server --features tls
+./target/release/me-server --config config.toml
+# In another terminal:
+(cd examples/go && go run .)
 ```
 
+The supplied configuration binds to loopback and enables durable storage under
+`./data/wal`. Use a persistent volume and keep the engine and session journals
+together. Non-loopback plaintext requires explicit `server.allow_plaintext_remote=true`
+and a trusted gateway; alternatively configure TLS/mTLS.
+
 ```go
-// 4. Connect and place an order
-client, _ := meclient.Dial("localhost:9090")
+client, err := meclient.Dial("127.0.0.1:9090")
+if err != nil { log.Fatal(err) }
 defer client.Close()
-client.PlaceOrder(&meclient.PlaceOrderMsg{
-    OrderID: 1, SymbolID: 0, Side: meclient.SideBuy,
+_, err = client.PlaceOrder(&meclient.PlaceOrderRequest{
+    OrderId: 1, SymbolId: 0, Side: meclient.SideBuy,
     OrderType: meclient.OrderTypeLimit, TimeInForce: meclient.TimeInForceGTC,
     Price: meclient.NewDecimal(50000.0), Qty: meclient.NewDecimal(0.5),
 })
-
-// 5. Read the response
-event, _ := client.ReadEvent()
+if err != nil { log.Fatal(err) }
+event, err := client.ReadEvent()
+if err != nil { log.Fatal(err) }
 fmt.Printf("event: %+v\n", event)
 ```
 
@@ -100,7 +101,7 @@ Full walkthrough: [rekurt.github.io/matching-engine/](https://rekurt.github.io/m
 | **me-bench** | Criterion benchmarks: throughput, latency, end-to-end scenarios (18 benchmarks) | Бенчмарки Criterion: пропускная способность, задержка, сквозные сценарии (18 бенчмарков) |
 | [**me-server**](crates/me-server/README.md) | Server binary: TCP + UDS listeners, TOML config, admin REST API (Axum) | Серверный бинарник: TCP + UDS, TOML конфигурация, REST API администрирования |
 | **me-metrics** | Prometheus metrics (50+ counters, gauges, histograms) | Метрики Prometheus (50+ счётчиков, гейджей, гистограмм) |
-| [**me-risk**](crates/me-risk/README.md) | Risk management: rate limiting, position limits | Риск-менеджмент: ограничение частоты, лимиты позиций |
+| [**me-risk**](crates/me-risk/README.md) | Risk management: rate, quantity and notional limits | Риск-менеджмент: лимиты частоты, количества и номинала |
 | **me-audit** | Audit logging: JSON events for all matching operations | Аудит: JSON-события всех операций мэтчинга |
 | **me-datagen** | Realistic order flow generator with configurable parameters: volatility, market/limit/stop ratios, cancel/amend ratios | Генератор реалистичного потока ордеров с настраиваемыми параметрами |
 | **me-clock** | Clock abstraction: `SystemClock`, `CoarseClock`, `RdtscClock` for deterministic testing and low-overhead timestamping | Абстракция часов для тестирования и low-overhead таймстемпинга |
@@ -135,7 +136,7 @@ Full walkthrough: [rekurt.github.io/matching-engine/](https://rekurt.github.io/m
 
 1. **Price-Time Priority** -- orders are matched first by price (best price wins), then by arrival time (FIFO within a price level). / Ордера сводятся сначала по цене (лучшая цена побеждает), затем по времени прибытия (FIFO внутри уровня цены).
 
-2. **Strict Sequential Processing Per Pair** -- each trading pair is processed by exactly one `Engine` instance. No locks, no shared mutable state within a pair. Deterministic replay guaranteed. / Каждая торговая пара обрабатывается ровно одним экземпляром `Engine`. Без блокировок, без разделяемого мутабельного состояния. Гарантия детерминированного воспроизведения.
+2. **Strict Sequential Processing Per Pair** -- each trading pair is processed by exactly one `Engine` instance. No locks, no shared mutable state within a pair. Replay verifies recorded outcomes and refuses divergent state. / Каждая торговая пара обрабатывается ровно одним экземпляром `Engine`. Без блокировок, без разделяемого мутабельного состояния. При восстановлении проверяются записанные результаты; расхождение блокирует запуск.
 
 3. **Sharded Router** -- multiple pairs are distributed across worker threads (`ShardedRouterV2`). Each shard owns a subset of engines and runs its own command loop. Crossbeam bounded channels for backpressure. / Несколько пар распределяются по рабочим потокам. Каждый шард владеет подмножеством движков и выполняет свой цикл обработки команд.
 
@@ -216,7 +217,7 @@ cargo run -p me-datagen --release -- \
 
 ## Go Client / Go клиент
 
-A Go client library is provided at `clients/go/meclient/`. It supports both TCP and Unix Domain Socket connections and implements the full binary wire protocol.
+A Go client library is provided at `clients/go/meclient/`. It supports both TCP and Unix Domain Socket connections and implements the order submission and event APIs for protocol v2. Session resume/ACK and complete reconnect orchestration must be supplied by the integrating gateway.
 
 Go клиентская библиотека находится в `clients/go/meclient/`. Поддерживает TCP и Unix Domain Socket соединения, реализует полный бинарный протокол.
 
@@ -243,6 +244,8 @@ See `clients/go/meclient/README.md` for the full wire protocol specification.
 Полная спецификация протокола описана в `clients/go/meclient/README.md`.
 
 ## Performance Characteristics / Характеристики производительности
+
+Engine-only figures below are not a latency SLA for the durable server. Durable requests now sync decision and session journals before delivery; measure the complete path with your storage, TLS and workload.
 
 The engine is designed for low-latency, high-throughput order processing. Key performance properties:
 

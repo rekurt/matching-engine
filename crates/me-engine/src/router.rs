@@ -7,17 +7,6 @@ use std::time::Duration;
 /// stalled disk during WAL fsync) so it cannot hang every client thread.
 const SHARD_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Maximum number of commands a Pre-mode shard accumulates before forcing a
-/// group-commit fsync. Bounds how long a reply can be deferred and how much
-/// memory pending replies hold. Under load the queue rarely drains, so most
-/// fsyncs amortize across a full batch; under light load the queue empties and
-/// the batch commits immediately (no added latency).
-const MAX_GROUP_BATCH: usize = 4096;
-
-/// A processed command awaiting durable commit: (reply channel, order id for an
-/// InternalError reply if the commit fsync fails, the success events).
-type PendingReply = (Sender<Vec<MatchEvent>>, OrderId, Vec<MatchEvent>);
-
 use crossbeam_channel::{bounded, Receiver, Sender};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, info_span, trace};
@@ -39,9 +28,9 @@ use crate::engine::Engine;
 /// WAL mode: when to write the write-ahead log relative to matching.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum WalMode {
-    /// Write WAL before matching (full durability, slightly higher latency).
+    /// Persist the deterministic decision and fsync before replying.
     Pre,
-    /// Write WAL after matching (lower latency, may lose last commands on crash).
+    /// Compatibility alias for durable decision journaling.
     Post,
     /// WAL disabled.
     #[default]
@@ -58,7 +47,7 @@ pub struct WalConfig {
     /// (recovery then replays the entire WAL from genesis).
     pub snapshot_dir: Option<String>,
     /// Take a snapshot of all symbols on the shard every N processed commands,
-    /// then truncate the WAL. `0` disables periodic snapshots.
+    /// retaining the decision journal. `0` disables periodic snapshots.
     pub snapshot_interval: u64,
 }
 
@@ -78,8 +67,7 @@ pub struct AffinityConfig {
 /// Each shard is a dedicated OS thread with its own engines and risk engine.
 /// Strict sequential processing within each symbol, parallelism across symbols.
 ///
-/// Hot path per command:
-///   risk check (~37 ns) → match (~134 ns) → async audit send (~10 ns) = ~180 ns
+/// Commands pass risk checks and matching, then durable decision commit, then audit.
 pub struct Router {
     shards: Vec<Shard>,
     symbol_to_shard: FxHashMap<SymbolId, usize>,
@@ -97,14 +85,46 @@ struct Shard {
     handle: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct DurableRequest {
+    pub session_id: me_core::SessionId,
+    pub request_id: u64,
+    pub item_index: u32,
+    pub events: Vec<MatchEvent>,
+    pub owners: Vec<(OrderId, me_core::SessionId)>,
+    pub expiration_count: usize,
+    pub expiration_owners: Vec<(OrderId, me_core::SessionId)>,
+}
+
 enum ShardMsg {
+    RequestLookup {
+        key: (me_core::SessionId, u64, u32),
+        reply: Sender<Option<DurableRequest>>,
+    },
+    Requests {
+        reply: Sender<Vec<DurableRequest>>,
+    },
+    Health {
+        reply: Sender<()>,
+    },
+    States {
+        reply: Sender<Vec<(SymbolId, bool)>>,
+    },
     Command {
         cmd: Command,
+        request_id: Option<u64>,
+        item_index: u32,
+        /// Session that issued the command, used to enforce order ownership on
+        /// cancel/amend. `SessionId::NONE` is a privileged/internal caller.
+        requesting_session: me_core::SessionId,
         reply: Sender<Vec<MatchEvent>>,
     },
     QueryOrder {
         order_id: OrderId,
         symbol: SymbolId,
+        /// Session that issued the query, used to enforce order ownership.
+        /// `SessionId::NONE` is a privileged/internal caller.
+        requesting_session: me_core::SessionId,
         reply: Sender<Vec<MatchEvent>>,
     },
     /// Query all open orders for a client session across all symbols in this shard.
@@ -183,6 +203,15 @@ impl Router {
         wal_config: Option<WalConfig>,
         affinity: AffinityConfig,
     ) -> Self {
+        assert!(num_shards > 0, "router requires at least one shard");
+        if let Some(cfg) = wal_config
+            .as_ref()
+            .filter(|cfg| cfg.mode != WalMode::Disabled)
+        {
+            if let Err(e) = check_topology(&cfg.path, num_shards) {
+                panic!("durable router topology validation failed: {e}");
+            }
+        }
         let channel_capacity = 4096;
         let mut shards = Vec::with_capacity(num_shards);
 
@@ -249,6 +278,10 @@ impl Router {
     /// a subtly broken server.
     pub fn add_symbol_with_risk(&mut self, config: SymbolConfig, risk_config: Option<RiskConfig>) {
         let id = config.id;
+        assert!(
+            !self.symbol_to_shard.contains_key(&id),
+            "symbol {id:?} is already registered"
+        );
         let shard_idx = (id.0 as usize) % self.num_shards;
         self.symbol_names
             .insert(id, format!("{}/{}", config.base, config.quote));
@@ -264,13 +297,146 @@ impl Router {
         }
     }
 
-    /// Process a command synchronously.
+    /// Process a command synchronously as a privileged/internal caller — no
+    /// per-session ownership enforcement on cancel/amend.
     pub fn process(&self, cmd: Command) -> Vec<MatchEvent> {
+        self.process_with_session(cmd, me_core::SessionId::NONE)
+    }
+
+    /// Process a command synchronously on behalf of `requesting_session`.
+    /// Cancel/amend on an order owned by a different session is rejected with
+    /// `OrderNotFound` inside the engine (see `Engine::process_with_session`).
+    pub fn process_with_session(
+        &self,
+        cmd: Command,
+        requesting_session: me_core::SessionId,
+    ) -> Vec<MatchEvent> {
+        self.process_request(cmd, requesting_session, None, 0)
+    }
+
+    pub fn process_with_request(
+        &self,
+        cmd: Command,
+        session: me_core::SessionId,
+        request_id: u64,
+    ) -> Vec<MatchEvent> {
+        self.process_request(cmd, session, Some(request_id), 0)
+    }
+
+    pub fn process_batch_item(
+        &self,
+        cmd: Command,
+        session: me_core::SessionId,
+        request_id: u64,
+        item_index: u32,
+    ) -> Vec<MatchEvent> {
+        self.process_with_request_item(cmd, session, request_id, item_index)
+    }
+
+    pub fn symbol_states(&self) -> Result<Vec<(SymbolId, bool)>, String> {
+        let mut states = Vec::new();
+        for shard in &self.shards {
+            let (tx, rx) = bounded(1);
+            shard
+                .tx
+                .send_timeout(ShardMsg::States { reply: tx }, SHARD_REPLY_TIMEOUT)
+                .map_err(|e| e.to_string())?;
+            states.extend(
+                rx.recv_timeout(SHARD_REPLY_TIMEOUT)
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+        Ok(states)
+    }
+
+    pub fn process_with_request_item(
+        &self,
+        cmd: Command,
+        session: me_core::SessionId,
+        request_id: u64,
+        item_index: u32,
+    ) -> Vec<MatchEvent> {
+        self.process_request(cmd, session, Some(request_id), item_index)
+    }
+
+    pub fn recovered_requests(&self) -> Result<Vec<DurableRequest>, String> {
+        let mut records = Vec::new();
+        for shard in &self.shards {
+            let (tx, rx) = bounded(1);
+            shard
+                .tx
+                .send_timeout(ShardMsg::Requests { reply: tx }, SHARD_REPLY_TIMEOUT)
+                .map_err(|e| e.to_string())?;
+            records.extend(
+                rx.recv_timeout(SHARD_REPLY_TIMEOUT)
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+        Ok(records)
+    }
+
+    pub fn request_record(
+        &self,
+        session: me_core::SessionId,
+        request_id: u64,
+    ) -> Result<Option<DurableRequest>, String> {
+        self.request_record_item(session, request_id, 0)
+    }
+
+    pub fn request_record_item(
+        &self,
+        session: me_core::SessionId,
+        request_id: u64,
+        item_index: u32,
+    ) -> Result<Option<DurableRequest>, String> {
+        for shard in &self.shards {
+            let (tx, rx) = bounded(1);
+            shard
+                .tx
+                .send_timeout(
+                    ShardMsg::RequestLookup {
+                        key: (session, request_id, item_index),
+                        reply: tx,
+                    },
+                    SHARD_REPLY_TIMEOUT,
+                )
+                .map_err(|e| e.to_string())?;
+            if let Some(record) = rx
+                .recv_timeout(SHARD_REPLY_TIMEOUT)
+                .map_err(|e| e.to_string())?
+            {
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn health(&self) -> Result<(), String> {
+        for shard in &self.shards {
+            let (tx, rx) = bounded(1);
+            shard
+                .tx
+                .send_timeout(ShardMsg::Health { reply: tx }, SHARD_REPLY_TIMEOUT)
+                .map_err(|e| e.to_string())?;
+            rx.recv_timeout(SHARD_REPLY_TIMEOUT)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn process_request(
+        &self,
+        cmd: Command,
+        requesting_session: me_core::SessionId,
+        request_id: Option<u64>,
+        item_index: u32,
+    ) -> Vec<MatchEvent> {
         let symbol = cmd.symbol();
         let ts = cmd.timestamp();
         let order_id = cmd_order_id(&cmd);
         let shard_idx = match self.symbol_to_shard.get(&symbol) {
             Some(&idx) => idx,
+            None if request_id.is_some() => (symbol.0 as usize) % self.num_shards,
             None => {
                 return vec![MatchEvent::OrderRejected {
                     order_id,
@@ -281,12 +447,21 @@ impl Router {
         };
 
         let (reply_tx, reply_rx) = bounded(1);
+        if let Some(metrics) = &self.metrics {
+            metrics.set_shard_queue_depth(shard_idx, self.shards[shard_idx].tx.len() as i64);
+        }
         if self.shards[shard_idx]
             .tx
-            .send(ShardMsg::Command {
-                cmd,
-                reply: reply_tx,
-            })
+            .send_timeout(
+                ShardMsg::Command {
+                    cmd,
+                    requesting_session,
+                    request_id,
+                    item_index,
+                    reply: reply_tx,
+                },
+                SHARD_REPLY_TIMEOUT,
+            )
             .is_err()
         {
             // Shard worker dead — this is NOT SymbolNotFound. Report
@@ -302,6 +477,9 @@ impl Router {
                 reason: RejectReason::InternalError,
                 timestamp: ts,
             }];
+        }
+        if let Some(metrics) = &self.metrics {
+            metrics.set_shard_queue_depth(shard_idx, self.shards[shard_idx].tx.len() as i64);
         }
         reply_rx
             .recv_timeout(SHARD_REPLY_TIMEOUT)
@@ -335,7 +513,10 @@ impl Router {
         let Some(&shard_idx) = self.symbol_to_shard.get(&symbol) else {
             return false;
         };
-        if let Err(e) = self.shards[shard_idx].tx.send(ShardMsg::HaltSymbol(symbol)) {
+        if let Err(e) = self.shards[shard_idx]
+            .tx
+            .send_timeout(ShardMsg::HaltSymbol(symbol), SHARD_REPLY_TIMEOUT)
+        {
             tracing::error!(
                 shard_idx,
                 symbol = ?symbol,
@@ -344,7 +525,7 @@ impl Router {
             );
             return false;
         }
-        true
+        self.health().is_ok()
     }
 
     /// Resume trading for a symbol.
@@ -357,7 +538,7 @@ impl Router {
         };
         if let Err(e) = self.shards[shard_idx]
             .tx
-            .send(ShardMsg::ResumeSymbol(symbol))
+            .send_timeout(ShardMsg::ResumeSymbol(symbol), SHARD_REPLY_TIMEOUT)
         {
             tracing::error!(
                 shard_idx,
@@ -367,24 +548,43 @@ impl Router {
             );
             return false;
         }
-        true
+        self.health().is_ok()
     }
 
-    /// Query order status.
+    /// Query order status as a privileged/internal caller — no ownership check.
     pub fn query_order(&self, order_id: OrderId, symbol: SymbolId) -> Vec<MatchEvent> {
+        self.query_order_for_session(order_id, symbol, me_core::SessionId::NONE)
+    }
+
+    /// Query order status on behalf of `requesting_session`. A query for an
+    /// order owned by another session returns `OrderNotFound`, preventing
+    /// enumeration of other clients' orders by id.
+    pub fn query_order_for_session(
+        &self,
+        order_id: OrderId,
+        symbol: SymbolId,
+        requesting_session: me_core::SessionId,
+    ) -> Vec<MatchEvent> {
         let shard_idx = match self.symbol_to_shard.get(&symbol) {
             Some(&idx) => idx,
             None => return vec![MatchEvent::OrderNotFound { order_id }],
         };
 
         let (reply_tx, reply_rx) = bounded(1);
+        if let Some(metrics) = &self.metrics {
+            metrics.set_shard_queue_depth(shard_idx, self.shards[shard_idx].tx.len() as i64);
+        }
         if self.shards[shard_idx]
             .tx
-            .send(ShardMsg::QueryOrder {
-                order_id,
-                symbol,
-                reply: reply_tx,
-            })
+            .send_timeout(
+                ShardMsg::QueryOrder {
+                    order_id,
+                    symbol,
+                    requesting_session,
+                    reply: reply_tx,
+                },
+                SHARD_REPLY_TIMEOUT,
+            )
             .is_err()
         {
             // Shard worker dead: DO NOT mask as OrderNotFound. The order
@@ -401,6 +601,9 @@ impl Router {
                 reason: RejectReason::InternalError,
                 timestamp: 0,
             }];
+        }
+        if let Some(metrics) = &self.metrics {
+            metrics.set_shard_queue_depth(shard_idx, self.shards[shard_idx].tx.len() as i64);
         }
         reply_rx
             .recv_timeout(SHARD_REPLY_TIMEOUT)
@@ -443,10 +646,13 @@ impl Router {
             let (tx, rx) = bounded(1);
             if shard
                 .tx
-                .send(ShardMsg::GetOpenOrdersBySession {
-                    session_id,
-                    reply: tx,
-                })
+                .send_timeout(
+                    ShardMsg::GetOpenOrdersBySession {
+                        session_id,
+                        reply: tx,
+                    },
+                    SHARD_REPLY_TIMEOUT,
+                )
                 .is_err()
             {
                 tracing::error!(shard_idx, "OpenOrders snapshot ABORTED: shard dead");
@@ -459,7 +665,7 @@ impl Router {
 
         // Collect responses (blocking; each shard replies quickly).
         for rx in replies {
-            match rx.recv() {
+            match rx.recv_timeout(SHARD_REPLY_TIMEOUT) {
                 Ok(orders) => all_orders.extend(orders),
                 Err(e) => {
                     tracing::error!(
@@ -504,6 +710,34 @@ impl Router {
     }
 }
 
+fn check_topology(path: &str, shards: usize) -> std::io::Result<()> {
+    use std::io::{Read, Write};
+    let dir = std::path::Path::new(path);
+    me_persist::create_dir_all_durable(dir)?;
+    let manifest = dir.join("topology");
+    let expected = format!("decision-journal-v1\nshards={shards}\n");
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&manifest)
+    {
+        Ok(mut file) => {
+            file.write_all(expected.as_bytes())?;
+            file.sync_all()?;
+            std::fs::File::open(dir)?.sync_all()?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let mut actual = String::new();
+            std::fs::File::open(manifest)?.read_to_string(&mut actual)?;
+            if actual != expected {
+                return Err(std::io::Error::other("journal topology mismatch"));
+            }
+        }
+        Err(e) => return Err(e),
+    }
+    Ok(())
+}
+
 // ─── Shard worker loop (hot path) ───────────────────────────────────────────
 
 fn shard_worker_loop(
@@ -527,31 +761,120 @@ fn shard_worker_loop(
         wal_mode,
     } = init_wal_and_recover(shard_id, wal_config);
 
-    let wal_pre_open_failed = wal_mode == WalMode::Pre && wal.is_none();
+    let wal_pre_open_failed = wal_mode != WalMode::Disabled && wal.is_none();
     if wal_pre_open_failed {
         tracing::error!(
             shard_id,
-            "WAL pre-mode configured but writer is unavailable; shard will reject all commands to preserve durability"
+            "WAL configured but unavailable; terminating shard"
         );
     }
+    if wal_pre_open_failed {
+        return;
+    }
+    let recovered_requests: Vec<DurableRequest> = replay_entries
+        .iter()
+        .filter_map(|entry| {
+            if let WalCommand::Decision {
+                session_id,
+                request_id: Some(request_id),
+                item_index,
+                events,
+                expirations,
+                expiration_owners,
+                owners,
+                ..
+            } = &entry.command
+            {
+                Some(DurableRequest {
+                    session_id: *session_id,
+                    request_id: *request_id,
+                    item_index: *item_index,
+                    events: expirations.iter().chain(events).cloned().collect(),
+                    owners: owners.clone(),
+                    expiration_count: expirations.len(),
+                    expiration_owners: expiration_owners.clone(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+    let mut request_order: Vec<_> = recovered_requests
+        .iter()
+        .map(|r| (r.session_id, r.request_id, r.item_index))
+        .collect();
+    let mut requests: FxHashMap<_, _> = recovered_requests
+        .into_iter()
+        .map(|r| ((r.session_id, r.request_id, r.item_index), r))
+        .collect();
+    let mut owner_index: FxHashMap<(SymbolId, OrderId), me_core::SessionId> = FxHashMap::default();
+    let registered_symbols: FxHashSet<_> = replay_entries
+        .iter()
+        .filter_map(|entry| match entry.command {
+            WalCommand::SymbolConfig { symbol, .. } => Some(symbol),
+            _ => None,
+        })
+        .collect();
     let mut commands_since_snapshot: u64 = 0;
 
-    // Group commit applies only to Pre-mode (the mode that must fsync before
-    // acknowledging). Post/Disabled keep their existing immediate-reply path.
-    let group_commit = wal_mode == WalMode::Pre && wal.is_some();
-    let mut pending: Vec<PendingReply> = Vec::new();
-
     while let Ok(msg) = rx.recv() {
-        // Flush any deferred group-commit batch before handling a control
-        // message, so replies stay ordered and durability is committed at
-        // message boundaries.
-        if !matches!(msg, ShardMsg::Command { .. }) && !pending.is_empty() {
-            commit_and_flush(shard_id, &mut wal, &mut engines, &mut pending);
+        if let Some(metrics) = &metrics {
+            metrics.set_shard_queue_depth(shard_id, rx.len() as i64);
         }
         match msg {
-            ShardMsg::Command { cmd, reply } => {
-                let symbol = cmd.symbol();
+            ShardMsg::RequestLookup { key, reply } => {
+                let _ = reply.send(requests.get(&key).cloned());
+            }
+            ShardMsg::States { reply } => {
+                let _ = reply.send(
+                    engines
+                        .iter()
+                        .map(|(id, engine)| {
+                            (
+                                *id,
+                                engine.trading_state() == crate::engine::TradingState::Active,
+                            )
+                        })
+                        .collect(),
+                );
+            }
+            ShardMsg::Health { reply } => {
+                if registered_symbols
+                    .iter()
+                    .all(|symbol| engines.contains_key(symbol))
+                {
+                    let _ = reply.send(());
+                }
+            }
+            ShardMsg::Requests { reply } => {
+                let _ = reply.send(
+                    request_order
+                        .iter()
+                        .filter_map(|key| requests.get(key).cloned())
+                        .collect(),
+                );
+            }
+            ShardMsg::Command {
+                cmd,
+                requesting_session,
+                request_id,
+                item_index,
+                reply,
+            } => {
+                if let Some(id) = request_id {
+                    if let Some(record) = requests.get(&(requesting_session, id, item_index)) {
+                        let _ = reply.send(record.events.clone());
+                        continue;
+                    }
+                }
+                let incoming_owner = match &cmd {
+                    Command::PlaceOrder(o) => Some((o.id, o.client_session_id)),
+                    _ => None,
+                };
                 let reply_order_id = cmd_order_id(&cmd);
+                let journal_command = command_to_wal(&cmd);
+                let processing_timestamp = me_clock::Clock::now_ns(&me_clock::SystemClock);
+                let symbol = cmd.symbol();
                 let sym_name = symbol_names
                     .get(&symbol)
                     .map(|s| s.as_str())
@@ -580,126 +903,30 @@ fn shard_worker_loop(
 
                 trace!(symbol = sym_name, cmd_type = cmd_type_str, "processing");
 
-                // ── Hot path: WAL(pre) → Risk → Match → WAL(post) → Audit ──
+                // Risk → matching → durable decision → audit.
 
                 let start = std::time::Instant::now();
 
-                // For post-mode WAL, we need the command after matching (which consumes it).
-                // Clone only when WAL post-mode is active.
-                let wal_cmd_for_post = if wal_mode == WalMode::Post {
-                    Some(command_to_wal(&cmd))
-                } else {
-                    None
-                };
-
-                // 0. Lazy GTD expiry sweep — runs BEFORE journaling/risk-checking
-                // this command. Two reasons:
-                //   1. An already-expired GTD frees its open-order slot so
-                //      max_open_orders does not spuriously reject this command.
-                //   2. DURABILITY/DETERMINISM: each expiry is journaled as a
-                //      CancelOrder *before* the triggering command, so crash
-                //      recovery replays the cancellation at the same log
-                //      position. Recovery never re-runs the wall-clock sweep, so
-                //      without this record replay would resurrect the expired GTD
-                //      and let it phantom-match a later order — diverging the
-                //      recovered book from the live one.
-                // The expiry cancellations are metered/audited and decrement the
-                // open-order count, but are not part of this command's reply.
-                let mut wal_pre_write_failed = false;
-                if let Some(engine) = engines.get_mut(&symbol) {
-                    let expired = engine.expire_gtd_now();
-                    if !expired.is_empty() {
-                        for ev in &expired {
-                            if let MatchEvent::OrderCancelled {
-                                order_id,
-                                timestamp,
-                                ..
-                            } = ev
-                            {
-                                // Journal the expiry as a durable cancel. Pre-mode
-                                // buffers it (group-committed alongside the
-                                // command); Post-mode appends immediately, ahead
-                                // of the command's own post-write. Either way the
-                                // expiry precedes the command in the log.
-                                if let Some(ref mut w) = wal {
-                                    let expiry_cmd = WalCommand::CancelOrder {
-                                        order_id: *order_id,
-                                        symbol,
-                                        timestamp: *timestamp,
-                                    };
-                                    let res = match wal_mode {
-                                        WalMode::Pre => w.append_nosync(&expiry_cmd),
-                                        WalMode::Post => w.append(&expiry_cmd),
-                                        // Unreachable: a present writer implies a
-                                        // non-Disabled mode. Treat as no-op.
-                                        WalMode::Disabled => Ok(0),
-                                    };
-                                    if let Err(e) = res {
-                                        tracing::error!(
-                                            shard_id, order_id, error = %e,
-                                            "WAL GTD-EXPIRY WRITE FAILED — recovery would diverge"
-                                        );
-                                        // The expiry already mutated the book and
-                                        // risk counters but is not journaled; the
-                                        // response depends on the WAL mode (see
-                                        // wal_expiry_failure_action).
-                                        let action = wal_expiry_failure_action(&wal_mode);
-                                        if action.reject_triggering_command {
-                                            wal_pre_write_failed = true;
-                                        }
-                                        if action.halt_symbol {
-                                            engine.halt_trading();
-                                        }
-                                    }
-                                }
-                                risk.on_order_removed(symbol);
-                            }
-                        }
-                        if let Some(ref a) = audit {
-                            for ev in &expired {
-                                if let Some(entry) = match_event_to_entry(ev, symbol) {
-                                    a.log_entry(entry);
-                                }
-                            }
-                        }
-                        if let Some(ref m) = metrics {
-                            m.record_events(&expired, sym_name, std::time::Duration::ZERO);
-                        }
-                    }
-                }
-
-                // 0.5. WAL pre-trade write of THIS command — AFTER the expiry
-                // cancels above, so any expiries precede it in the log.
-                //
-                // DURABILITY CONTRACT: Pre-mode guarantees that every accepted
-                // command is journaled BEFORE execution. If the write fails we
-                // MUST reject the order — otherwise a crash immediately after
-                // matching would lose the trade, violating the contract.
-                if wal_mode == WalMode::Pre && !wal_pre_write_failed {
-                    if let Some(ref mut w) = wal {
-                        let wal_cmd = command_to_wal(&cmd);
-                        // Buffered append only; the batch is fsynced once in
-                        // commit_and_flush before any reply is released.
-                        if let Err(e) = w.append_nosync(&wal_cmd) {
-                            tracing::error!(
-                                shard_id, error = %e,
-                                "WAL PRE-WRITE FAILED — rejecting order (durability violated)"
-                            );
-                            wal_pre_write_failed = true;
-                        }
-                    } else {
-                        tracing::error!(
-                            shard_id,
-                            "WAL PRE-WRITE SKIPPED — writer unavailable, rejecting order (durability violated)"
-                        );
-                        wal_pre_write_failed = true;
+                let expirations = engines
+                    .get_mut(&symbol)
+                    .map_or_else(Vec::new, Engine::expire_gtd_now);
+                let expiration_owners: Vec<_> = expirations
+                    .iter()
+                    .filter_map(|event| match event {
+                        MatchEvent::OrderCancelled { order_id, .. } => owner_index
+                            .get(&(symbol, *order_id))
+                            .map(|owner| (*order_id, *owner)),
+                        _ => None,
+                    })
+                    .collect();
+                for event in &expirations {
+                    if matches!(event, MatchEvent::OrderCancelled { .. }) {
+                        risk.on_order_removed(symbol);
                     }
                 }
 
                 // 1. Pre-trade risk check (PlaceOrder only)
-                let risk_rejected = if wal_pre_write_failed {
-                    false
-                } else {
+                let risk_rejected = {
                     match &cmd {
                         Command::PlaceOrder(order) => {
                             if let Some(ref a) = audit {
@@ -718,17 +945,25 @@ fn shard_worker_loop(
                                 }
                             }
                         }
+                        Command::AmendOrder {
+                            order_id,
+                            new_price,
+                            new_qty,
+                            ..
+                        } => engines
+                            .get(&symbol)
+                            .filter(|engine| {
+                                engine.is_mutation_authorized(*order_id, requesting_session)
+                            })
+                            .and_then(|engine| {
+                                engine.amended_order(*order_id, *new_price, *new_qty).ok()
+                            })
+                            .is_some_and(|order| risk.check_amend(&order).is_err()),
                         _ => false,
                     }
                 };
 
-                let incoming_order_id = match &cmd {
-                    Command::PlaceOrder(order) => Some(order.id),
-                    _ => None,
-                };
-
-                let events = if wal_pre_write_failed {
-                    // Pre-mode WAL guarantee broken — reject without matching.
+                let events = if risk_rejected {
                     let (order_id, ts) = match &cmd {
                         Command::PlaceOrder(o) => (o.id, o.timestamp),
                         Command::CancelOrder {
@@ -744,99 +979,126 @@ fn shard_worker_loop(
                     };
                     vec![MatchEvent::OrderRejected {
                         order_id,
-                        reason: RejectReason::InternalError,
-                        timestamp: ts,
-                    }]
-                } else if risk_rejected {
-                    let (order_id, ts) = match &cmd {
-                        Command::PlaceOrder(o) => (o.id, o.timestamp),
-                        _ => unreachable!(),
-                    };
-                    vec![MatchEvent::OrderRejected {
-                        order_id,
                         reason: RejectReason::RiskCheckFailed,
                         timestamp: ts,
                     }]
                 } else if let Some(engine) = engines.get_mut(&symbol) {
                     // 2. Matching (GTD expiry was already swept above, before the
                     // risk check, so expired orders never count against limits).
-                    let events = engine.process(cmd).to_vec();
-
-                    // 3. Post-trade risk state updates
-                    let triggered_order_ids: FxHashSet<_> = events
-                        .iter()
-                        .filter_map(|event| match event {
-                            MatchEvent::StopTriggered { order_id, .. } => Some(*order_id),
-                            _ => None,
-                        })
-                        .collect();
+                    // Ownership of cancel/amend is enforced here against the
+                    // issuing session.
+                    engine.set_risk_config(risk.config(symbol).cloned());
+                    let events = engine
+                        .process_with_session_at(cmd, requesting_session, processing_timestamp)
+                        .to_vec();
 
                     for event in &events {
-                        match event {
-                            // Stop orders are accepted once when inserted into stop_book,
-                            // then accepted again when triggered into the live book.
-                            // Count only the original client order acceptance (current cmd)
-                            // and skip synthetic acceptances produced by stop triggers.
-                            MatchEvent::OrderAccepted { order_id, .. }
-                                if Some(*order_id) == incoming_order_id
-                                    && !triggered_order_ids.contains(order_id) =>
-                            {
-                                risk.on_order_added(symbol);
-                            }
-                            MatchEvent::OrderFilled { .. } | MatchEvent::OrderCancelled { .. } => {
-                                risk.on_order_removed(symbol);
-                            }
-                            // A triggered stop rejected by self-trade prevention was
-                            // counted as an open order at placement and is now gone
-                            // from both books, so release its slot. The only
-                            // OrderRejected reachable post-matching is this
-                            // trigger-loop STP rejection (a normal place-path
-                            // rejection short-circuits before this accounting), and
-                            // it is paired with a StopTriggered this command, hence
-                            // the triggered_order_ids guard.
-                            MatchEvent::OrderRejected { order_id, .. }
-                                if triggered_order_ids.contains(order_id) =>
-                            {
-                                risk.on_order_removed(symbol);
-                            }
-                            MatchEvent::Trade(t) => {
-                                risk.update_reference_price(symbol, t.price);
-                            }
-                            _ => {}
+                        if let MatchEvent::Trade(trade) = event {
+                            risk.update_reference_price(symbol, trade.price);
                         }
                     }
 
                     events
                 } else {
                     vec![MatchEvent::OrderRejected {
-                        order_id: 0,
+                        order_id: reply_order_id,
                         reason: RejectReason::SymbolNotFound,
                         timestamp: cmd.timestamp(),
                     }]
                 };
 
-                // 4. WAL post-trade write (if mode == Post)
-                //
-                // CRITICAL: If the write fails, the trade is already applied to the
-                // book and audit log but NOT journaled. On crash, book-to-WAL
-                // divergence occurs. We halt the affected symbol so operators can
-                // investigate, and log at CRITICAL level. Continuing to match without
-                // a working WAL would silently lose every subsequent trade.
-                if !risk_rejected {
-                    if let (Some(ref mut w), Some(wal_cmd)) = (&mut wal, wal_cmd_for_post) {
-                        if let Err(e) = w.append(&wal_cmd) {
-                            tracing::error!(
-                                shard_id,
-                                symbol = sym_name,
-                                error = %e,
-                                "WAL POST-WRITE FAILED — halting symbol to prevent silent data loss"
-                            );
-                            // Halt the symbol to prevent further un-journaled trades.
-                            if let Some(engine) = engines.get_mut(&symbol) {
-                                engine.halt_trading();
-                            }
+                if let Some(engine) = engines.get(&symbol) {
+                    risk.set_open_order_count(
+                        symbol,
+                        (engine.book().order_count() + engine.stop_book().len())
+                            .try_into()
+                            .unwrap_or(u32::MAX),
+                    );
+                }
+                let mut affected = FxHashSet::default();
+                for event in expirations.iter().chain(&events) {
+                    match event {
+                        MatchEvent::Trade(t) => {
+                            affected.insert(t.maker_order_id);
+                            affected.insert(t.taker_order_id);
+                        }
+                        MatchEvent::OrderAccepted { order_id, .. }
+                        | MatchEvent::OrderRejected { order_id, .. }
+                        | MatchEvent::OrderPartiallyFilled { order_id, .. }
+                        | MatchEvent::OrderFilled { order_id, .. }
+                        | MatchEvent::OrderCancelled { order_id, .. }
+                        | MatchEvent::OrderAmended { order_id, .. }
+                        | MatchEvent::StopTriggered { order_id, .. }
+                        | MatchEvent::OrderStatus { order_id, .. }
+                        | MatchEvent::OrderNotFound { order_id } => {
+                            affected.insert(*order_id);
                         }
                     }
+                }
+                if let Some((id, owner)) = incoming_owner {
+                    if events.iter().any(|event| matches!(event, MatchEvent::OrderAccepted { order_id, .. } if *order_id == id)) {
+                        owner_index.insert((symbol, id), owner);
+                    }
+                }
+                let owners: Vec<_> = affected
+                    .iter()
+                    .filter_map(|id| owner_index.get(&(symbol, *id)).map(|owner| (*id, *owner)))
+                    .collect();
+                for id in &affected {
+                    let owner = engines
+                        .get(&symbol)
+                        .and_then(|engine| {
+                            engine
+                                .book()
+                                .get_order(*id)
+                                .or_else(|| engine.stop_book().get(*id))
+                        })
+                        .map(|order| order.client_session_id);
+                    if let Some(owner) = owner {
+                        owner_index.insert((symbol, *id), owner);
+                    } else {
+                        owner_index.remove(&(symbol, *id));
+                    }
+                }
+                if let Some(w) = wal.as_mut() {
+                    let apply = !risk_rejected && engines.contains_key(&symbol);
+                    let decision = WalCommand::Decision {
+                        command: Box::new(journal_command),
+                        session_id: requesting_session,
+                        request_id,
+                        item_index,
+                        events: events.clone(),
+                        expirations: expirations.clone(),
+                        expiration_owners: expiration_owners.clone(),
+                        owners: owners.clone(),
+                        processing_timestamp,
+                        apply,
+                    };
+                    if let Err(e) = w
+                        .append_nosync(&decision)
+                        .and_then(|_| sync_wal(w, metrics.as_deref()))
+                    {
+                        tracing::error!(shard_id, error = %e, "decision journal failed; terminating shard");
+                        return;
+                    }
+                }
+                let expiration_count = expirations.len();
+                let events: Vec<_> = expirations.into_iter().chain(events).collect();
+                if let Some(request_id) = request_id {
+                    let key = (requesting_session, request_id, item_index);
+                    request_order.push(key);
+                    requests.insert(
+                        key,
+                        DurableRequest {
+                            session_id: requesting_session,
+                            request_id,
+                            item_index,
+                            events: events.clone(),
+                            owners,
+                            expiration_count,
+                            expiration_owners,
+                        },
+                    );
                 }
 
                 // 5. Async audit (non-blocking SPSC send)
@@ -874,46 +1136,23 @@ fn shard_worker_loop(
 
                 commands_since_snapshot += 1;
 
-                if group_commit {
-                    // Defer the reply until the batch is fsynced. Commit when
-                    // the batch is full or the inbound queue has drained (so a
-                    // lone command under light load still acks immediately).
-                    pending.push((reply, reply_order_id, events));
-                    if pending.len() >= MAX_GROUP_BATCH || rx.is_empty() {
-                        commit_and_flush(shard_id, &mut wal, &mut engines, &mut pending);
-                        maybe_snapshot(
-                            shard_id,
-                            snapshot_interval,
-                            &mut commands_since_snapshot,
-                            &engines,
-                            &mut wal,
-                            &snapshot_mgr,
-                        );
-                    }
-                } else {
-                    if reply.send(events).is_err() {
-                        // Caller timed out / dropped receiver. Events were
-                        // applied to state (book updated, WAL written, audit
-                        // logged) — risk of client-server inconsistency.
-                        tracing::warn!(
-                            shard_id,
-                            symbol = sym_name,
-                            "reply dropped: caller lost response AFTER state mutation"
-                        );
-                    }
-                    maybe_snapshot(
-                        shard_id,
-                        snapshot_interval,
-                        &mut commands_since_snapshot,
-                        &engines,
-                        &mut wal,
-                        &snapshot_mgr,
-                    );
+                if reply.send(events).is_err() {
+                    tracing::warn!(shard_id, "reply dropped after decision commit");
                 }
+                maybe_snapshot(
+                    shard_id,
+                    snapshot_interval,
+                    &mut commands_since_snapshot,
+                    &engines,
+                    &mut wal,
+                    &snapshot_mgr,
+                );
             }
+
             ShardMsg::QueryOrder {
                 order_id,
                 symbol,
+                requesting_session,
                 reply,
             } => {
                 let events = if let Some(engine) = engines.get(&symbol) {
@@ -925,7 +1164,19 @@ fn shard_worker_loop(
                         .book()
                         .get_order(order_id)
                         .or_else(|| engine.stop_book().get(order_id));
-                    match found {
+                    // Enforce ownership: a client may only query its own orders.
+                    // A real session querying another session's order gets
+                    // OrderNotFound (no enumeration). NONE (internal/admin) and
+                    // NONE-owned orders are exempt, mirroring cancel/amend.
+                    let owned = match found {
+                        Some(order) => {
+                            requesting_session.is_none()
+                                || order.client_session_id.is_none()
+                                || order.client_session_id == requesting_session
+                        }
+                        None => true,
+                    };
+                    match found.filter(|_| owned) {
                         Some(order) => {
                             // Use cumulative/open quantities so an iceberg reports
                             // its true filled and open size, not the visible slice
@@ -980,33 +1231,84 @@ fn shard_worker_loop(
                 risk_config,
             } => {
                 let id = config.id;
+                let fingerprint = format!("{config:?}|{risk_config:?}");
+                let saved = replay_entries
+                    .iter()
+                    .find_map(|entry| match &entry.command {
+                        WalCommand::SymbolConfig {
+                            symbol,
+                            fingerprint,
+                        } if *symbol == id => Some(fingerprint),
+                        _ => None,
+                    });
+                if saved.is_some_and(|previous| previous != &fingerprint) {
+                    tracing::error!(
+                        shard_id,
+                        "symbol/risk configuration changed; recovery refused"
+                    );
+                    return;
+                }
                 let name = format!("{}/{}", config.base, config.quote);
                 symbol_names.insert(id, name);
                 let stp = risk_config
                     .as_ref()
                     .map(|rc| rc.self_trade_prevention)
                     .unwrap_or(false);
-                if let Some(rc) = risk_config {
+                if let Some(rc) = risk_config.clone() {
                     risk.add_symbol(rc);
                 }
-                // Recover this symbol's state from the latest snapshot plus any
-                // WAL records written after the snapshot watermark, before the
-                // engine starts accepting live commands.
+                // Replay authoritative decisions before accepting live commands.
                 let mut engine = Engine::new(config);
                 engine.set_self_trade_prevention(stp);
-                let open = recover_symbol(
+                engine.set_risk_config(risk_config);
+                let open = match recover_symbol(
                     shard_id,
                     id,
                     &mut engine,
                     &replay_entries,
                     snapshot_mgr.as_ref(),
-                );
+                    &mut risk,
+                ) {
+                    Ok(open) => open,
+                    Err(e) => {
+                        tracing::error!(error = %e, "symbol recovery failed");
+                        return;
+                    }
+                };
+                if saved.is_none() {
+                    if let Some(w) = wal.as_mut() {
+                        if w.append_nosync(&WalCommand::SymbolConfig {
+                            symbol: id,
+                            fingerprint,
+                        })
+                        .and_then(|_| sync_wal(w, metrics.as_deref()))
+                        .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
                 if open > 0 {
                     risk.set_open_order_count(id, open);
+                }
+                let snapshot = engine.snapshot();
+                for order in snapshot.resting_orders.iter().chain(&snapshot.stop_orders) {
+                    owner_index.insert((id, order.id), order.client_session_id);
                 }
                 engines.insert(id, engine);
             }
             ShardMsg::HaltSymbol(symbol) => {
+                if let Some(w) = wal.as_mut() {
+                    if w.append_nosync(&WalCommand::TradingState {
+                        symbol,
+                        halted: true,
+                    })
+                    .and_then(|_| sync_wal(w, metrics.as_deref()))
+                    .is_err()
+                    {
+                        return;
+                    }
+                }
                 if let Some(engine) = engines.get_mut(&symbol) {
                     engine.halt_trading();
                     risk.halt_trading(symbol);
@@ -1014,6 +1316,17 @@ fn shard_worker_loop(
                 }
             }
             ShardMsg::ResumeSymbol(symbol) => {
+                if let Some(w) = wal.as_mut() {
+                    if w.append_nosync(&WalCommand::TradingState {
+                        symbol,
+                        halted: false,
+                    })
+                    .and_then(|_| sync_wal(w, metrics.as_deref()))
+                    .is_err()
+                    {
+                        return;
+                    }
+                }
                 if let Some(engine) = engines.get_mut(&symbol) {
                     engine.resume_trading();
                     risk.resume_trading(symbol);
@@ -1024,15 +1337,9 @@ fn shard_worker_loop(
         }
     }
 
-    // Commit any deferred group-commit batch before exiting so in-flight
-    // callers get their replies and the records are made durable.
-    if !pending.is_empty() {
-        commit_and_flush(shard_id, &mut wal, &mut engines, &mut pending);
-    }
-
     // Flush WAL on shutdown
     if let Some(ref mut w) = wal {
-        if let Err(e) = w.flush() {
+        if let Err(e) = sync_wal(w, metrics.as_deref()) {
             tracing::error!(
                 shard_id,
                 error = %e,
@@ -1040,6 +1347,15 @@ fn shard_worker_loop(
             );
         }
     }
+}
+
+fn sync_wal(wal: &mut WalWriter, metrics: Option<&EngineMetrics>) -> std::io::Result<()> {
+    let start = std::time::Instant::now();
+    let result = wal.sync();
+    if let Some(metrics) = metrics {
+        metrics.record_wal_flush_duration(start.elapsed());
+    }
+    result
 }
 
 /// Extract the order_id from any Command variant for traceability on errors.
@@ -1062,9 +1378,7 @@ struct WalInit {
     wal_mode: WalMode,
 }
 
-/// Open the shard's WAL, crash-tolerantly scan any existing records (truncating
-/// a torn tail), and prepare the snapshot manager. The scanned entries are
-/// returned for per-symbol replay as engines are added.
+/// Strictly validate the journal, preserving damaged files for operator recovery.
 fn init_wal_and_recover(shard_id: usize, wal_config: Option<WalConfig>) -> WalInit {
     let empty = |wal_mode| WalInit {
         wal: None,
@@ -1083,7 +1397,7 @@ fn init_wal_and_recover(shard_id: usize, wal_config: Option<WalConfig>) -> WalIn
 
     let wal_path = format!("{}/shard_{}.wal", cfg.path, shard_id);
     if let Some(parent) = std::path::Path::new(&wal_path).parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
+        if let Err(e) = me_persist::create_dir_all_durable(parent) {
             tracing::error!(
                 shard_id,
                 parent = %parent.display(),
@@ -1093,61 +1407,52 @@ fn init_wal_and_recover(shard_id: usize, wal_config: Option<WalConfig>) -> WalIn
         }
     }
 
-    // Crash-tolerant recovery scan of any existing WAL.
+    let writer = match WalWriter::open(&wal_path, cfg.sync_interval) {
+        Ok(writer) => writer,
+        Err(e) => {
+            tracing::error!(error = %e, "WAL lock/open failed");
+            return empty(wal_mode);
+        }
+    };
     let mut replay_entries = Vec::new();
-    let mut resume_seq = 0u64;
-    if std::path::Path::new(&wal_path).exists() {
-        match WalReader::open(&wal_path) {
-            Ok(mut reader) => {
-                let result = reader.read_recoverable();
-                if let Some(reason) = &result.truncated {
-                    tracing::warn!(
-                        shard_id,
-                        reason = %reason,
-                        valid_bytes = result.valid_bytes,
-                        "WAL torn/corrupt tail; truncating to last good record"
-                    );
-                    if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&wal_path) {
-                        if let Err(e) = f.set_len(result.valid_bytes) {
-                            tracing::error!(shard_id, error = %e, "WAL tail truncation failed");
-                        }
+    match WalReader::open(&wal_path) {
+        Ok(mut reader) => match reader.read_all() {
+            Ok(entries) => {
+                for (index, entry) in entries.iter().enumerate() {
+                    if entry.sequence != index as u64 + 1 {
+                        tracing::error!(
+                            shard_id,
+                            "noncontiguous or compacted WAL; recovery refused"
+                        );
+                        return empty(wal_mode);
                     }
                 }
-                resume_seq = result.entries.last().map_or(0, |e| e.sequence);
-                replay_entries = result.entries;
-                tracing::info!(
-                    shard_id,
-                    records = replay_entries.len(),
-                    resume_seq,
-                    "WAL recovery scan complete"
-                );
+                replay_entries = entries;
             }
-            Err(e) => tracing::error!(shard_id, error = %e, "Failed to open WAL for recovery"),
+            Err(e) => {
+                tracing::error!(error = %e, "WAL recovery refused; damaged journal retained");
+                return empty(wal_mode);
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            tracing::error!(error = %e, "WAL recovery failed");
+            return empty(wal_mode);
         }
     }
 
-    let wal = match WalWriter::open(&wal_path, cfg.sync_interval) {
-        Ok(mut w) => {
-            w.set_sequence(resume_seq);
-            debug!(shard_id, path = %wal_path, "WAL writer ready");
-            Some(w)
-        }
-        Err(e) => {
-            tracing::error!(shard_id, error = %e, "Failed to open WAL writer");
-            None
-        }
-    };
+    let wal = Some(writer);
 
-    let snapshot_mgr = cfg
-        .snapshot_dir
-        .as_ref()
-        .and_then(|dir| match SnapshotManager::new(dir) {
-            Ok(m) => Some(m),
+    let snapshot_mgr = match cfg.snapshot_dir.as_ref() {
+        Some(dir) => match SnapshotManager::new(dir) {
+            Ok(mgr) => Some(mgr),
             Err(e) => {
-                tracing::error!(shard_id, dir = %dir, error = %e, "Failed to init snapshot manager");
-                None
+                tracing::error!(error = %e, "snapshot directory unavailable");
+                return empty(wal_mode);
             }
-        });
+        },
+        None => None,
+    };
 
     WalInit {
         wal,
@@ -1157,107 +1462,122 @@ fn init_wal_and_recover(shard_id: usize, wal_config: Option<WalConfig>) -> WalIn
     }
 }
 
-/// Restore one symbol's engine from its latest snapshot, then replay WAL
-/// records written after the snapshot watermark. Returns the resulting open
-/// order count (resting + pending stop) so the risk engine can be re-seeded.
+/// Rebuild a symbol from its full decision history and validate replayed events.
 fn recover_symbol(
-    shard_id: usize,
+    _shard_id: usize,
     id: SymbolId,
     engine: &mut Engine,
     replay_entries: &[WalEntry],
     snapshot_mgr: Option<&SnapshotManager>,
-) -> u32 {
-    let mut watermark = 0u64;
+    risk: &mut RiskEngine,
+) -> std::io::Result<u32> {
+    let mut watermark = 0;
     if let Some(mgr) = snapshot_mgr {
-        match mgr.load_latest(id) {
-            Ok(Some(snap)) => {
-                watermark = snap.wal_sequence;
-                engine.apply_snapshot(snap);
-                tracing::info!(shard_id, symbol = ?id, watermark, "restored snapshot");
+        if let Some(snap) = match mgr.load_latest(id) {
+            Ok(snapshot) => snapshot,
+            Err(e)
+                if replay_entries
+                    .first()
+                    .is_some_and(|entry| entry.sequence == 1) =>
+            {
+                tracing::warn!(error = %e, "damaged checkpoint ignored; replaying complete decision journal");
+                None
             }
-            Ok(None) => {}
-            Err(e) => tracing::error!(
-                shard_id,
-                symbol = ?id,
-                error = %e,
-                "snapshot load failed; replaying full WAL for this symbol"
-            ),
+            Err(e) => return Err(e),
+        } {
+            if replay_entries
+                .first()
+                .is_none_or(|entry| entry.sequence != 1)
+            {
+                // Legacy compacted journals have no complete decision history.
+                return Err(std::io::Error::other(
+                    "compacted legacy journal requires explicit migration",
+                ));
+            }
+            watermark = snap.wal_sequence;
         }
     }
-
-    let mut replayed = 0u64;
-    for entry in replay_entries {
-        if entry.sequence > watermark && entry.command.symbol() == id {
-            engine.process(wal_to_command(&entry.command));
-            replayed += 1;
+    if watermark > replay_entries.last().map_or(0, |e| e.sequence) {
+        return Err(std::io::Error::other("snapshot ahead of journal"));
+    }
+    for entry in replay_entries
+        .iter()
+        .filter(|entry| entry.command.symbol() == id)
+    {
+        match &entry.command {
+            WalCommand::Decision {
+                command,
+                session_id,
+                events,
+                expirations,
+                processing_timestamp,
+                apply,
+                ..
+            } => {
+                for expiration in expirations {
+                    if let MatchEvent::OrderCancelled {
+                        order_id,
+                        timestamp,
+                        ..
+                    } = expiration
+                    {
+                        let actual = engine.process(Command::CancelOrder {
+                            order_id: *order_id,
+                            symbol: id,
+                            timestamp: *timestamp,
+                        });
+                        if actual != std::slice::from_ref(expiration) {
+                            return Err(std::io::Error::other("expiry replay divergence"));
+                        }
+                    } else {
+                        return Err(std::io::Error::other("invalid expiry decision"));
+                    }
+                }
+                if *apply {
+                    engine.set_risk_config(risk.config(id).cloned());
+                    let actual = engine.process_with_session_at(
+                        wal_to_command(command),
+                        *session_id,
+                        *processing_timestamp,
+                    );
+                    if actual != events {
+                        return Err(std::io::Error::other(format!(
+                            "replay divergence at {}",
+                            entry.sequence
+                        )));
+                    }
+                }
+                for event in events {
+                    if let MatchEvent::Trade(t) = event {
+                        risk.update_reference_price(id, t.price);
+                    }
+                }
+            }
+            WalCommand::TradingState { halted, .. } => {
+                if *halted {
+                    engine.halt_trading();
+                    risk.halt_trading(id);
+                } else {
+                    engine.resume_trading();
+                    risk.resume_trading(id);
+                }
+            }
+            WalCommand::SymbolConfig { .. } => {}
+            // Only synthetic expiry cancels are permitted outside decision records.
+            WalCommand::CancelOrder { .. } => {
+                engine.process(wal_to_command(&entry.command));
+            }
+            _ => {
+                return Err(std::io::Error::other(
+                    "legacy undecided WAL requires explicit migration",
+                ))
+            }
         }
     }
-    if replayed > 0 {
-        tracing::info!(shard_id, symbol = ?id, replayed, "replayed WAL records");
-    }
-
-    (engine.book().order_count() + engine.stop_book().len()) as u32
+    Ok((engine.book().order_count() + engine.stop_book().len()) as u32)
 }
 
-/// Group-commit: fsync the WAL once for the whole pending batch, then release
-/// all deferred replies. The Pre-mode durability contract holds because a
-/// success reply is only sent AFTER its record is durable.
-///
-/// If the fsync fails the batch is NOT durable even though the books were
-/// already mutated in memory. We fail every pending command with
-/// `InternalError` (so clients retry rather than assume success) and halt all
-/// engines on the shard so no further un-journaled trades occur until an
-/// operator intervenes. On restart, recovery rebuilds state from the durable
-/// WAL/snapshot only — consistent with the InternalError the clients saw.
-fn commit_and_flush(
-    shard_id: usize,
-    wal: &mut Option<WalWriter>,
-    engines: &mut FxHashMap<SymbolId, Engine>,
-    pending: &mut Vec<PendingReply>,
-) {
-    if pending.is_empty() {
-        return;
-    }
-
-    let durable = match wal.as_mut() {
-        Some(w) => match w.sync() {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::error!(
-                    shard_id,
-                    error = %e,
-                    batch = pending.len(),
-                    "GROUP COMMIT FSYNC FAILED — failing batch and halting shard engines"
-                );
-                false
-            }
-        },
-        None => true, // WAL disabled: nothing to fsync.
-    };
-
-    if durable {
-        for (reply, _order_id, events) in pending.drain(..) {
-            if reply.send(events).is_err() {
-                tracing::warn!(shard_id, "reply dropped after durable commit");
-            }
-        }
-    } else {
-        for engine in engines.values_mut() {
-            engine.halt_trading();
-        }
-        for (reply, order_id, _events) in pending.drain(..) {
-            let _ = reply.send(vec![MatchEvent::OrderRejected {
-                order_id,
-                reason: RejectReason::InternalError,
-                timestamp: 0,
-            }]);
-        }
-    }
-}
-
-/// Periodic snapshot trigger shared by the group-commit and immediate-reply
-/// paths. Snapshots all symbols and truncates the WAL once the command counter
-/// reaches the configured interval.
+/// Periodically save a checkpoint without deleting the decision history.
 fn maybe_snapshot(
     shard_id: usize,
     snapshot_interval: u64,
@@ -1277,9 +1597,7 @@ fn maybe_snapshot(
     }
 }
 
-/// Snapshot every symbol on the shard at the current WAL watermark, then (only
-/// if all snapshots succeeded) truncate the WAL. Truncating only on full
-/// success avoids dropping un-snapshotted records for a symbol whose save failed.
+/// Snapshot every registered symbol at the current journal watermark.
 fn take_shard_snapshot(
     shard_id: usize,
     engines: &FxHashMap<SymbolId, Engine>,
@@ -1301,18 +1619,21 @@ fn take_shard_snapshot(
             }
         }
     }
-    if all_ok {
-        if let Some(w) = wal.as_mut() {
-            if let Err(e) = w.rotate_truncate() {
-                tracing::error!(shard_id, error = %e, "WAL truncate after snapshot failed");
-            }
-        }
+    if !all_ok {
+        tracing::error!(
+            shard_id,
+            "checkpoint incomplete; full decision journal retained"
+        );
     }
 }
 
 /// Convert a persistence `WalCommand` back into an engine `Command` for replay.
 fn wal_to_command(cmd: &WalCommand) -> Command {
     match cmd {
+        WalCommand::Decision { command, .. } => wal_to_command(command),
+        WalCommand::TradingState { .. } | WalCommand::SymbolConfig { .. } => {
+            panic!("control records are not commands")
+        }
         WalCommand::PlaceOrder(order) => Command::PlaceOrder(*order),
         WalCommand::CancelOrder {
             order_id,
@@ -1339,51 +1660,6 @@ fn wal_to_command(cmd: &WalCommand) -> Command {
     }
 }
 
-/// What to do when journaling a lazy GTD-expiry cancel fails mid-command.
-///
-/// The expiry has already cancelled the order in the live book and decremented
-/// the risk counters, but the cancel record is NOT durable — so the symbol's
-/// in-memory state has diverged from what WAL replay would reconstruct.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ExpiryJournalFailure {
-    /// Reject the command that triggered the sweep. In Pre mode that command
-    /// shares this group-commit batch and has not been journaled, so it must
-    /// not execute — otherwise replay (which never saw it) would diverge.
-    reject_triggering_command: bool,
-    /// Halt the symbol so no further commands are processed against the
-    /// un-journaled post-expiry book. Subsequent commands would match different
-    /// liquidity on replay (which lacks the expiry cancel and so still has the
-    /// expired order resting), diverging the recovered book from the live one.
-    /// Mirrors the group-commit fsync-failure handling.
-    halt_symbol: bool,
-}
-
-/// Durability policy for a failed expiry-cancel journal, by WAL mode.
-fn wal_expiry_failure_action(mode: &WalMode) -> ExpiryJournalFailure {
-    match mode {
-        // Pre: the triggering command shares this un-flushed group-commit batch
-        // and was not journaled, so reject it; AND halt, because the expiry
-        // mutation is durably lost and later commands would diverge on replay.
-        WalMode::Pre => ExpiryJournalFailure {
-            reject_triggering_command: true,
-            halt_symbol: true,
-        },
-        // Post: the command is journaled after matching; halting both stops
-        // further un-journaled state and rejects this command's post-write.
-        WalMode::Post => ExpiryJournalFailure {
-            reject_triggering_command: false,
-            halt_symbol: true,
-        },
-        // No writer is present in Disabled mode, so this path is unreachable;
-        // be total and take no action.
-        WalMode::Disabled => ExpiryJournalFailure {
-            reject_triggering_command: false,
-            halt_symbol: false,
-        },
-    }
-}
-
-/// Convert an engine `Command` to a persistence `WalCommand`.
 fn command_to_wal(cmd: &Command) -> WalCommand {
     match cmd {
         Command::PlaceOrder(order) => WalCommand::PlaceOrder(*order),
@@ -1419,41 +1695,6 @@ fn command_to_wal(cmd: &Command) -> WalCommand {
 // RejectReason::InternalError (not SymbolNotFound) on all affected paths.
 // Kept as unit tests (not integration tests) because they need access to
 // the private `shards` field to kill a specific worker.
-
-#[cfg(test)]
-mod wal_durability_policy_tests {
-    use super::*;
-
-    // When an in-memory GTD expiry cannot be journaled, the symbol's durable
-    // state has diverged from memory. In Pre mode the un-journaled expiry must
-    // both reject the triggering command (it shares the un-flushed batch) AND
-    // halt the symbol — otherwise later commands match the post-expiry book live
-    // but replay (which lacks the expiry cancel) matches them against the
-    // pre-expiry book, permanently diverging the recovered state.
-    #[test]
-    fn pre_mode_expiry_journal_failure_rejects_and_halts() {
-        let action = wal_expiry_failure_action(&WalMode::Pre);
-        assert!(
-            action.reject_triggering_command,
-            "Pre must reject the un-journaled triggering command"
-        );
-        assert!(
-            action.halt_symbol,
-            "Pre must halt — an un-journaled expiry would resurrect on replay and diverge"
-        );
-    }
-
-    // Post mode already halts on this path; the halt rejects the triggering
-    // command (its post-write is skipped once the engine is halted).
-    #[test]
-    fn post_mode_expiry_journal_failure_halts() {
-        let action = wal_expiry_failure_action(&WalMode::Post);
-        assert!(
-            action.halt_symbol,
-            "Post must halt on an un-journaled expiry"
-        );
-    }
-}
 
 #[cfg(test)]
 mod dead_shard_tests {

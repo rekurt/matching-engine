@@ -9,11 +9,12 @@ name = "me-server"
 path = "src/main.rs"
 
 [features]
-tls = ["me-io/tls", "dep:tokio-rustls", "dep:rustls-pemfile"]
+tls = ["me-io/tls", "dep:tokio-rustls"]
 
 [dependencies]
 me-core = { workspace = true }
 me-engine = { workspace = true }
+me-risk = { workspace = true }
 me-io = { workspace = true }
 me-metrics = { workspace = true }
 me-persist = { workspace = true }
@@ -31,4 +32,3 @@ toml = { workspace = true }
 
 # Optional TLS support (enabled by --features tls)
 tokio-rustls = { workspace = true, optional = true }
-rustls-pemfile = { workspace = true, optional = true }

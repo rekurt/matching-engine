@@ -22,3 +22,7 @@ docker-compose*
 *.env
 *.env.*
 config.local.toml
+
+# Runtime state and local caches
+data/
+**/__pycache__/

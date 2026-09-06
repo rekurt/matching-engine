@@ -226,8 +226,45 @@ impl OrderBook {
 
     // ─── Insert ──────────────────────────────────────────────────────────
 
-    /// Insert an order into the book at its limit price.
-    pub fn insert_order(&mut self, mut order: Order) {
+    /// Conservative execution-price bound, including hidden quantity at resting levels.
+    pub fn execution_price_bound(&self, order: &Order) -> Option<FixedPrice> {
+        use me_core::order::OrderType;
+        match (order.side, order.order_type) {
+            (Side::Buy, OrderType::Market) => self.asks.keys().next_back().copied(),
+            (Side::Sell, OrderType::Market) => self.best_bid(),
+            (Side::Buy, OrderType::Limit) => Some(order.price),
+            (Side::Sell, OrderType::Limit) => Some(
+                self.best_bid()
+                    .map_or(order.price, |bid| bid.max(order.price)),
+            ),
+            _ => None,
+        }
+    }
+
+    pub fn can_rest(&self, order: &Order) -> bool {
+        let level = match order.side {
+            Side::Buy => self.bids.get(&Reverse(order.price)),
+            Side::Sell => self.asks.get(&order.price),
+        };
+        let Some(level) = level else {
+            return true;
+        };
+        let replaced = self
+            .get_order(order.id)
+            .filter(|old| old.side == order.side && old.price == order.price);
+        let existing = level
+            .total_qty
+            .raw()
+            .saturating_sub(replaced.map_or(0, |old| old.remaining_qty.raw()));
+        existing.checked_add(order.remaining_qty.raw()).is_some()
+            && (replaced.is_some() || level.order_count < u32::MAX)
+    }
+
+    /// Insert at its limit price; return false on duplicate id or level capacity overflow.
+    pub fn insert_order(&mut self, mut order: Order) -> bool {
+        if self.contains_order(order.id) || !self.can_rest(&order) {
+            return false;
+        }
         let price = order.price;
         let side = order.side;
         order.sequence = self.next_sequence();
@@ -259,6 +296,7 @@ impl OrderBook {
         );
 
         self.update_best_after_insert(side, price);
+        true
     }
 
     // ─── Remove ──────────────────────────────────────────────────────────
@@ -347,7 +385,7 @@ impl OrderBook {
     }
 
     /// Sum of all available quantity on the ask side at prices <= max_price.
-    /// If max_price is None, sum entire ask side.
+    /// If max_price is None, sum entire ask side. Saturates at FixedQty::MAX.
     pub fn available_ask_qty(&self, max_price: Option<FixedPrice>) -> FixedQty {
         let mut total = FixedQty::ZERO;
         for (price, level) in &self.asks {
@@ -356,13 +394,13 @@ impl OrderBook {
                     break;
                 }
             }
-            total += level.total_qty;
+            total = total.saturating_add(level.total_qty);
         }
         total
     }
 
     /// Sum of all available quantity on the bid side at prices >= min_price.
-    /// If min_price is None, sum entire bid side.
+    /// If min_price is None, sum entire bid side. Saturates at FixedQty::MAX.
     pub fn available_bid_qty(&self, min_price: Option<FixedPrice>) -> FixedQty {
         let mut total = FixedQty::ZERO;
         for (Reverse(price), level) in &self.bids {
@@ -371,7 +409,123 @@ impl OrderBook {
                     break;
                 }
             }
-            total += level.total_qty;
+            total = total.saturating_add(level.total_qty);
+        }
+        total
+    }
+
+    pub fn matching_work_exceeds(&self, order: &Order, budget: usize) -> bool {
+        use me_core::order::OrderType;
+        let limit = (order.order_type == OrderType::Limit).then_some(order.price);
+        let mut remaining = order.remaining_qty.raw();
+        let mut work = 0u128;
+        let mut visit = |level: &PriceLevel, remaining: &mut u64| {
+            let mut replenished = std::collections::VecDeque::new();
+            let mut iter = crate::price_level::PriceLevelIter::new(level);
+            while *remaining > 0 {
+                let Some(key) = iter.next_key(&self.order_slab) else {
+                    break;
+                };
+                let Some(node) = self.order_slab.get(key) else {
+                    return true;
+                };
+                let maker = &node.order;
+                let fill = (*remaining).min(maker.remaining_qty.raw());
+                if fill == 0 {
+                    continue;
+                }
+                *remaining -= fill;
+                work += 1;
+                if work > budget as u128 {
+                    return true;
+                }
+                if maker.is_iceberg() && fill == maker.remaining_qty.raw() {
+                    let hidden = maker.open_qty().raw().saturating_sub(fill);
+                    if hidden > 0 {
+                        replenished
+                            .push_back((hidden, maker.display_qty.min(maker.remaining_qty).raw()));
+                    }
+                }
+            }
+            while *remaining > 0 {
+                let Some((open, slice)) = replenished.pop_front() else {
+                    break;
+                };
+                if slice == 0 {
+                    return true;
+                }
+                let fill = (*remaining).min(open).min(slice);
+                *remaining -= fill;
+                work += 1;
+                if work > budget as u128 {
+                    return true;
+                }
+                if open > fill {
+                    replenished.push_back((open - fill, slice));
+                }
+            }
+            false
+        };
+        match order.side {
+            Side::Buy => {
+                for (price, level) in &self.asks {
+                    if remaining == 0 || limit.is_some_and(|bound| *price > bound) {
+                        break;
+                    }
+                    if visit(level, &mut remaining) {
+                        return true;
+                    }
+                }
+            }
+            Side::Sell => {
+                for (Reverse(price), level) in &self.bids {
+                    if remaining == 0 || limit.is_some_and(|bound| *price < bound) {
+                        break;
+                    }
+                    if visit(level, &mut remaining) {
+                        return true;
+                    }
+                }
+            }
+        }
+        let filled = order.remaining_qty.raw() - remaining;
+        if order.is_iceberg() && filled > 0 {
+            work += ((filled - 1) / order.display_qty.raw()) as u128;
+        }
+        work > budget as u128
+    }
+
+    pub fn executable_qty(&self, taker_side: Side, limit: Option<FixedPrice>) -> FixedQty {
+        let mut total = FixedQty::ZERO;
+        let mut add_level = |level: &PriceLevel| {
+            let mut iter = crate::price_level::PriceLevelIter::new(level);
+            while let Some(key) = iter.next_key(&self.order_slab) {
+                if let Some(node) = self.order_slab.get(key) {
+                    total = total.saturating_add(if node.order.is_iceberg() {
+                        node.order.open_qty()
+                    } else {
+                        node.order.remaining_qty
+                    });
+                }
+            }
+        };
+        match taker_side {
+            Side::Buy => {
+                for (price, level) in &self.asks {
+                    if limit.is_some_and(|bound| *price > bound) {
+                        break;
+                    }
+                    add_level(level);
+                }
+            }
+            Side::Sell => {
+                for (Reverse(price), level) in &self.bids {
+                    if limit.is_some_and(|bound| *price < bound) {
+                        break;
+                    }
+                    add_level(level);
+                }
+            }
         }
         total
     }

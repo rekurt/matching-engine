@@ -6,7 +6,7 @@
 
 ## Шаг 1 — Сборка
 
-Требуется [Rust stable](https://rustup.rs) (1.75+).
+Требуется [Rust stable](https://rustup.rs) (1.96+).
 
 ```bash
 git clone https://github.com/rekurt/matching-engine.git
@@ -30,8 +30,8 @@ cp config.toml my-config.toml
 
 ```toml
 [server]
-tcp_addr   = "0.0.0.0:9090"
-metrics_addr = "0.0.0.0:9091"
+tcp_addr   = "127.0.0.1:9090"
+metrics_addr = "127.0.0.1:9091"
 
 [[symbols]]
 id          = 0
@@ -58,8 +58,8 @@ price_step  = "0.01"
 Сервер выводит в stdout:
 
 ```
-INFO  me_server: tcp listening on 0.0.0.0:9090
-INFO  me_server: metrics listening on 0.0.0.0:9091
+INFO  me_server: tcp listening on 127.0.0.1:9090
+INFO  me_server: metrics listening on 127.0.0.1:9091
 INFO  me_server: registered symbol BTC/USDT (id=0)
 ```
 
@@ -67,7 +67,7 @@ INFO  me_server: registered symbol BTC/USDT (id=0)
 
 ```bash
 curl http://localhost:9091/health
-# {"status":"ok"}
+# OK
 ```
 
 ---
@@ -99,7 +99,7 @@ Pong received — connection is healthy.
 
 ## Шаг 5 — Первый ордер
 
-Пример размещения двух пересекающихся лимитных ордеров и чтения события сделки:
+Фрагмент для чистого тестового стакана: размещение двух пересекающихся лимитных ордеров. На wire цена и количество всегда имеют масштаб 10⁸; `price_scale` и `qty_scale` не меняют wire encoding. В рабочей интеграции проверяйте ошибки каждого вызова и задавайте deadlines.
 
 ```go
 client, _ := meclient.Dial("127.0.0.1:9090")
@@ -111,9 +111,9 @@ client.PlaceOrder(&meclient.PlaceOrderRequest{
     SymbolId:    0,
     Side:        meclient.SideBuy,
     OrderType:   meclient.OrderTypeLimit,
-    TimeInForce: meclient.TIFGtc,
-    Price:       5000000,  // $50 000.00 (price_scale=2 → *100)
-    Quantity:    150000000, // 1.5 BTC   (qty_scale=8  → *1e8)
+    TimeInForce: meclient.TimeInForceGTC,
+    Price:       meclient.NewDecimal(50000),
+    Qty:         meclient.NewDecimal(1.5),
 })
 
 // Продажа: 1.0 BTC @ $50 000 (пересекается с покупкой)
@@ -122,9 +122,9 @@ client.PlaceOrder(&meclient.PlaceOrderRequest{
     SymbolId:    0,
     Side:        meclient.SideSell,
     OrderType:   meclient.OrderTypeLimit,
-    TimeInForce: meclient.TIFGtc,
-    Price:       5000000,
-    Quantity:    100000000,
+    TimeInForce: meclient.TimeInForceGTC,
+    Price:       meclient.NewDecimal(50000),
+    Qty:         meclient.NewDecimal(1),
 })
 
 // Читаем входящие события (Trade, OrderAccepted, …)

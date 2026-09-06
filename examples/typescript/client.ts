@@ -7,7 +7,7 @@
  *
  * Protocol overview
  * -----------------
- * Every frame on the wire has a 14-byte header followed by a variable-length
+ * Every frame on the wire has a 22-byte header followed by a variable-length
  * payload:
  *
  *     +----------+--------+--------+----------+-----------------+
@@ -15,8 +15,8 @@
  *     | 4 bytes  | 1 byte | 1 byte | 8 bytes  | `len` bytes     |
  *     +----------+--------+--------+----------+-----------------+
  *
- * - `len`  -- payload size only (does NOT include the 14-byte header).
- * - `ver`  -- protocol version, currently 1.
+ * - `len`  -- payload size only (does NOT include the 22-byte header).
+ * - `ver`  -- protocol version, currently 2.
  * - `type` -- message type tag (see constants below).
  * - `seq`  -- monotonically increasing sequence number per connection.
  * - All multi-byte integers are little-endian.
@@ -43,8 +43,8 @@ import * as net from "net";
 // Protocol constants
 // ---------------------------------------------------------------------------
 
-const PROTOCOL_VERSION = 1;
-const HEADER_SIZE = 14; // len(4) + ver(1) + type(1) + seq(8)
+const PROTOCOL_VERSION = 2;
+const HEADER_SIZE = 22; // len(4) + ver(1) + type(1) + seq(8)
 const PRICE_SCALE = 100_000_000n; // 10^8
 
 // -- Message types (client -> engine) --
@@ -340,14 +340,16 @@ class MEClient {
     return this.seq;
   }
 
-  /** Build a frame (14-byte header + payload) and send it. */
+  /** Build a frame (22-byte header + payload) and send it. */
   private sendFrame(msgType: number, payload: Buffer): void {
     if (!this.socket) throw new Error("Not connected");
     const header = Buffer.alloc(HEADER_SIZE);
     header.writeUInt32LE(payload.length, 0);     // len: u32
     header.writeUInt8(PROTOCOL_VERSION, 4);      // ver: u8
     header.writeUInt8(msgType, 5);               // type: u8
-    header.writeBigUInt64LE(this.nextSeq(), 6);  // seq: u64
+    const seq = this.nextSeq();
+    header.writeBigUInt64LE(seq, 6);
+    header.writeBigUInt64LE([1, 2, 3, 7, 9, 11, 12].includes(msgType) ? seq : 0n, 14);  // seq: u64
     this.socket.write(Buffer.concat([header, payload]));
   }
 
