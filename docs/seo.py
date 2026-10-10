@@ -23,6 +23,7 @@ DESCRIPTIONS = {
 }
 
 def decorate(source, relative):
+    source = re.sub(r'<h1(\s[^>]*class="menu-title"[^>]*)>(.*?)</h1>', r'<p\1>\2</p>', source, flags=re.S)
     homepage = relative in ('index.html', 'introduction.html')
     excluded = relative in ('print.html', '404.html', 'toc.html')
     canonical = BASE if homepage else BASE + relative
