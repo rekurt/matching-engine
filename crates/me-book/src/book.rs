@@ -12,8 +12,6 @@ use me_core::types::{FixedPrice, FixedQty, OrderId, SequenceId, Side, SymbolId, 
 use crate::pool::{Slab, SlabKey};
 use crate::price_level::{OrderNode, PriceLevel};
 
-// ─── OrderLocation ───────────────────────────────────────────────────────────
-
 /// Tracks where an order lives in the book for O(1) cancel/amend.
 #[derive(Clone, Copy, Debug)]
 pub struct OrderLocation {
@@ -21,8 +19,6 @@ pub struct OrderLocation {
     pub side: Side,
     pub slab_key: SlabKey,
 }
-
-// ─── OrderBook ───────────────────────────────────────────────────────────────
 
 pub struct OrderBook {
     pub symbol: SymbolId,
@@ -70,8 +66,6 @@ impl OrderBook {
             invariant_halted: AtomicBool::new(false),
         }
     }
-
-    // ─── Invariant handling ─────────────────────────────────────────────
 
     /// Current cumulative count of invariant violations observed on this
     /// book since creation. Engine layer scrapes this into a Prometheus
@@ -141,8 +135,6 @@ impl OrderBook {
             }
         }
     }
-
-    // ─── Accessors ───────────────────────────────────────────────────────
 
     #[inline]
     pub fn best_bid(&self) -> Option<FixedPrice> {
@@ -224,8 +216,6 @@ impl OrderBook {
         self.asks.len()
     }
 
-    // ─── Insert ──────────────────────────────────────────────────────────
-
     /// Conservative execution-price bound, including hidden quantity at resting levels.
     pub fn execution_price_bound(&self, order: &Order) -> Option<FixedPrice> {
         use me_core::order::OrderType;
@@ -299,8 +289,6 @@ impl OrderBook {
         true
     }
 
-    // ─── Remove ──────────────────────────────────────────────────────────
-
     /// Remove an order from the book by its ID.
     /// Returns the removed Order, or None if not found.
     pub fn remove_order(&mut self, order_id: OrderId) -> Option<Order> {
@@ -327,8 +315,6 @@ impl OrderBook {
         self.refresh_best(loc.side);
         Some(order)
     }
-
-    // ─── Ask-side iteration for matching ─────────────────────────────────
 
     /// Get the first (best) ask price level.
     pub fn best_ask_level(&self) -> Option<(&FixedPrice, &PriceLevel)> {
@@ -587,8 +573,6 @@ impl OrderBook {
         false
     }
 
-    // ─── Best price management ───────────────────────────────────────────
-
     fn update_best_after_insert(&mut self, side: Side, price: FixedPrice) {
         match side {
             Side::Buy => {
@@ -621,8 +605,6 @@ impl OrderBook {
         self.refresh_best(Side::Sell);
     }
 
-    // ─── Level access by price ─────────────────────────────────────────
-
     /// Get mutable access to a specific bid level by price.
     pub fn bids_level_mut(&mut self, price: FixedPrice) -> Option<&mut PriceLevel> {
         self.bids.get_mut(&Reverse(price))
@@ -632,8 +614,6 @@ impl OrderBook {
     pub fn asks_level_mut(&mut self, price: FixedPrice) -> Option<&mut PriceLevel> {
         self.asks.get_mut(&price)
     }
-
-    // ─── Snapshot support ────────────────────────────────────────────────
 
     /// Collect all resting orders (for snapshots).
     pub fn all_resting_orders(&self) -> Vec<Order> {
@@ -749,8 +729,6 @@ mod tests {
         assert_eq!(book.bid_level_count(), 1);
         assert_eq!(book.order_count(), 2);
     }
-
-    // ─── Invariant policy tests ─────────────────────────────────────────
 
     fn make_config_with_policy(policy: InvariantPolicy) -> SymbolConfig {
         let mut cfg = make_config();

@@ -1,9 +1,9 @@
 [book]
 title = "matching-engine"
-authors = ["rubx-x"]
-description = "HFT Crypto Spot Matching Engine — документация"
+authors = ["nikita42 (rekurt)"]
+description = "Spot matching service: integration and operations"
 src = "docs/src"
-language = "ru"
+language = "en"
 
 [build]
 build-dir = "docs/book"

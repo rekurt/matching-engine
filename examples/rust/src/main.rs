@@ -27,9 +27,7 @@ use std::env;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-// ---------------------------------------------------------------------------
 // Protocol constants
-// ---------------------------------------------------------------------------
 
 /// Size of the frame header: len(4) + ver(1) + type(1) + seq(8) = 14 bytes.
 const HEADER_SIZE: usize = 22;
@@ -68,9 +66,7 @@ const ORDER_TYPE_LIMIT: u8 = 0;
 // -- Time-in-force --
 const TIF_GTC: u8 = 0; // Good-Til-Cancelled
 
-// ---------------------------------------------------------------------------
 // Fixed-point helpers
-// ---------------------------------------------------------------------------
 
 /// Convert a floating-point price to a fixed-point i64 (scale 10^8).
 fn price_to_fixed(price: f64) -> i64 {
@@ -101,9 +97,7 @@ fn side_name(side: u8) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Frame encoding / decoding
-// ---------------------------------------------------------------------------
 
 /// Encode a protocol frame (header + payload) ready for transmission.
 ///
@@ -153,9 +147,7 @@ async fn read_frame(stream: &mut TcpStream) -> Result<(u8, u64, Vec<u8>), String
     Ok((msg_type, seq, payload))
 }
 
-// ---------------------------------------------------------------------------
 // Command builders
-// ---------------------------------------------------------------------------
 
 /// Build a Handshake payload (single byte: protocol version).
 fn encode_handshake_payload() -> Vec<u8> {
@@ -208,9 +200,7 @@ fn encode_cancel_order(order_id: u64, symbol_id: u16) -> Vec<u8> {
     buf
 }
 
-// ---------------------------------------------------------------------------
 // Handshake
-// ---------------------------------------------------------------------------
 
 /// Perform the protocol handshake: send Handshake, expect HandshakeAck.
 ///
@@ -244,9 +234,7 @@ async fn handshake(stream: &mut TcpStream, seq: &mut u64) -> Result<u8, String> 
     }
 }
 
-// ---------------------------------------------------------------------------
 // Send helpers
-// ---------------------------------------------------------------------------
 
 /// Send a PlaceOrder command.
 async fn place_order(
@@ -304,9 +292,7 @@ async fn cancel_order(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Event decoders
-// ---------------------------------------------------------------------------
 
 /// Decode an Error frame payload: error_code(u16) + msg_len(u16) + msg(bytes).
 fn decode_error(data: &[u8]) -> (u16, String) {
@@ -487,9 +473,7 @@ async fn read_event(stream: &mut TcpStream) -> Result<bool, String> {
     Ok(true)
 }
 
-// ---------------------------------------------------------------------------
 // Main
-// ---------------------------------------------------------------------------
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -505,29 +489,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Monotonically increasing sequence number for outbound frames.
     let mut seq: u64 = 0;
 
-    // -----------------------------------------------------------------------
     // Step 1: Handshake
-    // -----------------------------------------------------------------------
     handshake(&mut stream, &mut seq).await?;
 
-    // -----------------------------------------------------------------------
     // Step 2: Place a Buy limit order
     //
     //   Order ID 1, symbol 0, Buy side, price 50000.00, qty 1.5
-    // -----------------------------------------------------------------------
     place_order(&mut stream, &mut seq, 1, 0, SIDE_BUY, 50_000.0, 1.5).await?;
 
-    // -----------------------------------------------------------------------
     // Step 3: Place a Sell limit order that crosses the buy
     //
     //   Order ID 2, symbol 0, Sell side, price 50000.00, qty 1.5
     //
     //   Because the sell price <= the resting buy price, the engine should
     //   match them immediately and produce trade + fill events.
-    // -----------------------------------------------------------------------
     place_order(&mut stream, &mut seq, 2, 0, SIDE_SELL, 50_000.0, 1.5).await?;
 
-    // -----------------------------------------------------------------------
     // Step 4: Read events from the engine
     //
     //   We expect a sequence like:
@@ -539,7 +516,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     //   We read a fixed number of events for this demo. In production you
     //   would read in a loop until EOF or a shutdown signal.
-    // -----------------------------------------------------------------------
     println!("\n--- Reading events ---");
 
     let expected_events = 5;

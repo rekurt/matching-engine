@@ -14,8 +14,6 @@ use me_io::protocol::{
 /// System clock for tests.
 static SYS_CLK: me_clock::SystemClock = me_clock::SystemClock;
 
-// ─── Frame builder helpers (v2: 22-byte header with request_id) ─────────────
-
 /// Returns default request_id for a given message type:
 /// - Commands (PlaceOrder, CancelOrder, AmendOrder, GetOrderStatus, GetOpenOrders,
 ///   BatchPlaceOrder, BatchCancelOrder): 1 (non-zero, required by v2 dedup)
@@ -122,8 +120,6 @@ fn active_conn() -> ConnectionCodecState {
     conn
 }
 
-// ─── Handshake ───────────────────────────────────────────────────────────────
-
 #[test]
 fn test_decode_handshake() {
     let mut conn = ConnectionCodecState::new();
@@ -151,8 +147,6 @@ fn test_handshake_ack_encode() {
     // Verify version byte in payload
     assert_eq!(buf[FRAME_HEADER_SIZE], PROTOCOL_VERSION);
 }
-
-// ─── GTD orders ──────────────────────────────────────────────────────────────
 
 #[test]
 fn test_decode_gtd_place_order() {
@@ -296,8 +290,6 @@ fn test_decode_negative_trail_offset_rejected() {
     assert!(decode_frame(&frame, &mut conn, &SYS_CLK).is_err());
 }
 
-// ─── BatchPlaceOrder ─────────────────────────────────────────────────────────
-
 #[test]
 fn test_decode_batch_place_fixed_38_byte_entries() {
     // Regression: batch entries are fixed at 38 bytes (flags mandatory). A run
@@ -346,8 +338,6 @@ fn test_decode_batch_place_rejects_misaligned_payload() {
     let frame = make_frame(0x0B, 2, &payload);
     assert!(decode_frame(&frame, &mut conn, &SYS_CLK).is_err());
 }
-
-// ─── PlaceOrder roundtrip ────────────────────────────────────────────────────
 
 #[test]
 fn test_decode_place_order_limit() {
@@ -461,8 +451,6 @@ fn test_decode_place_order_stop_market() {
     }
 }
 
-// ─── CancelOrder roundtrip ───────────────────────────────────────────────────
-
 #[test]
 fn test_decode_cancel_order() {
     let mut conn = active_conn();
@@ -485,8 +473,6 @@ fn test_decode_cancel_order() {
         _ => panic!("expected CancelOrder command"),
     }
 }
-
-// ─── AmendOrder roundtrip ────────────────────────────────────────────────────
 
 #[test]
 fn test_decode_amend_order_price_only() {
@@ -558,8 +544,6 @@ fn test_decode_amend_order_both() {
         _ => panic!("expected AmendOrder command"),
     }
 }
-
-// ─── Outbound event encoding ─────────────────────────────────────────────────
 
 #[test]
 fn test_encode_order_accepted() {
@@ -772,8 +756,6 @@ fn test_encode_order_amended() {
     assert_eq!(timestamp, 44444);
 }
 
-// ─── Error frame encoding ─────────────────────────────────────────────────────
-
 #[test]
 fn test_encode_error_normal() {
     let mut buf = BytesMut::new();
@@ -818,8 +800,6 @@ fn test_encode_error_long_message_truncated() {
     assert_eq!(buf.len(), 281);
 }
 
-// ─── Pong encoding ───────────────────────────────────────────────────────────
-
 #[test]
 fn test_encode_pong() {
     let mut buf = BytesMut::new();
@@ -835,8 +815,6 @@ fn test_encode_pong() {
     let ack = u64::from_le_bytes(buf[22..30].try_into().unwrap());
     assert_eq!(ack, 42);
 }
-
-// ─── Boundary cases ──────────────────────────────────────────────────────────
 
 #[test]
 fn test_decode_empty_buffer() {
@@ -888,8 +866,6 @@ fn test_decode_invalid_message_type() {
     assert!(matches!(result, Err(DecodeError::InvalidMessageType(0xFF))));
 }
 
-// ─── Protocol violations ─────────────────────────────────────────────────────
-
 #[test]
 fn test_command_without_handshake() {
     let mut conn = ConnectionCodecState::new();
@@ -918,8 +894,6 @@ fn test_outbound_type_sent_by_client_is_rejected() {
     let result = decode_frame(&frame, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::InvalidPayload(_))));
 }
-
-// ─── Sequence number validation ──────────────────────────────────────────────
 
 #[test]
 fn test_sequence_strictly_increasing() {
@@ -977,8 +951,6 @@ fn test_sequence_duplicate_rejected() {
         Err(DecodeError::SequenceOutOfOrder { .. })
     ));
 }
-
-// ─── Payload validation ──────────────────────────────────────────────────────
 
 #[test]
 fn test_place_order_zero_id_rejected() {
@@ -1051,8 +1023,6 @@ fn test_amend_order_no_fields_rejected() {
     assert!(matches!(result, Err(DecodeError::InvalidPayload(_))));
 }
 
-// ─── Ping handling ───────────────────────────────────────────────────────────
-
 #[test]
 fn test_ping_before_handshake_allowed() {
     let mut conn = ConnectionCodecState::new();
@@ -1069,8 +1039,6 @@ fn test_ping_after_handshake_allowed() {
     let (decoded, _) = decode_frame(&frame, &mut conn, &SYS_CLK).expect("ping after handshake");
     assert!(matches!(decoded, DecodedFrame::Ping { seq: 2, ack_seq: _ }));
 }
-
-// ─── Stop order validation ───────────────────────────────────────────────────
 
 #[test]
 fn test_stop_limit_zero_stop_price_rejected() {
@@ -1094,8 +1062,6 @@ fn test_stop_market_zero_stop_price_rejected() {
     let result = decode_frame(&frame, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::InvalidPayload(_))));
 }
-
-// ─── Bytes consumed ──────────────────────────────────────────────────────────
 
 #[test]
 fn test_consumed_bytes_exact() {

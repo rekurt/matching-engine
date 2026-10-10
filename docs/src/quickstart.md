@@ -1,149 +1,26 @@
-# Быстрый старт
+# Quick start
 
-Пять шагов от нулевой установки до первого исполненного ордера.
+Install Rust 1.96 or newer. Clone the repository and build the TLS-capable server:
 
----
-
-## Шаг 1 — Сборка
-
-Требуется [Rust stable](https://rustup.rs) (1.96+).
-
-```bash
+```sh
 git clone https://github.com/rekurt/matching-engine.git
 cd matching-engine
-cargo build --release
+cargo build --release --locked -p me-server --features tls
+./target/release/me-server --config config.toml
 ```
 
-Бинарный файл появится в `target/release/me-server`.
+The sample config defines BTC/USDT, ETH/USDT and SOL/USDT. Trading listens on `127.0.0.1:9090`, HTTP on `127.0.0.1:9091`, and the WAL directory is `./data/wal`. TLS is available in the binary but is enabled only when certificate paths are configured.
 
----
+In a second terminal, check readiness and run the Go example:
 
-## Шаг 2 — Конфигурация
-
-Скопируйте пример конфига и при необходимости отредактируйте:
-
-```bash
-cp config.toml my-config.toml
-```
-
-Минимальная конфигурация для одного символа BTC/USDT:
-
-```toml
-[server]
-tcp_addr   = "127.0.0.1:9090"
-metrics_addr = "127.0.0.1:9091"
-
-[[symbols]]
-id          = 0
-base        = "BTC"
-quote       = "USDT"
-price_scale = 2       # цена с точностью до $0.01
-qty_scale   = 8       # количество с точностью до 0.00000001 BTC
-min_qty     = "0.00001"
-max_qty     = "10000.0"
-qty_step    = "0.00001"
-price_step  = "0.01"
-```
-
-Подробное описание всех полей — в разделе [Конфигурация](./configuration.md).
-
----
-
-## Шаг 3 — Запуск
-
-```bash
-./target/release/me-server --config my-config.toml
-```
-
-Сервер выводит в stdout:
-
-```
-INFO  me_server: tcp listening on 127.0.0.1:9090
-INFO  me_server: metrics listening on 127.0.0.1:9091
-INFO  me_server: registered symbol BTC/USDT (id=0)
-```
-
-Проверить что сервер жив:
-
-```bash
-curl http://localhost:9091/health
-# OK
-```
-
----
-
-## Шаг 4 — Подключение
-
-Используйте готовый клиент из `examples/go/`:
-
-```bash
+```sh
+curl --fail http://127.0.0.1:9091/ready
 cd examples/go
-go run main.go 127.0.0.1:9090
+go run . 127.0.0.1:9090
 ```
 
-Ожидаемый вывод:
+The example places crossing limit orders, reads their execution events and cancels a resting order. Run it against a fresh test data directory: previously used order IDs remain part of durable history.
 
-```
-=== Matching Engine Go Client Example ===
+Stop the server with SIGINT or SIGTERM. On restart, use the same symbol/risk configuration, shard topology and whole data directory. See [deployment](deployment.md) before changing recovery settings or exposing listeners remotely.
 
-Connecting to 127.0.0.1:9090 ...
-Connected and handshake completed.
-
-Sending Ping ...
-Pong received — connection is healthy.
-```
-
-Для подключения вручную через `nc` (netcat) используйте бинарный режим — протокол не текстовый.
-
----
-
-## Шаг 5 — Первый ордер
-
-Фрагмент для чистого тестового стакана: размещение двух пересекающихся лимитных ордеров. На wire цена и количество всегда имеют масштаб 10⁸; `price_scale` и `qty_scale` не меняют wire encoding. В рабочей интеграции проверяйте ошибки каждого вызова и задавайте deadlines.
-
-```go
-client, _ := meclient.Dial("127.0.0.1:9090")
-defer client.Close()
-
-// Покупка: 1.5 BTC @ $50 000
-client.PlaceOrder(&meclient.PlaceOrderRequest{
-    OrderId:     1001,
-    SymbolId:    0,
-    Side:        meclient.SideBuy,
-    OrderType:   meclient.OrderTypeLimit,
-    TimeInForce: meclient.TimeInForceGTC,
-    Price:       meclient.NewDecimal(50000),
-    Qty:         meclient.NewDecimal(1.5),
-})
-
-// Продажа: 1.0 BTC @ $50 000 (пересекается с покупкой)
-client.PlaceOrder(&meclient.PlaceOrderRequest{
-    OrderId:     1002,
-    SymbolId:    0,
-    Side:        meclient.SideSell,
-    OrderType:   meclient.OrderTypeLimit,
-    TimeInForce: meclient.TimeInForceGTC,
-    Price:       meclient.NewDecimal(50000),
-    Qty:         meclient.NewDecimal(1),
-})
-
-// Читаем входящие события (Trade, OrderAccepted, …)
-for {
-    event, err := client.ReadEvent()
-    if err != nil { break }
-    fmt.Println(event)
-}
-```
-
-Вы увидите событие `Trade` с количеством `1.0 BTC` по цене `$50 000`.
-
-> Полный рабочий пример: [`examples/go/main.go`](../../../examples/go/main.go)
-
----
-
-## Что дальше
-
-- [Конфигурация](./configuration.md) — все поля конфигурационного файла
-- [Торговые пары](./trading-pairs.md) — готовые конфиги для популярных активов
-- [Бинарный протокол](./protocol.md) — спецификация протокола с hex-примерами
-- [Клиент на Go](./clients/go.md) — полный пример интеграции
+For a temporary in-memory experiment, set `[wal] enabled = false` in a separate config. That disables crash recovery and is not a durable deployment.

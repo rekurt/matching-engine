@@ -60,8 +60,6 @@ pub struct AffinityConfig {
     pub realtime_priority: bool,
 }
 
-// ─── Router ─────────────────────────────────────────────────────────────────
-
 /// Sharded multi-threaded router with integrated Risk + Audit.
 ///
 /// Each shard is a dedicated OS thread with its own engines and risk engine.
@@ -738,8 +736,6 @@ fn check_topology(path: &str, shards: usize) -> std::io::Result<()> {
     Ok(())
 }
 
-// ─── Shard worker loop (hot path) ───────────────────────────────────────────
-
 fn shard_worker_loop(
     rx: Receiver<ShardMsg>,
     shard_id: usize,
@@ -1112,8 +1108,7 @@ fn shard_worker_loop(
 
                 let duration = start.elapsed();
 
-                // ── End hot path ────────────────────────────────────────
-
+                // End hot path
                 if let Some(ref m) = metrics {
                     m.record_events(&events, sym_name, duration);
                     m.record_matching_duration(cmd_type_str, duration);
@@ -1367,8 +1362,6 @@ fn cmd_order_id(cmd: &Command) -> OrderId {
         Command::AmendOrder { order_id, .. } => *order_id,
     }
 }
-
-// ─── WAL recovery / snapshotting (startup + periodic) ────────────────────────
 
 /// Result of initializing the WAL and scanning prior records for replay.
 struct WalInit {
@@ -1688,7 +1681,6 @@ fn command_to_wal(cmd: &Command) -> WalCommand {
     }
 }
 
-// ─── Dead-shard tests ───────────────────────────────────────────────────────
 //
 // These tests intentionally poison the shard sender channel to simulate a
 // crashed worker thread, then verify that the router returns

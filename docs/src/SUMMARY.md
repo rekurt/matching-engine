@@ -1,24 +1,23 @@
 # Summary
 
-[Введение](./introduction.md)
+[Introduction](introduction.md)
 
----
+# Getting started
 
-# Начало работы
+- [Quick start](quickstart.md)
+- [Configuration](configuration.md)
+- [Trading pairs](trading-pairs.md)
 
-- [Быстрый старт](./quickstart.md)
-- [Конфигурация](./configuration.md)
-- [Торговые пары](./trading-pairs.md)
+# Integration
 
-# Интеграция
+- [Client integration](integration.md)
+- [Go client](clients/go.md)
+- [Python example](clients/python.md)
+- [Wire protocol v2](protocol.md)
 
-- [Обзор протокола интеграции](./integration.md)
-- [Клиент на Go](./clients/go.md)
-- [Клиент на Python](./clients/python.md)
+# Reference
 
-# Справочник
-
-- [Бинарный протокол](./protocol.md)
-- [Архитектура](./architecture.md)
-- [API команды и события](./api.md)
-- [Деплой](./deployment.md)
+- [Architecture](architecture.md)
+- [HTTP API](api.md)
+- [Deployment and recovery](deployment.md)
+- [Benchmarks](benchmarks.md)

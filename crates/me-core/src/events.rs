@@ -3,8 +3,6 @@ use serde::{Deserialize, Serialize};
 use crate::trade::Trade;
 use crate::types::{FixedPrice, FixedQty, OrderId};
 
-// ─── RejectReason ────────────────────────────────────────────────────────────
-
 /// Explicit `#[repr(u8)]` discriminants ARE the wire/audit contract: the io
 /// codec sends `reason as u8` and `me-audit` records `reason as u8`, so these
 /// numbers must never drift. Pinning them here (rather than relying on
@@ -49,8 +47,6 @@ pub enum RejectReason {
     /// reserve cannot be consistently re-sized in place). Cancel and re-place.
     AmendNotSupported = 15,
 }
-
-// ─── MatchEvent ──────────────────────────────────────────────────────────────
 
 /// Events produced by the matching engine during order processing.
 /// Collected in a pre-allocated buffer to avoid per-event allocation.
@@ -110,8 +106,6 @@ pub enum MatchEvent {
         order_id: OrderId,
     },
 }
-
-// ─── EventBuffer ─────────────────────────────────────────────────────────────
 
 /// Pre-allocated, reusable buffer for match events.
 /// The buffer grows to its high-water mark and stays there.

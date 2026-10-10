@@ -54,9 +54,7 @@ fn temp_wal_path(name: &str) -> String {
     format!("{}/bench.wal", dir.display())
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // 1. CLOCK COMPARISON — SystemClock vs CoarseClock vs RdtscClock
-// ═══════════════════════════════════════════════════════════════════════════
 
 fn bench_clock_comparison(c: &mut Criterion) {
     let mut group = c.benchmark_group("clock_implementations");
@@ -79,9 +77,7 @@ fn bench_clock_comparison(c: &mut Criterion) {
     group.finish();
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // 2. RISK CHECK — isolated cost
-// ═══════════════════════════════════════════════════════════════════════════
 
 fn bench_risk_check(c: &mut Criterion) {
     let mut group = c.benchmark_group("risk_check");
@@ -135,9 +131,7 @@ fn bench_risk_check(c: &mut Criterion) {
     group.finish();
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // 3. AUDIT — sync vs async comparison
-// ═══════════════════════════════════════════════════════════════════════════
 
 fn bench_audit_comparison(c: &mut Criterion) {
     install_noop_tracing();
@@ -236,9 +230,7 @@ fn bench_audit_comparison(c: &mut Criterion) {
     group.finish();
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // 4. WAL — write cost
-// ═══════════════════════════════════════════════════════════════════════════
 
 fn bench_wal_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("wal_write");
@@ -318,9 +310,7 @@ fn bench_wal_write(c: &mut Criterion) {
     group.finish();
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // 5. FULL PIPELINE — layer-by-layer breakdown for limit full fill
-// ═══════════════════════════════════════════════════════════════════════════
 
 fn bench_pipeline_breakdown(c: &mut Criterion) {
     install_noop_tracing();
@@ -528,9 +518,7 @@ fn bench_pipeline_breakdown(c: &mut Criterion) {
     group.finish();
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // 6. HFT SCENARIOS — realistic trading patterns with full pipeline
-// ═══════════════════════════════════════════════════════════════════════════
 
 fn bench_hft_scenarios(c: &mut Criterion) {
     install_noop_tracing();
@@ -696,9 +684,7 @@ fn bench_hft_scenarios(c: &mut Criterion) {
     group.finish();
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
 // 7. THROUGHPUT — sustained operations per second
-// ═══════════════════════════════════════════════════════════════════════════
 
 fn bench_throughput_full_pipeline(c: &mut Criterion) {
     install_noop_tracing();

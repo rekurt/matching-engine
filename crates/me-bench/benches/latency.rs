@@ -12,9 +12,7 @@ const TICK: i64 = 1_000_000; // 0.01
 /// Quantity in raw units: 1.0 BTC in 8-dp fixed point.
 const ONE_BTC: u64 = 100_000_000;
 
-// ---------------------------------------------------------------------------
 // 1. Single limit order latency (one-sided book)
-// ---------------------------------------------------------------------------
 
 fn bench_single_order_latency(c: &mut Criterion) {
     c.bench_function("single_limit_order_latency", |b| {
@@ -85,9 +83,7 @@ fn bench_single_order_latency(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 2. Limit order latency on a two-sided book (100 bids + 100 asks)
-// ---------------------------------------------------------------------------
 
 fn bench_two_sided_book_latency(c: &mut Criterion) {
     c.bench_function("two_sided_book_limit_latency", |b| {

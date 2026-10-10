@@ -19,8 +19,6 @@ fn expect_ok(r: ReplayResult) -> Vec<Bytes> {
     }
 }
 
-// ─── Dedup table ────────────────────────────────────────────────────────────
-
 #[test]
 fn test_dedup_lookup_miss_on_fresh_session() {
     let store = SessionStore::new(1024, Duration::from_secs(60));
@@ -128,8 +126,6 @@ fn test_dedup_lookup_on_nonexistent_session() {
     assert_eq!(store.dedup_lookup(&fake_sid, 42), None);
 }
 
-// ─── Cumulative ACK ──────────────────────────────────────────────────────────
-
 #[test]
 fn test_apply_ack_purges_replay_buffer() {
     let store = SessionStore::new(1024, Duration::from_secs(60));
@@ -235,8 +231,6 @@ fn test_apply_ack_on_nonexistent_session() {
     assert_eq!(purged, 0, "ACK on missing session returns 0");
 }
 
-// ─── Integration: ACK + resume ──────────────────────────────────────────────
-
 #[test]
 fn test_resume_after_partial_ack() {
     let store = SessionStore::new(1024, Duration::from_secs(60));
@@ -285,8 +279,6 @@ fn test_resume_requests_evicted_frames_returns_partial() {
     }
 }
 
-// ─── Sharded isolation ──────────────────────────────────────────────────────
-
 #[test]
 fn test_many_sessions_distributed_across_shards() {
     let store = SessionStore::new(1024, Duration::from_secs(60));
@@ -328,8 +320,6 @@ fn test_concurrent_dedup_inserts_different_sessions() {
 
     assert_eq!(store.len(), 8);
 }
-
-// ─── TTL expiration ─────────────────────────────────────────────────────────
 
 #[test]
 fn test_session_expires_after_ttl() {
@@ -383,8 +373,6 @@ fn test_gc_removes_expired_sessions() {
     store.gc();
     assert_eq!(store.len(), 0, "GC should clean up expired sessions");
 }
-
-// ─── Metrics accessors ──────────────────────────────────────────────────────
 
 #[test]
 fn test_buffer_len_on_nonexistent_session() {

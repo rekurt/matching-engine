@@ -79,8 +79,6 @@ fn has_event_type(events: &[MatchEvent], pred: impl Fn(&MatchEvent) -> bool) -> 
     events.iter().any(pred)
 }
 
-// ─── A. Limit Orders — Basic ────────────────────────────────────────────────
-
 /// A1: Limit buy crosses one ask level — full fill
 #[test]
 fn test_a1_limit_buy_crosses_one_ask() {
@@ -186,8 +184,6 @@ fn test_a8_better_price_fills_at_maker_price() {
     });
     assert_eq!(trade_price, Some(FixedPrice::from_f64(100.0)));
 }
-
-// ─── B. Market Orders — Extended Edge Cases ─────────────────────────────────
 
 /// B9: Market buy in empty book — cancel, zero fills
 #[test]
@@ -402,8 +398,6 @@ fn test_b22_market_never_rests() {
                                    // Check that no market orders rest
     assert!(e.book().order_count() <= 1); // at most the ask remains
 }
-
-// ─── D. Price-Time Priority ─────────────────────────────────────────────────
 
 /// D36: Two asks at same price, earlier inserted fills first
 #[test]

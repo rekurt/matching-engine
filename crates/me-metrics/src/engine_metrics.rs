@@ -11,11 +11,9 @@ use me_core::order::OrderType;
 use me_core::order::TimeInForce;
 use me_core::types::{Side, SCALE};
 
-// ─── EngineMetrics ──────────────────────────────────────────────────────────
-
 /// Comprehensive Prometheus metrics for the matching engine.
 pub struct EngineMetrics {
-    // ── Order Processing ────────────────────────────────────────────────
+    // Order Processing
     /// Total orders received (side, order_type, tif, symbol).
     pub orders_total: IntCounterVec,
     /// Rejected orders (reason, symbol).
@@ -25,7 +23,7 @@ pub struct EngineMetrics {
     /// Time to process a single order (order_type).
     pub order_processing_duration_seconds: HistogramVec,
 
-    // ── Matching ────────────────────────────────────────────────────────
+    // Matching
     /// Total trades executed (symbol).
     pub trades_total: IntCounterVec,
     /// Total trade volume in quantity (symbol).
@@ -35,7 +33,7 @@ pub struct EngineMetrics {
     /// Full vs partial fills (fill_type).
     pub fills_total: IntCounterVec,
 
-    // ── Order Book ──────────────────────────────────────────────────────
+    // Order Book
     /// Number of bid price levels (symbol).
     pub book_bid_levels: IntGaugeVec,
     /// Number of ask price levels (symbol).
@@ -55,7 +53,7 @@ pub struct EngineMetrics {
     /// Total ask quantity depth (symbol).
     pub book_depth_ask_qty: GaugeVec,
 
-    // ── Cancel/Amend ────────────────────────────────────────────────────
+    // Cancel/Amend
     /// Successful cancellations (symbol).
     pub cancels_total: IntCounterVec,
     /// Failed cancellations (symbol).
@@ -63,13 +61,13 @@ pub struct EngineMetrics {
     /// Amends by type (amend_type, symbol).
     pub amends_total: IntCounterVec,
 
-    // ── Stop Orders ─────────────────────────────────────────────────────
+    // Stop Orders
     /// Pending stop orders (symbol).
     pub stop_orders_pending: IntGaugeVec,
     /// Stop triggers (symbol).
     pub stop_triggers_total: IntCounterVec,
 
-    // ── System ──────────────────────────────────────────────────────────
+    // System
     /// Total commands processed (command_type).
     pub commands_total: IntCounterVec,
     /// Total events emitted (event_type).
@@ -77,7 +75,7 @@ pub struct EngineMetrics {
     /// Number of active trading pairs.
     pub active_symbols: IntGauge,
 
-    // ── WAL/Persistence ─────────────────────────────────────────────────
+    // WAL/Persistence
     /// WAL write operations.
     pub wal_writes_total: IntCounter,
     /// WAL bytes written.
@@ -85,7 +83,7 @@ pub struct EngineMetrics {
     /// Snapshot saves.
     pub snapshot_saves_total: IntCounter,
 
-    // ── Connection Metrics ─────────────────────────────────────────────
+    // Connection Metrics
     /// Total connections opened (transport: tcp/uds).
     pub connections_total: IntCounterVec,
     /// Currently active connections (transport).
@@ -99,17 +97,17 @@ pub struct EngineMetrics {
     /// Total frames sent (transport).
     pub connection_frames_out_total: IntCounterVec,
 
-    // ── Protocol Errors ────────────────────────────────────────────────
+    // Protocol Errors
     /// Protocol errors by type (error_type).
     pub protocol_errors_total: IntCounterVec,
 
-    // ── Invariant Violations ───────────────────────────────────────────
+    // Invariant Violations
     /// Matching-engine invariant violations by kind and symbol.
     /// Each sample indicates a data-structure corruption event and
     /// should trigger an alert.
     pub invariant_violations_total: IntCounterVec,
 
-    // ── Matching Detail ────────────────────────────────────────────────
+    // Matching Detail
     /// Matching duration by command type (command_type: place_order/cancel/amend).
     pub matching_duration_seconds: HistogramVec,
     /// Depth of cascading stop triggers.
@@ -117,13 +115,13 @@ pub struct EngineMetrics {
     /// Duration of cascading stop triggers.
     pub stop_cascade_duration_seconds: Histogram,
 
-    // ── Shard Metrics ──────────────────────────────────────────────────
+    // Shard Metrics
     /// Queue depth per shard (shard).
     pub shard_queue_depth: IntGaugeVec,
     /// Total commands per shard (shard).
     pub shard_commands_total: IntCounterVec,
 
-    // ── WAL Detail ─────────────────────────────────────────────────────
+    // WAL Detail
     /// WAL flush duration.
     pub wal_flush_duration_seconds: Histogram,
     /// Snapshot duration.
@@ -139,7 +137,7 @@ impl EngineMetrics {
     /// Create a new `EngineMetrics` and register all metrics with the given
     /// `Registry`.
     pub fn new(registry: &Registry) -> Self {
-        // ── Order Processing ────────────────────────────────────────────
+        // Order Processing
         let orders_total = IntCounterVec::new(
             Opts::new("me_orders_total", "Total orders received"),
             &["side", "order_type", "tif", "symbol"],
@@ -192,7 +190,7 @@ impl EngineMetrics {
             .register(Box::new(order_processing_duration_seconds.clone()))
             .expect("metric can be registered");
 
-        // ── Matching ────────────────────────────────────────────────────
+        // Matching
         let trades_total = IntCounterVec::new(
             Opts::new("me_trades_total", "Total trades executed"),
             &["symbol"],
@@ -229,7 +227,7 @@ impl EngineMetrics {
             .register(Box::new(fills_total.clone()))
             .expect("metric can be registered");
 
-        // ── Order Book ──────────────────────────────────────────────────
+        // Order Book
         let book_bid_levels = IntGaugeVec::new(
             Opts::new("me_book_bid_levels", "Number of bid price levels"),
             &["symbol"],
@@ -307,7 +305,7 @@ impl EngineMetrics {
             .register(Box::new(book_depth_ask_qty.clone()))
             .expect("metric can be registered");
 
-        // ── Cancel/Amend ────────────────────────────────────────────────
+        // Cancel/Amend
         let cancels_total = IntCounterVec::new(
             Opts::new("me_cancels_total", "Successful cancellations"),
             &["symbol"],
@@ -335,7 +333,7 @@ impl EngineMetrics {
             .register(Box::new(amends_total.clone()))
             .expect("metric can be registered");
 
-        // ── Stop Orders ─────────────────────────────────────────────────
+        // Stop Orders
         let stop_orders_pending = IntGaugeVec::new(
             Opts::new("me_stop_orders_pending", "Pending stop orders"),
             &["symbol"],
@@ -354,7 +352,7 @@ impl EngineMetrics {
             .register(Box::new(stop_triggers_total.clone()))
             .expect("metric can be registered");
 
-        // ── System ──────────────────────────────────────────────────────
+        // System
         let commands_total = IntCounterVec::new(
             Opts::new("me_commands_total", "Total commands processed"),
             &["command_type"],
@@ -379,7 +377,7 @@ impl EngineMetrics {
             .register(Box::new(active_symbols.clone()))
             .expect("metric can be registered");
 
-        // ── WAL/Persistence ─────────────────────────────────────────────
+        // WAL/Persistence
         let wal_writes_total = IntCounter::new("me_wal_writes_total", "WAL write operations")
             .expect("metric can be created");
         registry
@@ -399,7 +397,7 @@ impl EngineMetrics {
             .register(Box::new(snapshot_saves_total.clone()))
             .expect("metric can be registered");
 
-        // ── Connection Metrics ──────────────────────────────────────────
+        // Connection Metrics
         let connections_total = IntCounterVec::new(
             Opts::new("me_connections_total", "Total connections opened"),
             &["transport"],
@@ -454,7 +452,7 @@ impl EngineMetrics {
             .register(Box::new(connection_frames_out_total.clone()))
             .expect("metric can be registered");
 
-        // ── Protocol Errors ─────────────────────────────────────────────
+        // Protocol Errors
         let protocol_errors_total = IntCounterVec::new(
             Opts::new("me_protocol_errors_total", "Protocol errors by type"),
             &["error_type"],
@@ -464,7 +462,7 @@ impl EngineMetrics {
             .register(Box::new(protocol_errors_total.clone()))
             .expect("metric can be registered");
 
-        // ── Invariant Violations ────────────────────────────────────────
+        // Invariant Violations
         let invariant_violations_total = IntCounterVec::new(
             Opts::new(
                 "me_invariant_violations_total",
@@ -477,7 +475,7 @@ impl EngineMetrics {
             .register(Box::new(invariant_violations_total.clone()))
             .expect("metric can be registered");
 
-        // ── Matching Detail ─────────────────────────────────────────────
+        // Matching Detail
         let matching_duration_seconds = HistogramVec::new(
             HistogramOpts::new(
                 "me_matching_duration_seconds",
@@ -536,7 +534,7 @@ impl EngineMetrics {
             .register(Box::new(stop_cascade_duration_seconds.clone()))
             .expect("metric can be registered");
 
-        // ── Shard Metrics ───────────────────────────────────────────────
+        // Shard Metrics
         let shard_queue_depth = IntGaugeVec::new(
             Opts::new("me_shard_queue_depth", "Queue depth per shard"),
             &["shard"],
@@ -555,7 +553,7 @@ impl EngineMetrics {
             .register(Box::new(shard_commands_total.clone()))
             .expect("metric can be registered");
 
-        // ── WAL Detail ──────────────────────────────────────────────────
+        // WAL Detail
         let wal_flush_duration_seconds = Histogram::with_opts(
             HistogramOpts::new("me_wal_flush_duration_seconds", "WAL flush duration")
                 .buckets(vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]),
@@ -628,8 +626,6 @@ impl EngineMetrics {
             registry: registry.clone(),
         }
     }
-
-    // ─── Convenience methods ────────────────────────────────────────────────
 
     /// Record an incoming command by type string.
     /// `command_type` should be "place_order", "cancel_order", or "amend_order".
@@ -1004,8 +1000,6 @@ impl EngineMetrics {
     }
 }
 
-// ─── HTTP scrape endpoint ───────────────────────────────────────────────────
-
 /// Returns all gathered metrics encoded in Prometheus text exposition format.
 /// Suitable for serving on an HTTP `/metrics` endpoint.
 pub fn metrics_handler(registry: &Registry) -> String {
@@ -1017,8 +1011,6 @@ pub fn metrics_handler(registry: &Registry) -> String {
         .expect("encoding metrics should not fail");
     String::from_utf8(buffer).expect("prometheus output is valid UTF-8")
 }
-
-// ─── Label helpers ──────────────────────────────────────────────────────────
 
 fn side_label(side: Side) -> &'static str {
     match side {

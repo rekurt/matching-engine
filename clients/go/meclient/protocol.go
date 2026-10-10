@@ -498,7 +498,6 @@ func decodeStopTriggered(data []byte) (*StopTriggered, error) {
 	}, nil
 }
 
-// ─── Connection management codecs ─────────────────────────────────────────
 
 // EncodeHandshake builds a Handshake payload: a single byte with the client
 // protocol version.

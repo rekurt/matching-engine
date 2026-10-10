@@ -1,37 +1,31 @@
 # Matching Engine Configuration
-# Конфигурация матчинг-движка
 
 [server]
-# TCP listen address / Адрес TCP сервера
+# TCP listen address
 tcp_addr = "127.0.0.1:9090"
-# Metrics/Admin HTTP listen address / Адрес HTTP метрик и админки.
+# Metrics/Admin HTTP listen address
 # Bind to loopback by default: /metrics and /admin endpoints are UNAUTHENTICATED
-# (except mutating admin routes, which require server.admin.api_key) and expose
+# (halt/resume require server.admin.api_key) and expose
 # trading volumes, latencies, and book state. Put them behind a reverse proxy or
 # private network rather than binding 0.0.0.0.
-# Адрес HTTP метрик/админки. По умолчанию loopback: /metrics без аутентификации.
 metrics_addr = "127.0.0.1:9091"
 # Number of engine shards (0 = auto, uses available_parallelism)
-# Количество шардов (0 = авто, по числу ядер)
 shards = 0
-# Optional Unix domain socket path / Путь к Unix-сокету (опционально)
+# Optional Unix domain socket path
 # uds_path = "/tmp/matching-engine.sock"
 
 [server.admin]
 # API key for admin endpoints. Empty = mutating admin endpoints DISABLED.
-# Set a strong secret (>= 16 chars) to enable halt/resume. Never ship empty to prod.
-# API ключ для админки. Пустой = мутирующие эндпоинты ОТКЛЮЧЕНЫ.
+# Set a secret of at least 16 printable non-space ASCII characters to enable halt/resume.
 # api_key = "REPLACE_WITH_STRONG_SECRET"
 api_key = ""
 
 [server.shutdown]
 # Timeout in seconds for draining connections on shutdown.
-# Таймаут в секундах на закрытие соединений при остановке.
 drain_timeout_secs = 30
 
-# Trading pair definitions / Определения торговых пар
+# Trading pair definitions
 # Each [[symbols]] entry registers a trading pair.
-# Каждая запись [[symbols]] регистрирует торговую пару.
 #
 # Optional per-symbol `invariant_policy` controls how the matching
 # engine reacts to internal data-structure corruption:

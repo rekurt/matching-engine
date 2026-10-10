@@ -65,8 +65,6 @@ fn limit_sell(
     )
 }
 
-// ─── Basic snapshot ──────────────────────────────────────────────────────────
-
 #[test]
 fn test_empty_snapshot_for_new_session() {
     let router = Router::new(1);
@@ -170,8 +168,6 @@ fn test_snapshot_excludes_filled_orders() {
         "filled order should not appear in snapshot"
     );
 }
-
-// ─── Multi-symbol / multi-shard fan-out ─────────────────────────────────────
 
 #[test]
 fn test_snapshot_aggregates_across_symbols() {

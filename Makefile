@@ -1,20 +1,17 @@
 .PHONY: setup build build-release build-tls test test-all bench bench-latency bench-throughput bench-e2e bench-stress fuzz-codec fuzz-codec-install lint fmt fmt-check doc clean run run-release docker docker-push help
 
-# ─── Configuration ────────────────────────────────────────────────────────────
 
 BINARY        := me-server
 DOCKER_IMAGE  ?= matching-engine
 DOCKER_TAG    ?= latest
-TCP_ADDR      ?= 0.0.0.0:2090
+TCP_ADDR      ?= 127.0.0.1:9090
 CONFIG        ?= config.toml
 
-# ─── Developer setup (run once after clone) ───────────────────────────────────
 
 setup:
 	git config core.hooksPath .githooks
 	@echo "Pre-commit hook activated (.githooks/pre-commit)"
 
-# ─── Build ────────────────────────────────────────────────────────────────────
 
 build:
 	cargo build -p $(BINARY)
@@ -23,12 +20,11 @@ build-release:
 	cargo build --release -p $(BINARY)
 
 build-tls:
-	cargo build --release -p $(BINARY) --features me-io/tls
+	cargo build --release --locked -p $(BINARY) --features tls
 
 build-all:
 	cargo build --workspace
 
-# ─── Test ─────────────────────────────────────────────────────────────────────
 
 test:
 	cargo test --workspace
@@ -45,7 +41,6 @@ test-book:
 test-persist:
 	cargo test -p me-persist
 
-# ─── Benchmarks ───────────────────────────────────────────────────────────────
 
 bench:
 	cargo bench -p me-bench
@@ -62,7 +57,6 @@ bench-e2e:
 bench-stress:
 	cargo bench -p me-bench --bench stress
 
-# ─── Fuzzing (requires nightly + cargo-fuzz) ──────────────────────────────────
 # One-time: `make fuzz-codec-install` then `make fuzz-codec` (runs until Ctrl+C).
 # Crashes are saved to crates/me-io/fuzz/artifacts/.
 
@@ -76,10 +70,9 @@ fuzz-codec:
 fuzz-codec-handshaked:
 	cd crates/me-io/fuzz && cargo +nightly fuzz run decode_frame_handshaked -- -max_total_time=60
 
-# ─── Code quality ─────────────────────────────────────────────────────────────
 
 lint:
-	cargo clippy --workspace -- -D warnings
+	cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
 fmt:
 	cargo fmt --all
@@ -90,7 +83,6 @@ fmt-check:
 doc:
 	cargo doc --workspace --no-deps --open
 
-# ─── Run ──────────────────────────────────────────────────────────────────────
 
 run:
 	cargo run -p $(BINARY) -- --config $(CONFIG) --tcp-addr $(TCP_ADDR)
@@ -98,7 +90,6 @@ run:
 run-release:
 	cargo run --release -p $(BINARY) -- --config $(CONFIG) --tcp-addr $(TCP_ADDR)
 
-# ─── Docker ───────────────────────────────────────────────────────────────────
 
 docker:
 	docker build -t $(DOCKER_IMAGE):$(DOCKER_TAG) .
@@ -106,7 +97,6 @@ docker:
 docker-push:
 	docker push $(DOCKER_IMAGE):$(DOCKER_TAG)
 
-# ─── Misc ─────────────────────────────────────────────────────────────────────
 
 clean:
 	cargo clean

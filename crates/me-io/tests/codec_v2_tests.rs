@@ -18,8 +18,6 @@ use me_io::protocol::{ConnectionState, MessageType, FRAME_HEADER_SIZE, PROTOCOL_
 /// System clock for tests.
 static SYS_CLK: me_clock::SystemClock = me_clock::SystemClock;
 
-// ─── Header size ─────────────────────────────────────────────────────────────
-
 #[test]
 fn test_frame_header_size_is_22_bytes_v2() {
     assert_eq!(
@@ -32,8 +30,6 @@ fn test_frame_header_size_is_22_bytes_v2() {
 fn test_protocol_version_is_2() {
     assert_eq!(PROTOCOL_VERSION, 2);
 }
-
-// ─── Frame builder ──────────────────────────────────────────────────────────
 
 fn build_frame_v2(msg_type: u8, seq: u64, request_id: u64, payload: &[u8]) -> Vec<u8> {
     let len = payload.len() as u32;
@@ -52,8 +48,6 @@ fn active_conn() -> ConnectionCodecState {
     conn.state = ConnectionState::Active;
     conn
 }
-
-// ─── PlaceOrder request_id round-trip ───────────────────────────────────────
 
 fn place_order_payload_v2(order_id: u64, symbol: u16, qty_raw: u64) -> Vec<u8> {
     // OrderId(8)+Symbol(2)+Side(1)+Type(1)+TIF(1)+Price(8)+StopPrice(8)+Qty(8) = 37
@@ -136,8 +130,6 @@ fn test_handshake_allows_zero_request_id() {
     assert!(matches!(decoded, DecodedFrame::Handshake { .. }));
 }
 
-// ─── Ping with piggyback ACK ─────────────────────────────────────────────────
-
 #[test]
 fn test_ping_with_piggyback_ack() {
     let mut conn = active_conn();
@@ -171,8 +163,6 @@ fn test_ping_without_payload_defaults_ack_to_zero() {
     }
 }
 
-// ─── Acknowledge message ────────────────────────────────────────────────────
-
 #[test]
 fn test_acknowledge_frame() {
     let mut conn = active_conn();
@@ -193,8 +183,6 @@ fn test_acknowledge_frame() {
         _ => panic!("expected Acknowledge variant"),
     }
 }
-
-// ─── GetOpenOrders ──────────────────────────────────────────────────────────
 
 #[test]
 fn test_get_open_orders_frame() {
@@ -221,8 +209,6 @@ fn test_get_open_orders_requires_non_zero_request_id() {
     let result = decode_frame(&frame, &mut conn, &SYS_CLK);
     assert!(matches!(result, Err(DecodeError::InvalidRequestId)));
 }
-
-// ─── Pong with piggyback ACK (encode) ───────────────────────────────────────
 
 #[test]
 fn test_encode_pong_v2_carries_ack() {
@@ -252,8 +238,6 @@ fn test_encode_pong_v2_carries_ack() {
     let ack = u64::from_le_bytes(buf[22..30].try_into().unwrap());
     assert_eq!(ack, 12345);
 }
-
-// ─── Server→client frames have request_id=0 in header (or mirrored) ─────────
 
 #[test]
 fn test_encode_events_mirrors_request_id() {
@@ -293,8 +277,6 @@ fn test_encode_events_unsolicited_zero_request_id() {
     let req_id = u64::from_le_bytes(buf[14..22].try_into().unwrap());
     assert_eq!(req_id, 0, "Unsolicited event should have request_id=0");
 }
-
-// ─── New server→client message encoders ─────────────────────────────────────
 
 #[test]
 fn test_encode_replay_gap() {
@@ -368,8 +350,6 @@ fn test_encode_flow_control_warning_hard() {
     assert_eq!(buf[23], 1); // is_hard_limit = true
 }
 
-// ─── Sequence validation still works in v2 ─────────────────────────────────
-
 #[test]
 fn test_sequence_out_of_order_still_rejected() {
     let mut conn = active_conn();
@@ -385,8 +365,6 @@ fn test_sequence_out_of_order_still_rejected() {
         Err(DecodeError::SequenceOutOfOrder { .. })
     ));
 }
-
-// ─── Version mismatch rejection ─────────────────────────────────────────────
 
 #[test]
 fn test_v1_frame_rejected_by_v2_server() {

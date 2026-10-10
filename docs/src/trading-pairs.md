@@ -1,188 +1,33 @@
-# Торговые пары
+# Trading pairs
 
-Готовые конфигурации для популярных активов. Скопируйте нужные блоки в свой `config.toml`.
-
----
-
-## BTC/USDT
-
-Bitcoin с точностью цены до $0.01 и количеством до 0.00001 BTC.
+Each `[[symbols]]` entry registers one symbol. IDs must be unique. Prices and quantities on the wire always use scale `10^8`; `price_scale` and `qty_scale` do not change the wire scale.
 
 ```toml
-[[symbols]]
-id          = 0
-base        = "BTC"
-quote       = "USDT"
-price_scale = 2       # цена: $50 000.00 → raw 5_000_000
-qty_scale   = 8       # кол-во: 1.50000000 BTC → raw 150_000_000
-min_qty     = "0.00001"
-max_qty     = "10000.0"
-qty_step    = "0.00001"
-price_step  = "0.01"
-max_orders_per_second = 200
-```
-
----
-
-## ETH/USDT
-
-Ethereum. Те же параметры точности, что и у BTC, но min_qty выше (ETH дешевле).
-
-```toml
-[[symbols]]
-id          = 1
-base        = "ETH"
-quote       = "USDT"
-price_scale = 2
-qty_scale   = 8
-min_qty     = "0.0001"
-max_qty     = "100000.0"
-qty_step    = "0.0001"
-price_step  = "0.01"
-max_orders_per_second = 500
-```
-
----
-
-## SOL/USDT
-
-Solana. Цена точнее ($0.0001) из-за меньшей стоимости актива.
-
-```toml
-[[symbols]]
-id          = 2
-base        = "SOL"
-quote       = "USDT"
-price_scale = 4       # цена: $145.2500 → raw 1_452_500
-qty_scale   = 8
-min_qty     = "0.001"
-max_qty     = "100000.0"
-qty_step    = "0.001"
-price_step  = "0.0001"
-max_orders_per_second = 1000
-```
-
----
-
-## Мем-коин (8 знаков, микроцены)
-
-Для токенов с очень низкой ценой и огромным обращением. Используется максимальная точность как для цены, так и для количества.
-
-```toml
-[[symbols]]
-id          = 3
-base        = "PEPE"
-quote       = "USDT"
-price_scale = 8       # цена: $0.00001234 → raw 1_234
-qty_scale   = 0       # целые токены (без дробей)
-min_qty     = "1000"
-max_qty     = "1000000000000.0"
-qty_step    = "1000"
-price_step  = "0.00000001"
-max_orders_per_second = 2000
-```
-
-> Примечание: `qty_scale = 0` означает что количество — целое число без дробной части. Подходит для мем-коинов, где торгуются целые токены.
-
----
-
-## USDC/USDT (стейблкоин пара)
-
-Пара стейблкоинов с высокой точностью цены и большими объёмами.
-
-```toml
-[[symbols]]
-id          = 4
-base        = "USDC"
-quote       = "USDT"
-price_scale = 6       # цена: $1.000100 → raw 100_010_000
-qty_scale   = 6       # кол-во: 1000.000000 USDC → raw 100_000_000_000
-min_qty     = "1.0"
-max_qty     = "10000000.0"
-qty_step    = "0.000001"
-price_step  = "0.000001"
-max_orders_per_second = 5000
-```
-
----
-
-## Частые ошибки
-
-### Неправильный scale — потеря точности или переполнение
-
-**Проблема:** price_scale слишком мал — цены округляются некорректно.
-
-```toml
-# НЕПРАВИЛЬНО: SOL стоит ~$145 с шагом $0.0001
-# price_scale = 2 → нельзя представить шаг $0.0001
-[[symbols]]
-id          = 2
-price_scale = 2    # ❌ шаг $0.01, но price_step = "0.0001" — конфликт
-price_step  = "0.0001"
-```
-
-```toml
-# ПРАВИЛЬНО: scale должен соответствовать price_step
-[[symbols]]
-id          = 2
-price_scale = 4    # ✅ шаг $0.0001 = 1 в raw единицах
-price_step  = "0.0001"
-```
-
-**Правило:** `price_step` должен иметь не больше знаков после запятой чем `price_scale`. То же верно для `qty_step` и `qty_scale`.
-
----
-
-### Overlapping symbol ID — дублирующиеся идентификаторы
-
-**Проблема:** Два символа с одинаковым `id` — движок выдаст ошибку при старте.
-
-```toml
-# НЕПРАВИЛЬНО
 [[symbols]]
 id = 0
 base = "BTC"
 quote = "USDT"
+price_scale = 2
+qty_scale = 8
+min_qty = "0.00001"
+max_qty = "10000.0"
+qty_step = "0.00001"
+price_step = "0.01"
+invariant_policy = "halt_symbol"
 
-[[symbols]]
-id = 0    # ❌ дубликат ID
-base = "ETH"
-quote = "USDT"
+[symbols.risk]
+max_order_qty = "10000.0"
+max_order_notional = "100000000.0"
+price_band_bps = 1000
+reference_price = "50000.0"
+max_orders_per_second = 1000
+max_open_orders = 100000
+trading_enabled = true
+self_trade_prevention = false
 ```
 
-```toml
-# ПРАВИЛЬНО — уникальные ID
-[[symbols]]
-id = 0    # ✅ BTC/USDT
-base = "BTC"
-quote = "USDT"
+Limits and steps are decimal strings, parsed without binary floating-point rounding. Quantity must be positive, within min/max bounds and a multiple of `qty_step`. Limit prices must be positive and a multiple of `price_step`.
 
-[[symbols]]
-id = 1    # ✅ ETH/USDT
-base = "ETH"
-quote = "USDT"
-```
+For example, `50000.50` is raw price `5000050000000` and `0.5` is raw quantity `50000000`, regardless of symbol display scales. Use checked integer/decimal conversion in clients.
 
-ID передаётся в бинарном протоколе как поле `symbol_id` в каждой команде. Изменение ID существующего символа означает, что все клиенты должны использовать новый ID — это breaking change.
-
----
-
-### max_qty слишком мал для мем-коинов
-
-**Проблема:** Для токенов с большим обращением max_qty по умолчанию может отклонять легитимные ордера.
-
-```toml
-# НЕПРАВИЛЬНО для мем-коина
-[[symbols]]
-max_qty = "10000.0"   # ❌ отклонит ордер на 1 000 000 токенов
-
-# ПРАВИЛЬНО
-[[symbols]]
-max_qty = "1000000000000.0"   # ✅ триллион токенов
-```
-
----
-
-### qty_scale и price_scale не соответствуют клиентскому коду
-
-Если клиент использует hardcoded множитель, а scale в конфиге отличается — ордера будут отправлены с неверными ценами. Всегда передавайте scale клиенту при инициализации сессии или фиксируйте его в конфиге клиента.
+Adding or changing symbols, risk settings or shard count in an existing durable deployment can make recovery incompatible. Validate against copied storage and follow the [upgrade procedure](deployment.md).

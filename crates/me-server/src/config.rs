@@ -179,7 +179,7 @@ pub struct WalConfig {
     /// Path to WAL directory
     #[serde(default = "default_wal_path")]
     pub path: String,
-    /// Flush WAL to disk every N commands (0 = every command)
+    /// Legacy writer interval; server decisions sync explicitly before replies.
     #[serde(default = "default_wal_sync_interval")]
     pub sync_interval: u64,
     /// Directory for periodic book snapshots. Empty string = derive from

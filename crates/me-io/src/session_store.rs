@@ -1,29 +1,11 @@
-//! Session store v2: sharded, with dedup table and cumulative ACK support.
+//! Session ownership, retained request outcomes and bounded replay buffers.
 //!
-//! This module implements the server-side state required for **exactly-once**
-//! delivery semantics:
+//! Mutation retries reuse their original outcomes; query responses can be
+//! evicted from a bounded cache. Cumulative ACKs retire replay frames, not the
+//! durable mutation history. Persistence is enabled by the server's WAL config.
 //!
-//! 1. **Replay buffer** — per-session ring of outbound frames, indexed by
-//!    monotonic `server_seq`. Clients request replay via `ResumeSession`.
-//!
-//! 2. **Dedup table** — per-session `request_id → cached response` map.
-//!    When a client retries a command with the same `request_id` (e.g. after
-//!    reconnect during mid-request), the server returns the cached response
-//!    instead of re-executing the command. This prevents double-processing.
-//!
-//! 3. **Cumulative ACK** — clients periodically tell the server
-//!    `last_processed_server_seq` via `Ping` piggyback or explicit `Acknowledge`.
-//!    The server purges replay buffer entries up to that sequence, bounding
-//!    memory usage.
-//!
-//! ## Sharding
-//!
-//! At scale (10k+ concurrent sessions, 1M+ ops/s) a single `Mutex<HashMap>`
-//! becomes a contention bottleneck. We shard the map across a fixed 64
-//! `Mutex`es (see `NUM_SHARDS` below) keyed by the first byte of the
-//! session_id. Sharding is deliberately decoupled from core count so sessions
-//! hash to the same shard across processes/machines. Since session IDs are
-//! random, this gives roughly uniform distribution.
+//! A fixed set of 64 locks distributes session access independently of engine
+//! shard topology and host CPU count.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
@@ -44,7 +26,7 @@ pub use me_core::SessionId;
 /// the only way to externally rewrite the counter (used after ResumeSession
 /// to continue from `SessionStore::next_outbound_seq()`).
 ///
-/// See RFC-0001 Task B (`docs/rfcs/0001-type-safety-newtypes.md`).
+/// See `docs/rfcs/0001-type-safety-newtypes.md` for the sequence invariant.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct ServerFrameSeq(u64);
 
@@ -142,8 +124,6 @@ pub enum ReplayResult {
     /// Session not found or expired.
     SessionNotFound,
 }
-
-// ─── Session entry ───────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct SessionEntry {
@@ -378,8 +358,6 @@ impl SessionEntry {
         self.dedup_order.push_back(request_id);
     }
 }
-
-// ─── Sharded SessionStore ────────────────────────────────────────────────────
 
 type Shard = Mutex<FxHashMap<SessionId, SessionEntry>>;
 

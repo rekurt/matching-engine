@@ -79,8 +79,6 @@ impl Default for RdtscClock {
     }
 }
 
-// --- Fallback for non-x86_64 (ARM, etc.) ---
-
 #[cfg(not(target_arch = "x86_64"))]
 pub struct RdtscClock {
     inner: crate::CoarseClock,

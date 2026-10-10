@@ -6,8 +6,6 @@ use me_core::order::{Order, OrderType, TimeInForce};
 use me_core::symbol::SymbolConfig;
 use me_core::types::{FixedPrice, FixedQty, OrderId, Side, SymbolId};
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
 fn make_config() -> SymbolConfig {
     SymbolConfig::default_btc_usdt()
 }
@@ -91,8 +89,6 @@ fn has_cancelled(events: &[MatchEvent], id: OrderId) -> bool {
         .any(|e| matches!(e, MatchEvent::OrderCancelled { order_id, .. } if *order_id == id))
 }
 
-// ─── Level total_qty accuracy (FOK precheck depends on it) ───────────────────
-
 /// Regression: a fully-filled maker's quantity must leave `level.total_qty`
 /// even when the level survives because another order remains. Otherwise the
 /// cached aggregate overcounts and `available_*_qty` (used by the FOK precheck)
@@ -169,8 +165,6 @@ fn test_fok_rejected_against_true_residual_not_stale_total() {
     assert_eq!(count_trades(e3.events()), 0, "rejected FOK must not trade");
 }
 
-// ─── FOK: full rejection on insufficient liquidity ───────────────────────────
-
 /// A FOK limit buy for more than the available ask quantity must be fully rejected
 /// without generating any trades or consuming any resting liquidity.
 #[test]
@@ -241,8 +235,6 @@ fn test_fok_market_insufficient_liquidity() {
     assert_eq!(book.order_count(), 1, "resting ask must survive");
 }
 
-// ─── IOC: partial fill then cancel remainder ──────────────────────────────────
-
 /// An IOC buy should fill what is available then cancel the unfilled remainder.
 #[test]
 fn test_ioc_partial_fill_remainder_cancelled() {
@@ -304,8 +296,6 @@ fn test_ioc_sell_partial_fill() {
     assert_eq!(book.order_count(), 0);
 }
 
-// ─── Market order on empty book ───────────────────────────────────────────────
-
 /// A market buy into an empty ask side must be accepted then immediately cancelled.
 #[test]
 fn test_market_buy_empty_book_cancelled() {
@@ -357,8 +347,6 @@ fn test_market_sell_empty_book_cancelled() {
         "full qty should be remaining"
     );
 }
-
-// ─── Sweep across multiple price levels ───────────────────────────────────────
 
 /// A market buy should consume asks in ascending price order (best ask first).
 #[test]
@@ -468,8 +456,6 @@ fn test_limit_sell_sweeps_bid_levels() {
     assert_eq!(book.order_count(), 0);
 }
 
-// ─── Self-trade ───────────────────────────────────────────────────────────────
-
 /// The engine does not enforce self-trade prevention.
 /// Two orders from the same conceptual client fill each other normally.
 #[test]
@@ -503,8 +489,6 @@ fn test_self_trade_fills_normally() {
     assert!(has_filled(evts, 2), "incoming sell fully filled");
     assert_eq!(book.order_count(), 0, "book is empty after self-trade");
 }
-
-// ─── Stop-limit: trigger behaviour ───────────────────────────────────────────
 
 /// A stop-limit buy should NOT trigger when the trade price is below stop_price,
 /// and SHOULD trigger when the price reaches or exceeds stop_price.
@@ -630,8 +614,6 @@ fn test_stop_limit_triggered_and_matched() {
     assert!(has_filled(evts, 2), "triggered order filled");
     assert_eq!(book.order_count(), 0);
 }
-
-// ─── Additional edge cases ────────────────────────────────────────────────────
 
 /// Duplicate order ID is rejected with DuplicateOrderId.
 #[test]

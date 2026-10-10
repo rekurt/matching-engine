@@ -88,8 +88,6 @@ pub enum AuditEvent {
     TradingResumed { timestamp_ns: u64, symbol_id: u16 },
 }
 
-// ─── Fixed-size entry for SPSC ring buffer (zero-alloc hot path) ────────────
-
 /// Fixed-size audit entry for the async ring buffer.
 /// No heap, no pointers, `Copy`. Matching thread writes this, audit thread reads.
 #[derive(Clone, Copy, Debug, Default)]
@@ -287,8 +285,6 @@ impl AuditEntry {
         }
     }
 }
-
-// ─── Serde helpers: u8 → human-readable string in JSON ─────────────────────
 
 fn ser_side<S: serde::Serializer>(v: &u8, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(match v {

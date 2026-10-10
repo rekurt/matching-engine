@@ -3,16 +3,12 @@ use serde::{Deserialize, Serialize};
 use crate::session::SessionId;
 use crate::types::{FixedPrice, FixedQty, OrderId, SequenceId, Side, SymbolId};
 
-// ─── Order execution flags (bit mask, stored in Order.flags) ─────────────────
-
 /// Reject the order if it would immediately cross the spread (maker-only).
 pub const ORDER_FLAG_POST_ONLY: u8 = 0x01;
 /// Reject if the order would not reduce an open position (futures semantics).
 pub const ORDER_FLAG_REDUCE_ONLY: u8 = 0x02;
 /// Like POST_ONLY but also applies to stop orders once triggered.
 pub const ORDER_FLAG_MAKER_OR_CANCEL: u8 = 0x04;
-
-// ─── OrderType ───────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[repr(u8)]
@@ -22,8 +18,6 @@ pub enum OrderType {
     StopLimit = 2,
     StopMarket = 3,
 }
-
-// ─── TimeInForce ─────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[repr(u8)]
@@ -39,8 +33,6 @@ pub enum TimeInForce {
     GTD = 3,
 }
 
-// ─── OrderStatus ─────────────────────────────────────────────────────────────
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum OrderStatus {
@@ -53,16 +45,9 @@ pub enum OrderStatus {
     Triggered,
 }
 
-// ─── Order ───────────────────────────────────────────────────────────────────
-
-/// Core order struct. 112 bytes.
-///
-/// ## Layout rationale
-/// Fields ordered to minimize padding. Hot-path fields (price/qty/status)
-/// come first. The 16-byte `client_session_id` lives at the end — it's only
-/// touched at submission time (codec decode) and at snapshot time (OpenOrders
-/// scan), NEVER in the matching fast path. Placing it last keeps the critical
-/// fields cache-hot.
+/// Order state (112 bytes, enforced by the layout guard below).
+/// Matching fields precede session identity to keep the commonly
+/// accessed fields together; wire encoding is independent of this layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(C)]
 pub struct Order {
@@ -91,7 +76,7 @@ pub struct Order {
     pub order_type: OrderType,
     pub tif: TimeInForce,
     pub status: OrderStatus,
-    /// Execution flags bit-mask (ORDER_FLAG_POST_ONLY, etc.). Former _pad[0].
+    /// Execution flags bit mask; see `ORDER_FLAG_POST_ONLY` and related constants.
     pub flags: u8,
     pub _pad: u8,
     /// Client session that submitted this order. Used for per-client

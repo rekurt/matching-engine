@@ -6,28 +6,21 @@
 //!
 //! ## Wire Protocol
 //!
-//! Custom binary protocol optimized for minimal latency:
+//! Protocol v2 uses a 22-byte header: payload length (`u32`), version (`u8`),
+//! message type (`u8`), sequence (`u64`) and request ID (`u64`). All integers
+//! are little-endian; the length excludes the header.
 //!
-//! ```text
-//! ┌──────────┬──────────┬──────────┬──────────┬─────────────────┐
-//! │ len: u32 │ ver: u8  │ type: u8 │ seq: u64 │ payload: [u8]   │
-//! │ 4 bytes  │ 1 byte   │ 1 byte   │ 8 bytes  │ variable        │
-//! └──────────┴──────────┴──────────┴──────────┴─────────────────┘
-//! ```
-//!
-//! - **14-byte header**, `len` covers payload only
-//! - All integers little-endian
-//! - Protocol version negotiated via Handshake/HandshakeAck
-//! - Monotonically increasing sequence numbers per connection
+//! Client sequences increase within a connection. Positive server sequences
+//! identify the session replay stream; sequence zero is out-of-band.
 //!
 //! ## Servers
 //!
 //! - [`tcp_server::TcpServer`] — Async TCP server (tokio), one task per connection
-//! - [`uds_server::UdsServer`] — Unix Domain Socket server (lower latency for co-located processes)
+//! - [`uds_server::UdsServer`] — Unix Domain Socket server for co-located processes
 //!
 //! Both servers support graceful shutdown via watch channel and optional Prometheus metrics.
 //!
-//! See `docs/PROTOCOL.md` for the full wire protocol specification.
+//! See `docs/src/protocol.md` for the full wire protocol specification.
 
 pub mod codec;
 pub mod protocol;

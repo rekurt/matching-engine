@@ -21,7 +21,10 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/rekurt/matching-engine"
-description = "High-performance HFT cryptocurrency spot matching engine"
+authors = ["nikita42 (rekurt)"]
+readme = "README.md"
+rust-version = "1.96"
+description = "Spot order matching service with durable session recovery"
 
 [workspace.dependencies]
 me-core = { path = "crates/me-core" }

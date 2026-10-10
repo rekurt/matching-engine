@@ -103,8 +103,6 @@ fn gtd_buy_expired(id: u64, price: f64, qty: f64) -> Command {
     )
 }
 
-// ─── WAL Pre-mode tests ─────────────────────────────────────────────────────
-
 #[test]
 fn test_wal_pre_mode_writes_before_matching() {
     let wal_dir = temp_wal_dir("pre_mode");
@@ -527,8 +525,6 @@ fn test_wal_multi_shard() {
         _ => panic!("Expected PlaceOrder on shard 1"),
     }
 }
-
-// ─── GTD expiry durability (replay determinism) ─────────────────────────────
 
 #[test]
 fn test_gtd_expiry_is_journaled_before_triggering_command() {

@@ -58,8 +58,6 @@ fn has_reject(events: &[MatchEvent], reason: RejectReason) -> bool {
         .any(|ev| matches!(ev, MatchEvent::OrderRejected { reason: r, .. } if *r == reason))
 }
 
-// ─── C. Min/Max Qty and Lot Size ────────────────────────────────────────────
-
 /// C23: Order with qty < min_qty → reject
 #[test]
 fn test_c23_qty_below_min() {
@@ -331,8 +329,6 @@ fn test_c35_fill_exact_step() {
     assert!(e.book().contains_order(1)); // ask still on book
 }
 
-// ─── E. IOC (Immediate or Cancel) ───────────────────────────────────────────
-
 /// E41: IOC buy with full crossing — full fill, nothing on book
 #[test]
 fn test_e41_ioc_full_fill() {
@@ -391,8 +387,6 @@ fn test_e44_ioc_sell() {
     assert_eq!(count_trades(&events), 1);
     assert!(!e.book().contains_order(2));
 }
-
-// ─── F. FOK (Fill or Kill) ──────────────────────────────────────────────────
 
 /// F45: FOK buy, liquidity exactly sufficient — full fill
 #[test]
@@ -470,8 +464,6 @@ fn test_f49_fok_sell() {
         .to_vec();
     assert_eq!(count_trades(&events), 1);
 }
-
-// ─── H. Cancel ──────────────────────────────────────────────────────────────
 
 /// H58: Cancel existing order — removed from book
 #[test]
@@ -613,8 +605,6 @@ fn test_h65_cancel_all_bids() {
     assert!(e.book().bids_empty());
 }
 
-// ─── I. Amend ───────────────────────────────────────────────────────────────
-
 /// I66: Amend qty down — in-place, time priority preserved
 #[test]
 fn test_i66_amend_qty_down() {
@@ -712,8 +702,6 @@ fn test_i70_amend_nonexistent() {
     assert!(has_reject(events, RejectReason::OrderNotFound));
 }
 
-// ─── J. Book State Integrity ────────────────────────────────────────────────
-
 /// J73: After operations, best_bid < best_ask
 #[test]
 fn test_j73_no_crossed_book() {
@@ -776,8 +764,6 @@ fn test_j77_order_count() {
     });
     assert_eq!(e.book().order_count(), 2);
 }
-
-// ─── GTD (Good-Till-Date) ────────────────────────────────────────────────────
 
 fn gtd_buy(id: OrderId, price: f64, qty: f64, expire_at: u64) -> Command {
     Command::PlaceOrder(
@@ -850,8 +836,6 @@ fn test_gtd_future_expiry_not_swept() {
     assert!(expired.is_empty(), "future GTD must not be swept");
     assert_eq!(e.book().order_count(), 1);
 }
-
-// ─── Iceberg ─────────────────────────────────────────────────────────────────
 
 fn iceberg_sell(id: OrderId, price: f64, total: f64, display: f64) -> Command {
     Command::PlaceOrder(

@@ -1,152 +1,56 @@
-# Конфигурация
+# Configuration
 
-Конфигурация хранится в TOML-файле. По умолчанию движок ищет `config.toml` в рабочей директории. Путь задаётся флагом `--config`.
+Pass `--config config.toml`. Without it, the binary uses built-in defaults. CLI overrides are `--tcp-addr`, `--metrics-addr`, `--shards` and `--uds-path`. Unknown TOML fields and invalid combinations are rejected before trading starts.
 
----
+## Server
 
-## Секция `[server]`
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `server.tcp_addr` | `127.0.0.1:9090` | Trading listener |
+| `server.metrics_addr` | `127.0.0.1:9091` | HTTP health, metrics and admin |
+| `server.shards` | `0` | Auto CPU count; pin a count for recovery compatibility |
+| `server.uds_path` | absent | Optional Unix domain socket |
+| `server.allow_plaintext_remote` | `false` | Explicit opt-in for non-loopback plaintext TCP |
+| `server.clock` | `coarse` | `system`, `coarse` or `rdtsc` |
+| `server.pin_threads` | `false` | Linux CPU affinity |
+| `server.shutdown.drain_timeout_secs` | `30` | Connection drain deadline |
+| `server.heartbeat.interval_ms` | `5000` | Advertised heartbeat interval |
+| `server.heartbeat.timeout_ms` | `15000` | Connection read timeout |
+| `server.session.replay_buffer_size` | `1000` | Per-session replay frame capacity |
+| `server.session.ttl_secs` | `60` | Idle lifetime for unused sessions |
 
-```toml
-[server]
-tcp_addr     = "127.0.0.1:9090"
-metrics_addr = "127.0.0.1:9091"
-shards       = 0
-# uds_path   = "/tmp/me.sock"  # опционально
-```
+Configure `server.tls.cert_path` and `key_path` together; `client_ca_path` enables required client certificates. TLS needs the `tls` build feature. The HTTP listener has no native TLS.
 
-| Поле | Тип | По умолчанию | Описание |
-|------|-----|-------------|----------|
-| `tcp_addr` | string | `"127.0.0.1:9090"` | Адрес TCP-сервера для клиентских подключений |
-| `metrics_addr` | string | `"127.0.0.1:9091"` | Адрес HTTP-сервера для Prometheus метрик и admin API |
-| `shards` | u32 | `0` | Количество шардов движка. `0` = авто (по числу CPU) |
-| `uds_path` | string | — | Путь к Unix-сокету (опционально, вместо или вместе с TCP) |
+`server.admin.api_key` is empty by default, disabling halt/resume routes. Configured keys require at least 16 printable, non-space ASCII characters. Status and metrics remain public; protect the HTTP listener with a private network or proxy.
 
-### Подсекция `[server.admin]`
+## Symbols and risk
 
-```toml
-[server.admin]
-api_key = "secret-key"
-```
+Each `[[symbols]]` entry defines an ID, base/quote names, price/quantity scales and decimal-string limits. See [trading pairs](trading-pairs.md). The optional `[symbols.risk]` table enables these controls:
 
-| Поле | Тип | Описание |
-|------|-----|----------|
-| `api_key` | string | API-ключ для admin-эндпоинтов (`/admin/...`). Пустая строка отключает изменяющие состояние операции |
+| Field | Meaning |
+| --- | --- |
+| `max_order_qty` | Maximum order quantity, including hidden quantity |
+| `max_order_notional` | Conservative quote notional cap |
+| `price_band_bps` | Deviation from reference price; zero disables |
+| `reference_price` | Initial reference price as a decimal string |
+| `max_orders_per_second` | Token-bucket limit; zero disables |
+| `max_open_orders` | Resting-order limit; zero disables |
+| `trading_enabled` | Admission switch |
+| `self_trade_prevention` | Reject same-session self-matches |
 
-### Подсекция `[server.shutdown]`
+Without a risk table, these checks do not run. Market orders subject to notional/reference checks fail closed if no reference price is available. Seed `reference_price` or establish a traded reference. Position limits are not supported without an external account ledger.
 
-```toml
-[server.shutdown]
-drain_timeout_secs = 30
-```
+`invariant_policy` is `halt_symbol` by default. `strict` panics on internal invariant violations; `continue` logs and continues and should be reserved for controlled recovery.
 
-| Поле | Тип | Описание |
-|------|-----|----------|
-| `drain_timeout_secs` | u64 | Секунды ожидания drain при graceful shutdown |
+## Storage
 
----
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `wal.enabled` | `true` | Enable durable recovery |
+| `wal.mode` | `pre` | `pre` or `post`; both persist decisions/outcomes before reply |
+| `wal.path` | `./data/wal` | Journal directory |
+| `wal.sync_interval` | `100` | Legacy writer interval; the server syncs each decision explicitly, so this does not batch server replies |
+| `wal.snapshot_dir` | derived | Defaults to `{wal.path}/snapshots` |
+| `wal.snapshot_interval` | `100000` | Commands per shard checkpoint; zero disables |
 
-## Секция `[[symbols]]`
-
-Каждая запись `[[symbols]]` — один торговый инструмент. Записей может быть несколько.
-
-```toml
-[[symbols]]
-id          = 0
-base        = "BTC"
-quote       = "USDT"
-price_scale = 2
-qty_scale   = 8
-min_qty     = "0.00001"
-max_qty     = "10000.0"
-qty_step    = "0.00001"
-price_step  = "0.01"
-max_orders_per_second = 100
-```
-
-### Поля символа
-
-| Поле | Тип | Обязательно | Описание |
-|------|-----|------------|----------|
-| `id` | u32 | да | Уникальный числовой идентификатор символа. Используется в протоколе |
-| `base` | string | да | Базовая валюта (покупаемый актив), например `"BTC"` |
-| `quote` | string | да | Котируемая валюта (в чём измеряется цена), например `"USDT"` |
-| `price_scale` | u8 | да | Количество знаков после запятой для цены (fixed-point) |
-| `qty_scale` | u8 | да | Количество знаков после запятой для количества (fixed-point) |
-| `min_qty` | string | да | Минимальное количество в ордере (в единицах базовой валюты) |
-| `max_qty` | string | да | Максимальное количество в ордере |
-| `qty_step` | string | да | Минимальный шаг изменения количества (лот) |
-| `price_step` | string | да | Минимальный шаг изменения цены (тик) |
-| `max_orders_per_second` | u32 | нет | Rate limit для одного клиента по этому символу. `0` = без ограничений |
-
----
-
-## Fixed-Point кодирование
-
-Движок хранит цены и количества как `i64` с фиксированной точкой. Реальное значение:
-
-```
-real_value = raw_i64 / 10^scale
-```
-
-**Примеры:**
-
-| Актив | price_scale | Реальная цена | raw i64 |
-|-------|-------------|---------------|---------|
-| BTC/USDT | 2 | $50 000.00 | 5 000 000 |
-| ETH/USDT | 2 | $3 200.50 | 320 050 |
-| SOL/USDT | 4 | $145.2500 | 1 452 500 |
-| USDC/USDT | 6 | $1.000100 | 1 000 100 |
-
-| Актив | qty_scale | Реальное кол-во | raw i64 |
-|-------|-----------|-----------------|---------|
-| BTC | 8 | 1.50000000 BTC | 150 000 000 |
-| ETH | 8 | 10.00000000 ETH | 1 000 000 000 |
-| Мем-коин | 8 | 1 000 000.00000000 | 100 000 000 000 000 |
-
-> Значения передаются в протоколе в little-endian. Подробности — в разделе [Бинарный протокол](./protocol.md).
-
----
-
-## Полный пример конфига
-
-```toml
-[server]
-tcp_addr     = "127.0.0.1:9090"
-metrics_addr = "127.0.0.1:9091"
-shards       = 4
-
-[server.admin]
-api_key = "my-admin-secret"
-
-[server.shutdown]
-drain_timeout_secs = 30
-
-[[symbols]]
-id          = 0
-base        = "BTC"
-quote       = "USDT"
-price_scale = 2
-qty_scale   = 8
-min_qty     = "0.00001"
-max_qty     = "10000.0"
-qty_step    = "0.00001"
-price_step  = "0.01"
-max_orders_per_second = 200
-
-[[symbols]]
-id          = 1
-base        = "ETH"
-quote       = "USDT"
-price_scale = 2
-qty_scale   = 8
-min_qty     = "0.0001"
-max_qty     = "100000.0"
-qty_step    = "0.0001"
-price_step  = "0.01"
-max_orders_per_second = 500
-```
-
-
-## Надёжное хранение и TLS
-
-WAL по умолчанию включён. Параметры TLS, совместимость журналов, ограничения replay и требования к диску описаны в [разделе эксплуатации](deployment.md). Неизвестные поля конфигурации отклоняются. Для публичного TCP-адреса требуется TLS либо явное `server.allow_plaintext_remote = true`.
+Snapshot creation does not truncate decision history. Symbol/risk settings and shard topology are part of the recovery contract. See [deployment and recovery](deployment.md) for backups and upgrades.

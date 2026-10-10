@@ -43,8 +43,6 @@ fn limit_sell(symbol: SymbolId, price: f64, qty: f64) -> Order {
     )
 }
 
-// ---------- Rate limiting tests ----------
-
 #[test]
 fn rate_limit_exceeded_returns_error() {
     let s = sym(1);
@@ -119,8 +117,6 @@ fn rate_limit_different_symbols_are_independent() {
     assert!(engine.check_order(&o2).is_ok());
     assert!(engine.check_order(&o2).is_ok());
 }
-
-// ---------- Open order count / position limit tests ----------
 
 #[test]
 fn open_order_count_exceeds_limit_rejects_new_order() {
@@ -203,8 +199,6 @@ fn set_open_order_count_sets_counter_directly() {
     assert!(engine.check_order(&order).is_ok());
 }
 
-// ---------- Max order quantity (fat finger) ----------
-
 #[test]
 fn exceeds_max_order_qty_returns_error() {
     let s = sym(7);
@@ -219,8 +213,6 @@ fn exceeds_max_order_qty_returns_error() {
     );
     assert!(engine.check_order(&limit_buy(s, 100.0, 10.0)).is_ok());
 }
-
-// ---------- Max notional value ----------
 
 #[test]
 fn exceeds_max_notional_returns_error() {
@@ -246,8 +238,6 @@ fn exceeds_max_notional_returns_error() {
     // 100 * 4 = $400 notional <= $500 cap
     assert!(engine.check_order(&limit_buy(s, 100.0, 4.0)).is_ok());
 }
-
-// ---------- Price band ----------
 
 #[test]
 fn price_band_violation_outside_band_returns_error() {
@@ -317,8 +307,6 @@ fn reference_price_update_shifts_band_center() {
     );
     assert!(engine.check_order(&limit_buy(s, 105.0, 1.0)).is_ok());
 }
-
-// ---------- Unknown symbol ----------
 
 #[test]
 fn unknown_symbol_passes_all_checks() {

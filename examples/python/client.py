@@ -51,9 +51,7 @@ import sys
 import time
 from typing import Any, Dict, Optional, Tuple
 
-# ---------------------------------------------------------------------------
 # Protocol constants
-# ---------------------------------------------------------------------------
 
 PROTOCOL_VERSION = 2
 HEADER_SIZE = 22  # len(4) + ver(1) + type(1) + seq(8) + request_id(8)
@@ -129,9 +127,7 @@ REJECT_REASONS = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Fixed-point helpers
-# ---------------------------------------------------------------------------
 
 def price_to_raw(price: float) -> int:
     """Convert a human-readable price (float) to the engine's i64 fixed-point
@@ -163,9 +159,7 @@ def _ts_to_str(nanos: int) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(secs))
 
 
-# ---------------------------------------------------------------------------
 # MEClient
-# ---------------------------------------------------------------------------
 
 class MEClient:
     """Matching engine TCP client.
@@ -480,9 +474,7 @@ class MEClient:
         return base
 
 
-# ---------------------------------------------------------------------------
 # Pretty-printer
-# ---------------------------------------------------------------------------
 
 def print_event(event: Dict[str, Any]) -> None:
     """Pretty-print a decoded engine event to stdout."""
@@ -560,9 +552,7 @@ def print_event(event: Dict[str, Any]) -> None:
         print(f"  [<] {etype}  {event}")
 
 
-# ---------------------------------------------------------------------------
 # Main demo
-# ---------------------------------------------------------------------------
 
 def main() -> None:
     host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"

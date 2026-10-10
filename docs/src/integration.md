@@ -1,167 +1,22 @@
-# Интеграция: обзор протокола
+# Client integration
 
-Matching Engine использует бинарный TCP-протокол v2 с низкой задержкой — без JSON,
-без строковых парсеров. Каждое сообщение — это фрейм с
-**22-байтовым** заголовком и типизированной полезной нагрузкой.
+Connect through TCP or UDS, then send Handshake or ResumeSession before order commands. The [wire specification](protocol.md) defines framing, payloads and sequence numbers.
 
----
+Keep one ordered reader per connection. Correlate solicited events by `request_id`; passive fills and stop events use request ID zero. A command can produce several events. An order snapshot ends at OpenOrdersEnd, not at a period of socket silence. Handle fragmented reads and multiple frames in one read. Preserve passive events that arrive before or during a snapshot; commit the snapshot cursor only after validating Begin, End and the declared count.
 
-## Формат фрейма
+Persist the session ID and the last applied sequence from the replay stream, as defined in the [protocol](protocol.md). Positive-sequence control frames also belong to replay; process and acknowledge them in order. Sequence-zero frames, including SessionResumed, never advance the cursor. Resume with the saved cursor, ignore duplicate replayed events, acknowledge only applied replay frames and retain the original request ID/payload when retrying a mutation. Session IDs are bearer credentials; use TLS and account authorization at the gateway.
 
-```
-+----------+--------+--------+----------+-------------+-----------------+
-| len: u32 | ver:u8 | type:u8| seq: u64 | req_id: u64 | payload: [u8]   |
-| 4 bytes  | 1 byte | 1 byte | 8 bytes  | 8 bytes     | `len` bytes     |
-+----------+--------+--------+----------+-------------+-----------------+
-```
+If ReplayGap occurs, request GetOpenOrders and validate the complete Begin/Order/End response. That restores open orders, not missed settlement history; reconcile executions against an authoritative ledger before resuming financial processing. Batches are not atomic across symbols.
 
-| Поле     | Тип    | Описание                                      |
-|----------|--------|-----------------------------------------------|
-| `len`    | u32 LE | Размер payload в байтах (без 22-байт заголовка)|
-| `ver`    | u8     | Версия протокола — `0x02`                     |
-| `type`   | u8     | Тип сообщения (см. таблицу ниже)              |
-| `seq`    | u64 LE | Монотонно возрастающий номер сообщения        |
-| `req_id` | u64 LE | Ключ идемпотентности (зеркалится в ответах)   |
-| `payload`| bytes  | Полезная нагрузка, специфичная для типа       |
+## Supplied clients
 
-Все многобайтовые числа — **little-endian**.
+| Client | Use |
+| --- | --- |
+| [Go SDK](clients/go.md) | TCP/UDS handshake, submission and event APIs |
+| [Python example](clients/python.md) | Standard-library protocol demonstration |
+| TypeScript example | Node.js Buffer framing and event parsing |
+| Rust example | Tokio framing and basic order flow |
 
----
+Examples live under `examples/` in the repository. They are demonstrations, not complete reconnect, account or settlement services. The Go SDK does not expose a full high-level session resume/receive cursor/original request-ID recovery API.
 
-## Типы сообщений
-
-### Клиент → движок (команды)
-
-| Hex    | Название         | Описание                              |
-|--------|------------------|---------------------------------------|
-| `0x01` | PlaceOrder       | Разместить новый ордер                |
-| `0x02` | CancelOrder      | Отменить ордер по ID                  |
-| `0x03` | AmendOrder       | Изменить цену/количество ордера       |
-| `0x04` | Ping             | Проверка соединения (+ piggyback ACK) |
-| `0x05` | Handshake        | Установить протокольный сеанс         |
-| `0x06` | ResumeSession    | Восстановить предыдущую сессию        |
-| `0x07` | GetOrderStatus   | Запросить статус ордера               |
-| `0x08` | Acknowledge      | Cumulative ACK серверных фреймов      |
-| `0x09` | GetOpenOrders    | Запросить снапшот открытых ордеров    |
-| `0x0B` | BatchPlaceOrder  | Массовое размещение (макс. 20)        |
-| `0x0C` | BatchCancelOrder | Массовая отмена (макс. 50)            |
-
-### Движок → клиент (события)
-
-| Hex    | Название             | Описание                              |
-|--------|----------------------|---------------------------------------|
-| `0x10` | OrderAccepted        | Ордер принят в книгу                  |
-| `0x11` | OrderRejected        | Ордер отклонён (причина в payload)    |
-| `0x12` | Trade                | Сделка: цена, количество, обе стороны |
-| `0x13` | OrderFilled          | Ордер полностью исполнен              |
-| `0x14` | OrderPartiallyFilled | Ордер частично исполнен               |
-| `0x15` | OrderCancelled       | Ордер отменён, остаток в payload      |
-| `0x16` | OrderAmended         | Ордер изменён (новая цена/qty)        |
-| `0x17` | StopTriggered        | Стоп-ордер активирован                |
-| `0x18` | Pong                 | Ответ на Ping                         |
-| `0x19` | Error                | Ошибка протокола (код + текст)        |
-| `0x1A` | HandshakeAck         | Подтверждение handshake (TLV ext.)    |
-| `0x1B` | SessionResumed       | Сессия восстановлена                  |
-| `0x1D` | OrderStatus          | Статус запрошенного ордера            |
-| `0x1E` | OrderNotFound        | Ордер не найден                       |
-| `0x1F` | OpenOrdersBegin      | Начало снапшота открытых ордеров      |
-| `0x20` | ReplayGap            | Разрыв в replay-буфере               |
-| `0x21` | OpenOrder            | Ордер из снапшота                     |
-| `0x22` | OpenOrdersEnd        | Конец снапшота                        |
-| `0x23` | FlowControlWarning   | Предупреждение о медленном чтении     |
-
----
-
-## Фиксированная точка (Fixed-point)
-
-Цены и количества передаются как 64-битные целые числа с неявным масштабом
-`10^8`. Это исключает ошибки плавающей точки при финансовых вычислениях.
-
-```
-Пример: цена $50 000.50
-  raw = 50000.50 × 10^8 = 5_000_050_000_000  (i64, little-endian)
-
-Пример: количество 1.5 BTC
-  raw = 1.5 × 10^8 = 150_000_000            (u64, little-endian)
-```
-
-**Декодирование:**
-```
-price_float = price_i64 / 10^8
-qty_float   = qty_u64   / 10^8
-```
-
----
-
-## Жизненный цикл соединения
-
-```
-Клиент                          Движок
-  |                                |
-  |──── TCP connect ───────────────▶|
-  |──── Handshake (0x05, seq=1) ───▶|
-  |◀─── HandshakeAck (0x1A) ────────|
-  |                                |
-  |──── PlaceOrder (0x01) ─────────▶|
-  |◀─── OrderAccepted (0x10) ───────|
-  |                                |
-  |──── PlaceOrder (0x01) ─────────▶|  ← пересекающийся ордер
-  |◀─── OrderAccepted (0x10) ───────|
-  |◀─── Trade (0x12) ───────────────|
-  |◀─── OrderFilled (0x13) ─────────|
-  |◀─── OrderPartiallyFilled (0x14) |
-  |                                |
-  |──── Ping (0x04) ───────────────▶|
-  |◀─── Pong (0x18) ────────────────|
-  |                                |
-  |──── CancelOrder (0x02) ────────▶|
-  |◀─── OrderCancelled (0x15) ──────|
-  |                                |
-  |──── TCP close ─────────────────▶|
-```
-
-### Шаги подключения
-
-1. Открыть TCP-соединение на порт `9090` (по умолчанию)
-2. Отправить фрейм **Handshake** (тип `0x05`, payload: `client_version=2`, seq=0)
-3. Дождаться **HandshakeAck** (тип `0x1A`): 41 байт — server_version + TLV (capabilities, session_id, heartbeat_ms)
-4. Соединение активно, можно отправлять команды
-
-Для восстановления сессии вместо шага 2 отправить **ResumeSession** (тип `0x06`)
-с `session_id` из предыдущего HandshakeAck и `last_recv_seq`.
-
-Попытка отправить PlaceOrder или CancelOrder **до** успешного handshake приведёт
-к немедленному закрытию соединения сервером.
-
----
-
-## Порядковые номера (sequence numbers)
-
-Каждая сторона ведёт **независимый** счётчик, начинающийся с `1` и монотонно
-возрастающий. Клиент нумерует исходящие фреймы; сервер — входящие события.
-При разрыве соединения счётчик сбрасывается.
-
-Если sequence number нарушен (пропуск или уменьшение) — сервер закрывает
-соединение с событием `Error`.
-
----
-
-## Обратное давление (backpressure)
-
-Сервер буферизует исходящие события до `256 KB` на соединение. При переполнении
-буфера соединение принудительно закрывается. Клиент должен своевременно читать
-данные из сокета.
-
----
-
-## Примеры клиентов
-
-- [Клиент на Go](./clients/go.md) — через высокоуровневую библиотеку `meclient`
-- [Клиент на Python](./clients/python.md) — raw socket + `struct`, zero-dependency
-
----
-
-## Что дальше
-
-- [Бинарный протокол](./protocol.md) — полная спецификация с hex-дампами
-- [API: команды и события](./api.md) — детальная раскладка всех payload-структур
+See [deployment](deployment.md) for ownership, durable retries, admission limits and storage requirements.

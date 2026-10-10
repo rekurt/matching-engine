@@ -1,44 +1,9 @@
-# matching-engine
+# Introduction
 
-**matching-engine** — это высокочастотный движок сопоставления ордеров для криптовалютного спотового рынка, написанный на Rust. Каждый инструмент обрабатывается одним shard worker; сервер использует бинарный протокол и синхронно сохраняет решения. Производительность durable-сервера необходимо измерять отдельно от in-memory ядра.
+matching-engine processes spot orders with price-time priority. The Rust workspace separates core types, matching, shard orchestration, persistence and network delivery. TCP and Unix domain socket clients use binary protocol v2.
 
-## Для кого
+Supported orders include limit, market, stop-limit, stop-market, trailing-stop and iceberg. Time-in-force choices are GTC, IOC, FOK and GTD. Risk policy is configured per symbol; session ownership scopes cancel, amend and status queries.
 
-- Биржи и маркетплейсы, которым нужен встраиваемый matching core
-- Разработчики, изучающие реализацию стакана ордеров на Rust
-- Команды, интегрирующие matching service со своим учётом счетов, резервированием средств и settlement
+Start with the [quick start](quickstart.md). Integrators should read the [protocol](protocol.md) and [recovery contract](deployment.md) before implementing reconnects.
 
-## Возможности
-
-| Возможность | Описание |
-|-------------|----------|
-| Типы ордеров | LIMIT, MARKET, STOP-LIMIT, STOP-MARKET |
-| Time-in-Force | GTC, IOC, FOK, GTD |
-| Приоритет | Цена → Время (price-time priority) |
-| Протокол | Бинарный TCP/UDS v2, заголовок 22 байта и payload переменной длины |
-| Риск-менеджмент | Rate limiting, лимиты количества и номинала, price bands |
-| Метрики | Prometheus (50+ метрик) |
-| Конфигурация | TOML при запуске; halt/resume через admin API |
-
-## Архитектура за 10 строк
-
-```
-me-server  — точка входа: CLI, TOML-конфиг, REST admin (:9091)
-    │
-    ├── me-io     — TCP-сервер, бинарный кодек, session management
-    ├── me-risk   — rate limiting, qty/notional limits, price bands
-    │
-    └── me-engine — оркестратор: диспетчеризует команды по символам
-            │
-            └── me-book  — стакан ордеров: matching, stop book, events
-                    │
-                    └── me-core  — примитивы: Order, FixedPrice, Qty, Side
-```
-
-Символы распределяются между shard workers; один worker может обслуживать несколько символов. Входящий TCP-поток декодируется, проходит риск-проверку и маршрутизируется в нужный `OrderBook`. Исходящие события (`Trade`, `OrderFilled`, `StopTriggered`) отправляются обратно через тот же кодек.
-
-## Быстрый старт
-
-Перейдите к разделу [Быстрый старт](./quickstart.md) для пошаговых инструкций.
-
-Перед эксплуатацией прочитайте [операционный контракт](./deployment.md): учёт балансов и позиций, репликация и автоматический failover не реализованы в этом репозитории.
+The service provides matching, not account balances or settlement. There is no replication, consensus or automatic failover. Journals and durable request history grow with activity. Network latency depends on storage sync, TLS, workload and hardware; benchmark the complete path before setting an SLA.

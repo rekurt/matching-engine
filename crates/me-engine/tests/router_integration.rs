@@ -47,8 +47,6 @@ fn limit_sell(id: u64, price: f64, qty: f64) -> Command {
     ))
 }
 
-// ─── Phase 3: Router + Risk integration ─────────────────────────────────────
-
 #[test]
 fn test_router_risk_rejects_fat_finger() {
     let audit = Arc::new(AsyncAuditLogger::new(1024, AuditFormat::Json));

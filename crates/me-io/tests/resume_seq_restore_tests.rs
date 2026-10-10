@@ -135,7 +135,7 @@ fn reconnect_workflow_preserves_seq_monotonicity() {
     // Handler handles ResumeSession::Ok:
     let result = store.resume(&sid, 0);
     assert!(matches!(result, ReplayResult::Ok(_)));
-    // ── THE FIX: handler must call next_outbound_seq ──
+    // Restore the next outbound sequence from the retained session.
     let b_server_frame_seq = store.next_outbound_seq(&sid);
     assert_eq!(b_server_frame_seq, 6, "after 5 frames, next is 6");
 

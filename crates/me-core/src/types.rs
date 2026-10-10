@@ -9,19 +9,13 @@ use serde::{Deserialize, Serialize};
 pub const SCALE: i64 = 100_000_000;
 pub const SCALE_U64: u64 = 100_000_000;
 
-// ─── OrderId / TradeId / SequenceId ──────────────────────────────────────────
-
 pub type OrderId = u64;
 pub type TradeId = u64;
 pub type SequenceId = u64;
 
-// ─── SymbolId ────────────────────────────────────────────────────────────────
-
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct SymbolId(pub u16);
-
-// ─── Side ────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[repr(u8)]
@@ -39,8 +33,6 @@ impl Side {
         }
     }
 }
-
-// ─── FixedPrice ──────────────────────────────────────────────────────────────
 
 /// Fixed-point price with 8 decimal places.
 /// Stored as i64 (signed) to allow comparison arithmetic.
@@ -120,8 +112,6 @@ impl fmt::Display for FixedPrice {
         write!(f, "{whole}.{frac:08}")
     }
 }
-
-// ─── FixedQty ────────────────────────────────────────────────────────────────
 
 /// Fixed-point quantity with 8 decimal places.
 /// Stored as u64 (unsigned) since quantities are never negative.
@@ -251,8 +241,6 @@ impl fmt::Display for FixedQty {
         write!(f, "{whole}.{frac:08}")
     }
 }
-
-// ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

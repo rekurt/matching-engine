@@ -1,668 +1,141 @@
-# Бинарный протокол
-
-Версия: **2.0** | Байт версии: `0x02` | Статус: Стабильный | Кодировка: **Little-Endian**
-
----
-
-## Обзор
-
-Matching engine использует бинарный TCP-протокол с минимальными накладными расходами:
-без JSON, без парсинга строк. Каждое сообщение — это бинарный кадр
-с **22-байтовым** заголовком, за которым следует нагрузка фиксированного или переменного
-размера в зависимости от типа сообщения.
-
-Протокол v2 добавляет поле `request_id` (u64) в заголовок для идемпотентности и
-корреляции ответов, а также поддержку восстановления сессий, batch-операций и
-snapshot-запросов.
-
----
-
-## Формат кадра (Frame)
-
-Каждый кадр состоит из **22-байтового заголовка** + нагрузка:
-
-```
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                     Payload Length (u32 LE)                    |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|   Version(u8) |    Type(u8)   |                               |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               +
-|                     Sequence Number (u64 LE)                  |
-+                               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                               |                               |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               +
-|                     Request ID (u64 LE)                       |
-+                               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                               |                               |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               +
-|                        Payload (variable)                     |
-+                              ...                              +
-```
-
-### Побайтовая раскладка
-
-| Смещение | Размер | Поле      | Тип     | Описание                                    |
-|----------|--------|-----------|---------|---------------------------------------------|
-| 0        | 4      | len       | u32 LE  | Длина нагрузки в байтах (без заголовка)     |
-| 4        | 1      | ver       | u8      | Версия протокола (должна быть `0x02`)       |
-| 5        | 1      | type      | u8      | Тип сообщения (MessageType discriminant)    |
-| 6        | 8      | seq       | u64 LE  | Монотонно возрастающий порядковый номер     |
-| 14       | 8      | req_id    | u64 LE  | Ключ идемпотентности (см. семантику ниже)   |
-| 22       | N      | payload   | bytes   | Нагрузка, специфичная для типа              |
-
-Поле `len` содержит **только** размер нагрузки, без учёта заголовка.
-Полный размер кадра = `22 + len` байт.
-
-### Семантика `req_id`
-
-**Клиент → движок:** `req_id` обязателен (ненулевой) для торговых команд (PlaceOrder,
-CancelOrder, AmendOrder, GetOrderStatus, GetOpenOrders, BatchPlaceOrder,
-BatchCancelOrder). Для служебных сообщений (Handshake, Ping, Acknowledge) допустим
-`req_id = 0`. Используется для дедупликации (exactly-once) при переподключении.
-
-**Движок → клиент:** все события, порождённые командой, отправляются на соединение,
-приславшее эту команду, и сервер **зеркалит** `req_id` из исходной команды. Это
-позволяет клиенту сопоставить ответ с запросом и реализовать retry-логику.
-Для service-фреймов, не привязанных к команде (Error, Pong, FlowControlWarning),
-`req_id = 0`.
-
----
-
-## Константы
-
-| Константа                 | Значение        | Описание                                  |
-|---------------------------|-----------------|-------------------------------------------|
-| `PROTOCOL_VERSION`        | `2`             | Текущая версия протокола                  |
-| `FRAME_HEADER_SIZE`       | `22` байт       | Фиксированный заголовок                   |
-| `MAX_PAYLOAD_SIZE`        | `1024` байт     | Макс. нагрузка для обычных фреймов        |
-| `MAX_PAYLOAD_SIZE_BATCH`  | `4096` байт     | Макс. нагрузка для batch-фреймов          |
-| `MAX_PAYLOAD_SIZE_SNAPSHOT`| `8192` байт    | Макс. нагрузка для snapshot-фреймов       |
-| `MAX_WRITE_BUFFER_SIZE`   | `262144` байт   | Лимит буфера записи (backpressure, 256 КБ)|
-| `MAX_BATCH_PLACE`         | `20`            | Макс. ордеров в BatchPlaceOrder            |
-| `MAX_BATCH_CANCEL`        | `50`            | Макс. ордеров в BatchCancelOrder           |
-
----
-
-## Типы сообщений
-
-### Клиент → Движок (команды)
-
-| Код    | Имя                  | Размер нагрузки                          |
-|--------|----------------------|------------------------------------------|
-| `0x01` | PlaceOrder           | 37–38 байт (38 с флагами)               |
-| `0x02` | CancelOrder          | 10 байт                                  |
-| `0x03` | AmendOrder           | 12–28 байт                               |
-| `0x04` | Ping                 | 0 или 8 байт (v2: piggyback ACK)        |
-| `0x05` | Handshake            | 0 или 1 байт                             |
-| `0x06` | ResumeSession        | 24 байта (session_id + last_recv_seq)    |
-| `0x07` | GetOrderStatus       | 10 байт (order_id + symbol_id)           |
-| `0x08` | Acknowledge          | 8 байт (last_processed_server_seq)       |
-| `0x09` | GetOpenOrders        | 0 байт                                    |
-| `0x0B` | BatchPlaceOrder      | 1 + N×(37–38) байт (макс. 20 ордеров)   |
-| `0x0C` | BatchCancelOrder     | 1 + N×10 байт (макс. 50 отмен)          |
-
-### Движок → Клиент (события)
-
-| Код    | Имя                  | Размер нагрузки                          |
-|--------|----------------------|------------------------------------------|
-| `0x10` | OrderAccepted        | 16 байт                                  |
-| `0x11` | OrderRejected        | 17 байт                                  |
-| `0x12` | Trade                | 59 байт                                  |
-| `0x13` | OrderFilled          | 32 байта                                 |
-| `0x14` | OrderPartiallyFilled | 40 байт                                  |
-| `0x15` | OrderCancelled       | 24 байта                                 |
-| `0x16` | OrderAmended         | 32 байта                                 |
-| `0x17` | StopTriggered        | 24 байта                                 |
-| `0x18` | Pong                 | 8 байт (last_processed_client_seq)       |
-| `0x19` | Error                | переменный (code + message)              |
-| `0x1A` | HandshakeAck         | 41 байт (version + TLV extensions)       |
-| `0x1B` | SessionResumed       | 4 байта (replayed_count)                 |
-| `0x1D` | OrderStatus          | 41 байт                                  |
-| `0x1E` | OrderNotFound        | 8 байт (order_id)                        |
-| `0x1F` | OpenOrdersBegin      | 12 байт (count + snapshot_seq)           |
-| `0x20` | ReplayGap            | 16 байт (missing_from + missing_to)      |
-| `0x21` | OpenOrder            | 60 байт (фиксированный, без session_id)  |
-| `0x22` | OpenOrdersEnd        | 8 байт (snapshot_seq)                    |
-| `0x23` | FlowControlWarning   | 2 байта (buffer_pct + is_hard_limit)     |
+# Wire protocol v2
 
----
+TCP and Unix domain sockets carry the same frames. TLS changes the transport, not the frame layout. All integers are little-endian. Prices use signed `i64` and quantities use unsigned `u64`, both scaled by `10^8`. Timestamps and expiry times use Unix nanoseconds.
 
-## Входящие сообщения (Клиент → Движок)
+## Frame header
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 4 | Payload length, excluding the header (`u32`) |
+| 4 | 1 | Version: `2` |
+| 5 | 1 | Message type |
+| 6 | 8 | Sequence (`u64`) |
+| 14 | 8 | Request ID (`u64`) |
+| 22 | variable | Payload |
 
-### PlaceOrder (0x01) — нагрузка 37–38 байт
+Read exactly the 22-byte header, then the declared payload. One socket read may contain part of a frame or several frames. Regular inbound payloads are limited to 1024 bytes; batch payloads to 4096 bytes.
 
-```
-Смещение  Размер  Поле        Тип      Описание
---------  ------  -----       ----     --------
- 0         8      order_id    u64 LE   Уникальный ID ордера (назначает клиент)
- 8         2      symbol_id   u16 LE   ID инструмента
-10         1      side        u8       0=Buy, 1=Sell
-11         1      order_type  u8       0=Limit, 1=Market, 2=StopLimit, 3=StopMarket
-12         1      tif         u8       0=GTC, 1=IOC, 2=FOK
-13         8      price       i64 LE   Лимитная цена (fixed-point, scale 10^8)
-21         8      stop_price  i64 LE   Стоп-цена (fixed-point, scale 10^8)
-29         8      qty         u64 LE   Количество (fixed-point, scale 10^8)
-37         0|1    flags       u8       [опционально] Битовая маска флагов (см. ниже)
-```
+Client sequences increase strictly within a connection. Sequence zero is accepted only for its first Handshake. Commands and queries require a nonzero request ID; Ping, Handshake, ResumeSession and Acknowledge do not. Reuse the original request ID and exact payload when retrying a mutation.
 
-Для рыночных ордеров `price = 0`. Для не-стоп ордеров `stop_price = 0`.
-
-**Флаги ордера** (битовая маска, byte 37 — опционально, по умолчанию 0):
+Positive server sequences identify the per-session replay stream. Replies passed through the active-session response path, including HandshakeAck, Pong, ReplayGap from ResumeSession and some Error frames, are assigned server sequences and journaled when WAL is enabled. A gap detected during pending delivery instead emits ReplayGap directly with sequence zero, outside the replay journal. Replayed frames retain their original sequence. The server rewrites these headers; a Pong header is not the echoed client sequence (its payload reports the last processed client sequence).
 
-| Бит  | Имя                 | Описание                                               |
-|------|---------------------|---------------------------------------------------------|
-| 0x01 | POST_ONLY           | Отклонить, если ордер пересечёт спред (стал бы taker)  |
-| 0x02 | REDUCE_ONLY         | Зарезервирован (определён, но **не проверяется** движком) |
-| 0x04 | MAKER_OR_CANCEL     | Зарезервирован (определён, но **не проверяется** движком) |
-
-### CancelOrder (0x02) — нагрузка 10 байт
-
-```
-Смещение  Размер  Поле        Тип      Описание
---------  ------  -----       ----     --------
- 0         8      order_id    u64 LE   ID ордера для отмены
- 8         2      symbol_id   u16 LE   ID инструмента
-```
-
-### AmendOrder (0x03) — нагрузка 12–28 байт
-
-```
-Смещение  Размер   Поле        Тип      Описание
---------  ------   -----       ----     --------
- 0         8       order_id    u64 LE   ID ордера для изменения
- 8         2       symbol_id   u16 LE   ID инструмента
-10         1       has_price   u8       1 = далее следует новая цена
-11         0|8     price       i64 LE   [условно] Новая цена
- ?         1       has_qty     u8       1 = далее следует новое количество
- ?         0|8     qty         u64 LE   [условно] Новое количество
-```
-
-### Ping (0x04)
-
-Нагрузка: 0 или 8 байт. Можно отправлять в любом состоянии соединения.
-
-В протоколе v2 Ping может содержать `ack_seq: u64` (8 байт) — piggyback cumulative ACK:
-клиент подтверждает, что обработал все серверные фреймы до указанного seq.
-Если payload пуст, `ack_seq` считается равным 0.
-
-### Handshake (0x05)
-
-Нагрузка: 0 или 1 байт (необязательный `client_version: u8`).
-
-### ResumeSession (0x06)
-
-Нагрузка: 24 байта — восстановление предыдущей сессии после переподключения.
-
-```
-Смещение  Размер  Поле              Тип        Описание
---------  ------  -----             ----       --------
- 0        16      session_id        [u8; 16]   ID сессии из предыдущего HandshakeAck
-16         8      last_recv_seq     u64 LE     Последний принятый server seq
-```
-
-### GetOrderStatus (0x07) — 10 байт
-
-Запрос статуса конкретного ордера в книге.
-Формат аналогичен CancelOrder: `order_id(8) + symbol_id(2)`.
-
-### Acknowledge (0x08) — 8 байт
-
-Явный cumulative ACK: `last_processed_server_seq(8)`.
-Сервер может освободить replay-буфер до этого seq.
-
-### GetOpenOrders (0x09) — 0 байт
-
-Запрос снапшота всех открытых ордеров текущей сессии. Используется после
-`ReplayGap` для полной ресинхронизации.
-
-### BatchPlaceOrder (0x0B)
-
-Нагрузка: `count(1) + [PlaceOrder_payload × count]`. Максимум 20 ордеров.
-Все ордера в batch делят один `request_id` (дедупликация batch целиком).
-
-### BatchCancelOrder (0x0C)
-
-Нагрузка: `count(1) + [CancelOrder_payload × count]`. Максимум 50 отмен.
-
----
-
-## Исходящие сообщения (Движок → Клиент)
-
-### OrderAccepted (0x10) — 16 байт
-
-```
-Смещение  Размер  Поле       Тип      Описание
---------  ------  -----      ----     --------
- 0         8      order_id   u64 LE   ID принятого ордера
- 8         8      timestamp  u64 LE   Временная метка сервера (нс)
-```
+Sequence zero is out-of-band and never advances the receive cursor. SessionResumed is sent with zero before the replay frames; errors sent outside the active-session replay path also use zero. Process every positive-sequence frame in order, including control frames, and advance the cursor only after applying it. Solicited order events mirror the request ID; passive owner events use zero.
 
-### OrderRejected (0x11) — 17 байт
+## Connection and recovery
 
-```
-Смещение  Размер  Поле          Тип      Описание
---------  ------  -----         ----     --------
- 0         8      order_id      u64 LE   ID отклонённого ордера
- 8         8      timestamp     u64 LE   Временная метка сервера (нс)
-16         1      reject_reason u8       Причина отклонения (см. перечисления)
-```
+Start with Handshake to create a session, or ResumeSession to recover one. Do not send order commands before acceptance. Persist the session ID and last applied positive server sequence outside the connection. A session can have only one active connection.
 
-### Trade (0x12) — 59 байт
+| Type | Name | Payload, in field order |
+| --- | --- | --- |
+| `0x04` | Ping | Empty, or last applied server sequence (`u64`) as cumulative ACK |
+| `0x05` | Handshake | Empty, or client version (`u8`, use 2) |
+| `0x06` | ResumeSession | Session ID (16 bytes), last received/applied server sequence (`u64`) |
+| `0x08` | Acknowledge | Last applied server sequence (`u64`) |
+| `0x18` | Pong | Last processed client sequence (`u64`): 8 bytes |
+| `0x19` | Error | Code (`u16`), message length (`u16`), UTF-8 message |
+| `0x1A` | HandshakeAck | Server version (`u8`), TLV extensions |
+| `0x1B` | SessionResumed | Replayed frame count (`u32`) |
+| `0x20` | ReplayGap | Missing sequence range: from (`u64`), to (`u64`) |
+| `0x23` | FlowControlWarning | Buffer usage percent (`u8`), hard-limit flag (`u8`) |
 
-```
-Смещение  Размер  Поле            Тип      Описание
---------  ------  -----           ----     --------
- 0         8      trade_id        u64 LE   ID сделки
- 8         2      symbol_id       u16 LE   ID инструмента
-10         8      price           i64 LE   Цена сделки (fixed-point)
-18         8      qty             u64 LE   Объём (fixed-point)
-26         8      maker_order_id  u64 LE   ID ордера мейкера
-34         8      taker_order_id  u64 LE   ID ордера тейкера
-42         1      maker_side      u8       Сторона мейкера (0=Buy, 1=Sell)
-43         8      timestamp       u64 LE   Временная метка (нс)
-51         8      sequence        u64 LE   Порядковый номер сделки в книге
-```
-
-### OrderFilled (0x13) — 32 байта
-
-```
-Смещение  Размер  Поле        Тип      Описание
---------  ------  -----       ----     --------
- 0         8      order_id    u64 LE   ID исполненного ордера
- 8         8      filled_qty  u64 LE   Исполненное количество (fixed-point)
-16         8      price       i64 LE   Цена последнего исполнения (fixed-point)
-24         8      timestamp   u64 LE   Временная метка (нс)
-```
-
-### OrderPartiallyFilled (0x14) — 40 байт
+HandshakeAck currently has 41 payload bytes. Each TLV is tag (`u16`), length (`u16`), value. Skip unknown tags:
 
-```
-Смещение  Размер  Поле           Тип      Описание
---------  ------  -----          ----     --------
- 0         8      order_id       u64 LE   ID ордера
- 8         8      filled_qty     u64 LE   Исполненное в этом событии
-16         8      remaining_qty  u64 LE   Остаток в книге (fixed-point)
-24         8      price          i64 LE   Цена исполнения (fixed-point)
-32         8      timestamp      u64 LE   Временная метка (нс)
-```
+| Tag | Value |
+| --- | --- |
+| `1` | Capabilities (`u64`) |
+| `2` | Assigned session ID (16 bytes) |
+| `3` | Heartbeat interval in milliseconds (`u32`) |
 
-### OrderCancelled (0x15), OrderAmended (0x16), StopTriggered (0x17)
+Capability bits 0–7 indicate session recovery, heartbeat, batch orders, order flags, order query, TLS, mutation deduplication and open-order snapshots respectively. Send heartbeats within the configured timeout.
 
-OrderCancelled (24 байта): `order_id(8) | remaining_qty(8) | timestamp(8)`
+SessionResumed precedes replay. On ReplayGap, obtain a complete GetOpenOrders snapshot; it restores open order state, not missed settlement events. Reconcile missing executions separately. Do not silently treat a fresh session as recovery of an old one. See [client integration](integration.md) and [deployment](deployment.md).
 
-OrderAmended (32 байта): `order_id(8) | new_price(8) | new_qty(8) | timestamp(8)`
+## Order commands
 
-StopTriggered (24 байта): `order_id(8) | trigger_price(8) | timestamp(8)`
+### PlaceOrder (`0x01`)
 
-### HandshakeAck (0x1A) — 41 байт (v2)
+| Offset | Type | Field |
+| --- | --- | --- |
+| 0 | `u64` | Nonzero order ID |
+| 8 | `u16` | Symbol ID |
+| 10 | `u8` | Side: buy 0, sell 1 |
+| 11 | `u8` | Order type |
+| 12 | `u8` | Time in force |
+| 13 | `i64` | Limit price; zero for market |
+| 21 | `i64` | Stop price; zero for non-stop |
+| 29 | `u64` | Positive total quantity |
+| 37 | `u8` | Optional flags; absent means zero |
+| 38 | `u64` | Optional GTD expiry; absent means zero |
+| 46 | `i64` | Optional trailing distance; absent means zero |
+| 54 | `u64` | Optional iceberg display quantity; absent means zero |
 
-В протоколе v2 HandshakeAck содержит TLV-расширения:
+Base payload is 37 bytes; optional fields extend it to 38, 46, 54 or 62 bytes. Include all preceding optional fields when using a later one. GTD requires a nonzero future expiry. Trailing distance must be nonnegative and a positive distance is valid only on stop orders. Positive display quantity is valid only on limit orders. Stop orders require a positive stop price; limit/stop-limit require a positive limit price.
 
-```
-Смещение  Размер  Поле                 Описание
---------  ------  -----                --------
- 0         1      server_version       Версия протокола сервера
- 1        12      TLV: CAPABILITIES    tag(2) + len(2) + value(8) — битовая маска
-13        20      TLV: SESSION_ID      tag(2) + len(2) + value(16) — ID сессии
-33         8      TLV: HEARTBEAT_MS    tag(2) + len(2) + value(4) — интервал heartbeat (мс)
-```
+Order types: Limit 0, Market 1, StopLimit 2, StopMarket 3. Time in force: GTC 0, IOC 1, FOK 2, GTD 3. Flags: POST_ONLY `0x01`, REDUCE_ONLY `0x02`, MAKER_OR_CANCEL `0x04`. REDUCE_ONLY is a reserved futures flag; this spot engine does not enforce position reduction. Do not rely on it as an account risk control.
 
-**Capabilities** (битовая маска u64):
+### Other commands
 
-| Бит | Имя                  | Описание                        |
-|-----|----------------------|---------------------------------|
-|   1 | CAP_SESSION_RECOVERY | Поддержка ResumeSession         |
-|   2 | CAP_HEARTBEAT        | Heartbeat с таймаутом           |
-|   4 | CAP_BATCH_ORDERS     | BatchPlaceOrder/BatchCancelOrder|
-|   8 | CAP_ORDER_FLAGS      | Поле flags в PlaceOrder         |
-|  16 | CAP_ORDER_QUERY      | GetOrderStatus/GetOpenOrders    |
-|  32 | CAP_TLS              | TLS поддержка                   |
-|  64 | CAP_EXACTLY_ONCE     | Дедупликация по request_id      |
-| 128 | CAP_SNAPSHOT         | OpenOrders snapshot              |
-
-### SessionResumed (0x1B) — 4 байта
-
-Ответ на ResumeSession: `replayed_count(u32)` — количество replay-фреймов, которые
-будут отправлены перед возобновлением нормального потока.
-
-### OrderStatus (0x1D) — 41 байт
-
-Ответ на GetOrderStatus (ордер найден):
-`order_id(8) + status(1) + filled_qty(8) + remaining_qty(8) + price(8) + timestamp(8)`
-
-### OrderNotFound (0x1E) — 8 байт
-
-Ответ на GetOrderStatus (ордер не найден): `order_id(8)`.
-
-### OpenOrdersBegin (0x1F) — 12 байт
-
-Начало snapshot: `count(u32) + snapshot_seq(u64)`.
-
-### ReplayGap (0x20) — 16 байт
-
-Разрыв в replay-буфере: `missing_from(u64) + missing_to(u64)`.
-Клиент должен отправить GetOpenOrders для ресинхронизации.
-
-### OpenOrder (0x21) — 60 байт (фиксированный)
-
-Одна запись ордера внутри OpenOrders snapshot. Фиксированный wire-формат, **не**
-полная структура Order — `client_session_id` не включается (клиент знает свой ID).
-
-```
-Смещение  Размер  Поле           Тип      Описание
---------  ------  -----          ----     --------
- 0         8      order_id       u64 LE   ID ордера
- 8         2      symbol_id      u16 LE   ID инструмента
-10         1      side           u8       Buy=0, Sell=1
-11         1      order_type     u8       Limit=0, Market=1, StopLimit=2, StopMarket=3
-12         1      tif            u8       GTC=0, IOC=1, FOK=2
-13         1      status         u8       OrderStatus discriminant
-14         8      price          i64 LE   Цена (fixed-point ×10^8)
-22         8      stop_price     i64 LE   Стоп-цена (fixed-point ×10^8)
-30         8      qty            u64 LE   Начальное количество
-38         8      remaining_qty  u64 LE   Оставшееся количество
-46         8      timestamp      u64 LE   Временная метка (нс)
-54         1      flags          u8       Битовая маска флагов
-55         5      _reserved      [u8; 5]  Зарезервировано (padding, всегда 0)
-```
-
-### OpenOrdersEnd (0x22) — 8 байт
-
-Конец snapshot: `snapshot_seq(u64)`.
-
-### FlowControlWarning (0x23) — 2 байта
-
-Предупреждение о медленном потреблении: `buffer_used_pct(u8) + is_hard_limit(u8)`.
-
----
-
-## Перечисления
-
-### Side
-
-| Значение | Имя  | Описание |
-|----------|------|----------|
-| `0`      | Buy  | Покупка  |
-| `1`      | Sell | Продажа  |
-
-### OrderType
-
-| Значение | Имя         | Описание              |
-|----------|-------------|-----------------------|
-| `0`      | Limit       | Лимитный ордер        |
-| `1`      | Market      | Рыночный ордер        |
-| `2`      | StopLimit   | Стоп-лимитный ордер   |
-| `3`      | StopMarket  | Стоп-рыночный ордер   |
-
-### TimeInForce
-
-| Значение | Имя  | Описание                                 |
-|----------|------|------------------------------------------|
-| `0`      | GTC  | Good Till Cancelled — действителен до отмены |
-| `1`      | IOC  | Immediate Or Cancel — немедленно или отменить |
-| `2`      | FOK  | Fill Or Kill — исполнить полностью или отменить |
-
-### RejectReason
-
-| Значение | Имя                   | Описание                                      |
-|----------|-----------------------|-----------------------------------------------|
-| `0`      | NoLiquidity           | Нет доступной ликвидности                     |
-| `1`      | InsufficientLiquidity | Недостаточная ликвидность для FOK             |
-| `2`      | InvalidPrice          | Недопустимая цена                             |
-| `3`      | InvalidQuantity       | Недопустимое количество                       |
-| `4`      | InvalidLotSize        | Нарушение ограничения размера лота            |
-| `5`      | InvalidTickSize       | Нарушение шага цены                           |
-| `6`      | OrderNotFound         | Ордер не найден для отмены/изменения          |
-| `7`      | DuplicateOrderId      | Дублирующийся ID ордера                       |
-| `8`      | SymbolNotFound        | Неизвестный ID инструмента                    |
-| `9`      | TradingHalted         | Торговля приостановлена                       |
-| `10`     | RiskCheckFailed       | Проверка рисков не пройдена                   |
-| `11`     | WouldTakeMarket       | POST_ONLY ордер пересёк бы спред              |
-| `12`     | InternalError         | Внутренняя ошибка сервера (WAL, shard и т.п.) |
-
-### ErrorCode
-
-| Значение | Имя                  | Описание                                      |
-|----------|----------------------|-----------------------------------------------|
-| `1`      | UnsupportedVersion   | Неподдерживаемая версия протокола             |
-| `2`      | SequenceOutOfOrder   | Порядковый номер нарушен                      |
-| `3`      | HandshakeRequired    | Требуется handshake перед командами           |
-| `4`      | InvalidPayload       | Некорректная нагрузка                         |
-| `5`      | ServerShuttingDown   | Сервер завершает работу                       |
-| `6`      | Backpressure         | Переполнение буфера записи                    |
-| `7`      | HeartbeatTimeout     | Клиент не отправил Ping в ожидаемом окне      |
-| `8`      | TlsError             | Ошибка TLS handshake                          |
-| `9`      | InvalidRequestId     | Отсутствует обязательный request_id           |
-| `10`     | SessionExpired       | Сессия истекла (TTL)                          |
-| `11`     | BufferExhausted      | Replay-буфер исчерпан (медленный потребитель) |
-| `12`     | InternalError        | Внутренняя ошибка сервера                     |
-
----
-
-## Fixed-Point кодирование
-
-Все цены и количества используют **целочисленное кодирование с фиксированной точкой**
-и масштабным коэффициентом **10^8** (100 000 000).
-
-```
-wire_value = real_value × 100_000_000
-real_value = wire_value ÷ 100_000_000
-```
-
-| Реальное значение | Значение на проводе | Hex (LE)             |
-|-------------------|---------------------|----------------------|
-| `50000.00`        | `5_000_000_000_000` | `00 50 39 27 8C 04 00 00` |
-| `1.0`             | `100_000_000`       | `00 E1 F5 05 00 00 00 00` |
-| `0.5`             | `50_000_000`        | `80 F0 FA 02 00 00 00 00` |
-| `0.00000001`      | `1`                 | `01 00 00 00 00 00 00 00` |
-
-Цены используют `i64` (знаковый), количества — `u64` (беззнаковый).
-
----
-
-## Жизненный цикл соединения
-
-```
-TCP connect
-     |
-     v
-+--------------------+
-|  HandshakePending  |
-+--------------------+
-     |
-     | Handshake(0x05) от клиента
-     | HandshakeAck(0x1A) от движка
-     v
-+--------------------+       Ping/Pong (в любом состоянии)
-|      Active        |<------+
-+--------------------+       |
-     |                       |
-     | Ошибка / Shutdown     |
-     v                       |
-+--------------------+       |
-|     Closing        |-------+
-+--------------------+
-     |
-  TCP close
-```
-
-Правила:
-1. Первый кадр **ДОЛЖЕН** быть Handshake.
-2. Ping разрешён **в любом** состоянии (включая до Handshake), но требует `seq >= 1`.
-3. PlaceOrder / CancelOrder / AmendOrder — только после получения HandshakeAck.
-4. После перехода в Closing дальнейшие сообщения не обрабатываются.
-
----
-
-## Порядковые номера (Sequence Numbers)
-
-Каждый кадр содержит поле `seq` (u64 LE). Правила:
-
-| Правило            | Описание                                                  |
-|--------------------|-----------------------------------------------------------|
-| Первый Handshake   | `seq = 0` допустим только для первого Handshake           |
-| Все остальные кадры | `seq` должен строго возрастать: `seq > last_seq`         |
-| Нарушение          | Error с кодом `SequenceOutOfOrder` (2) и разрыв соединения |
-
-Пробелы в нумерации допустимы (seq 1 → 5 — OK). Повторное использование — нет.
-
-```
-Client: seq=0 (Handshake)    → OK  (единственный случай seq=0)
-Client: seq=1 (PlaceOrder)   → OK
-Client: seq=2 (PlaceOrder)   → OK
-Client: seq=2 (CancelOrder)  → ERROR: SequenceOutOfOrder
-Client: seq=5 (CancelOrder)  → OK (пробел допустим)
-```
-
----
-
-## Backpressure
-
-Если буфер записи сервера для соединения превышает 256 КБ:
-
-1. Сервер отправляет Error с `error_code = 6` (Backpressure).
-2. TCP-соединение немедленно закрывается.
-
-Рекомендации для клиента:
-- Выделите отдельный поток/задачу для чтения из сокета.
-- Не блокируйте путь чтения тяжёлыми вычислениями.
-
----
-
-## Hex-примеры фреймов (v2)
-
-> Все примеры используют протокол v2 (22-байт заголовок с `req_id`).
-
-### Handshake (Клиент → Движок)
-
-Handshake с `client_version=2`, `seq=0`, `req_id=0`. Полный кадр (23 байта):
-
-```
-Offset  Hex                                              Поле
-------  -----------------------------------------------  -----
-0000    01 00 00 00                                       len = 1
-0004    02                                                ver = 2
-0005    05                                                type = Handshake (0x05)
-0006    00 00 00 00 00 00 00 00                           seq = 0
-000E    00 00 00 00 00 00 00 00                           req_id = 0
-0016    02                                                payload: client_version = 2
-```
-
-### HandshakeAck (Движок → Клиент) — 41 байт payload
-
-Содержит server_version + TLV-расширения (capabilities, session_id, heartbeat).
-
-### Ping (v2: с piggyback ACK) / Pong (8 байт payload)
-
-Ping v2 содержит `ack_seq` (8 байт) — cumulative ACK последнего обработанного
-серверного фрейма. Payload опционален (0 байт для v1-совместимости).
-
-Pong **всегда** содержит `last_processed_client_seq` (8 байт) — подтверждение
-последнего обработанного клиентского фрейма.
-
-```
-Ping (seq=1, ack_seq=5):
-0000    08 00 00 00  02 04  01 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00
-        len=8        V  T   seq=1                     req_id=0
-0016    05 00 00 00 00 00 00 00                        ack_seq=5
-
-Pong (seq=1, last_processed_client_seq=1):
-0000    08 00 00 00  02 18  01 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00
-        len=8        V  T   seq=1                     req_id=0
-0016    01 00 00 00 00 00 00 00                        last_processed_client_seq=1
-```
-
-### PlaceOrder — Limit Buy 1.0 BTC @ 50,000.00
-
-`order_id=42`, `symbol_id=1`, side=Buy, type=Limit, tif=GTC,
-`price=50000.00` (wire: 5_000_000_000_000), `qty=1.0` (wire: 100_000_000),
-`seq=1`, `req_id=100`:
-
-```
-Offset  Hex                                              Поле
-------  -----------------------------------------------  -----
-0000    25 00 00 00                                       len = 37
-0004    02                                                ver = 2
-0005    01                                                type = PlaceOrder (0x01)
-0006    01 00 00 00 00 00 00 00                           seq = 1
-000E    64 00 00 00 00 00 00 00                           req_id = 100
-
-        --- нагрузка (37 байт) ---
-0016    2A 00 00 00 00 00 00 00                           order_id = 42
-001E    01 00                                             symbol_id = 1
-0020    00                                                side = Buy (0)
-0021    00                                                order_type = Limit (0)
-0022    00                                                tif = GTC (0)
-0023    00 50 39 27 8C 04 00 00                           price = 5_000_000_000_000
-002B    00 00 00 00 00 00 00 00                           stop_price = 0
-0033    00 E1 F5 05 00 00 00 00                           qty = 100_000_000 (1.0 BTC)
-```
-
-### OrderAccepted (Движок → Клиент)
-
-`order_id=42`, `timestamp=1710000000000000000` (нс), `seq=1`, `req_id=0`:
-
-```
-Offset  Hex                                              Поле
-------  -----------------------------------------------  -----
-0000    10 00 00 00                                       len = 16
-0004    02                                                ver = 2
-0005    10                                                type = OrderAccepted (0x10)
-0006    01 00 00 00 00 00 00 00                           seq = 1
-000E    00 00 00 00 00 00 00 00                           req_id = 0
-
-        --- нагрузка (16 байт) ---
-0016    2A 00 00 00 00 00 00 00                           order_id = 42
-001E    00 20 A1 07 78 BE B7 17                           timestamp (нс)
-```
-
-### Trade (Движок → Клиент)
-
-Сделка: `trade_id=1`, `symbol_id=1`, `price=50000.00`, `qty=1.0`,
-`maker_order_id=10`, `taker_order_id=42`, `maker_side=Sell(1)`:
-
-```
-Offset  Hex                                              Поле
-------  -----------------------------------------------  -----
-0000    3B 00 00 00                                       len = 59
-0004    02                                                ver = 2
-0005    12                                                type = Trade (0x12)
-0006    02 00 00 00 00 00 00 00                           seq = 2
-000E    64 00 00 00 00 00 00 00                           req_id = 100 (зеркалит команду)
-
-        --- нагрузка (59 байт) ---
-0016    01 00 00 00 00 00 00 00                           trade_id = 1
-001E    01 00                                             symbol_id = 1
-0020    00 50 39 27 8C 04 00 00                           price = 5_000_000_000_000
-0028    00 E1 F5 05 00 00 00 00                           qty = 100_000_000 (1.0)
-0030    0A 00 00 00 00 00 00 00                           maker_order_id = 10
-0038    2A 00 00 00 00 00 00 00                           taker_order_id = 42
-0040    01                                                maker_side = Sell (1)
-0041    ... (8 bytes timestamp)
-0049    ... (8 bytes sequence)
-```
-
-> **Примечание:** Все события, порождённые командой (включая Trade), отправляются
-> на соединение, приславшее команду, и несут `req_id` этой команды.
-
----
-
-## Примечания по реализации
-
-- Движок принимает соединения по TCP (по умолчанию порт 9090) и Unix Domain Socket (если настроен).
-- Опциональная поддержка TLS (feature `tls`) с mTLS (клиентские сертификаты).
-- Один tokio async task на соединение.
-- Декодирование кадров использует `bytes::BytesMut` с ручным управлением буфером.
-- Нарушение протокола (неверная версия, невалидный тип сообщения, слишком большая нагрузка)
-  приводит к отправке Error-кадра и немедленному разрыву соединения.
-- Session recovery: клиент может переподключиться через ResumeSession и получить
-  replay пропущенных событий из серверного буфера.
-- Exactly-once: дедупликация команд по `request_id` предотвращает повторную обработку
-  при переподключении.
-
-
-## Durable session semantics
-
-Protocol v2 uses a 22-byte header. Positive server sequences belong to the durable per-session stream; retries preserve original frame bytes and sequences. Clients must deduplicate these sequences. Sequence zero is out-of-band control and must not advance the receive cursor or be acknowledged. Passive execution events use request_id zero. A ReplayGap requires GetOpenOrders plus separate historical execution reconciliation; an order snapshot is not a settlement history. Batch items are individually durable, not globally atomic.
+| Type | Name | Payload |
+| --- | --- | --- |
+| `0x02` | CancelOrder | Order ID (`u64`), symbol ID (`u16`): 10 bytes |
+| `0x03` | AmendOrder | Order ID (`u64`), symbol ID (`u16`), has-price (`u8`), optional price (`i64`), has-qty (`u8`), optional qty (`u64`): 12–28 bytes |
+| `0x07` | GetOrderStatus | Order ID (`u64`), symbol ID (`u16`): 10 bytes |
+| `0x09` | GetOpenOrders | Empty |
+| `0x0B` | BatchPlaceOrder | Count (`u8`, 1–20), then fixed 38-byte PlaceOrder entries |
+| `0x0C` | BatchCancelOrder | Count (`u8`, 1–50), then 10-byte CancelOrder entries |
+
+Amend presence flags are 0 or 1; include at least one changed field. Batch placement requires the flags byte on every entry and cannot carry GTD expiry, trailing distance or iceberg extensions. Batches execute individual items and are not atomic across symbols.
+
+Cancel, amend and status requests are scoped to the requesting session. An order belonging to another session is reported as not found. Durable mutation retries return the original outcome; a retained request ID with a different payload is rejected. Query responses may be regenerated after bounded-cache eviction.
+
+## Order events
+
+Fields below are serialized in the listed order, without alignment padding. `timestamp` is `u64`, price is `i64`, quantity is `u64`, and order/trade IDs are `u64`.
+
+| Type | Name | Bytes | Payload |
+| --- | --- | --- | --- |
+| `0x10` | OrderAccepted | 16 | Order ID, timestamp |
+| `0x11` | OrderRejected | 17 | Order ID, reason (`u8`), timestamp |
+| `0x12` | Trade | 59 | Trade ID, symbol (`u16`), price, qty, maker ID, taker ID, maker side (`u8`), timestamp, trade sequence (`u64`) |
+| `0x13` | OrderFilled | 32 | Order ID, filled qty, price, timestamp |
+| `0x14` | OrderPartiallyFilled | 40 | Order ID, filled qty, remaining qty, price, timestamp |
+| `0x15` | OrderCancelled | 24 | Order ID, remaining qty, timestamp |
+| `0x16` | OrderAmended | 32 | Order ID, new price, new qty, timestamp |
+| `0x17` | StopTriggered | 24 | Order ID, trigger price, timestamp |
+| `0x1D` | OrderStatus | 41 | Order ID, status (`u8`), filled qty, remaining qty, price, timestamp |
+| `0x1E` | OrderNotFound | 8 | Order ID |
+
+One command can emit several events. Continue consuming unsolicited owner events even when no local command is pending. The trade sequence inside Trade is distinct from the frame's server sequence.
+
+## Open-order snapshots
+
+| Type | Name | Bytes | Payload |
+| --- | --- | --- | --- |
+| `0x1F` | OpenOrdersBegin | 12 | Count (`u32`), snapshot sequence (`u64`) |
+| `0x21` | OpenOrder | 60 | Layout below |
+| `0x22` | OpenOrdersEnd | 8 | Same snapshot sequence (`u64`) |
+
+Wait for End with the matching request ID. Validate Begin/End sequence equality and the declared order count before replacing local state. A read timeout is not a valid empty snapshot.
+
+OpenOrder offsets: ID 0 (`u64`), symbol 8 (`u16`), side 10, type 11, TIF 12, status 13 (`u8` each), price 14 (`i64`), stop price 22 (`i64`), total qty 30 (`u64`), open qty 38 (`u64`), timestamp 46 (`u64`), flags 54 (`u8`), reserved zero bytes 55–59. For an iceberg, open qty includes the hidden remainder. This fixed layout does not include expiry, trailing distance or display size.
+
+Order status values: New 0, PartiallyFilled 1, Filled 2, Cancelled 3, Rejected 4, Triggered 5.
+
+## Rejection and error codes
+
+OrderRejected reasons (`u8`):
+
+| Code | Reason | Code | Reason |
+| --- | --- | --- | --- |
+| 0 | NoLiquidity | 8 | SymbolNotFound |
+| 1 | InsufficientLiquidity | 9 | TradingHalted |
+| 2 | InvalidPrice | 10 | RiskCheckFailed |
+| 3 | InvalidQuantity | 11 | WouldTakeMarket |
+| 4 | InvalidLotSize | 12 | InternalError |
+| 5 | InvalidTickSize | 13 | SelfTradePrevented |
+| 6 | OrderNotFound | 14 | InvalidExpiry |
+| 7 | DuplicateOrderId | 15 | AmendNotSupported |
+
+Protocol Error codes (`u16`): 1 UnsupportedVersion, 2 SequenceOutOfOrder, 3 HandshakeRequired, 4 InvalidPayload, 5 ServerShuttingDown, 6 Backpressure, 7 HeartbeatTimeout, 8 TlsError, 9 InvalidRequestId, 10 SessionExpired, 11 BufferExhausted, 12 InternalError. Some codes are reserved; their assignment remains part of the wire contract. Handle unknown codes without corrupting framing.
+
+An InternalError is not a successful execution acknowledgment. Reconnect/retry according to the retained mutation identity and recovery contract; do not generate a replacement order merely because delivery failed.

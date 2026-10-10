@@ -9,8 +9,8 @@
 // `len` covers only the payload bytes (not the header).
 // `ver` is the protocol version (currently 2).
 // `type` is one of the MessageType variants.
-// `seq` is a monotonically increasing sequence number per connection direction.
-// `req_id` is a client-generated idempotency key (client→server; 0 for server→client).
+// `seq` increases per client connection or per server session; server zero is out-of-band.
+// `req_id` identifies client requests and their replies; unsolicited events use zero.
 
 /// Current wire protocol version.
 pub const PROTOCOL_VERSION: u8 = 2;
@@ -18,12 +18,12 @@ pub const PROTOCOL_VERSION: u8 = 2;
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageType {
-    // ── Inbound (client → engine) ────────────────────────────────────────
+    // Inbound (client → engine)
     PlaceOrder = 0x01,
     CancelOrder = 0x02,
     AmendOrder = 0x03,
 
-    // ── Connection management (bidirectional / inbound) ───────────────────
+    // Connection management (bidirectional / inbound)
     Ping = 0x04,
     Handshake = 0x05,
     /// Resume a previous session after reconnect.
@@ -47,7 +47,7 @@ pub enum MessageType {
     /// Payload: count(1) + [CancelOrder payload(10 bytes) × count]
     BatchCancelOrder = 0x0C,
 
-    // ── Outbound (engine → client) ────────────────────────────────────────
+    // Outbound (engine → client)
     OrderAccepted = 0x10,
     OrderRejected = 0x11,
     Trade = 0x12,
@@ -57,7 +57,7 @@ pub enum MessageType {
     OrderAmended = 0x16,
     StopTriggered = 0x17,
 
-    // ── Connection management (outbound) ─────────────────────────────────
+    // Connection management (outbound)
     Pong = 0x18,
     Error = 0x19,
     /// Handshake accepted. Payload: server_version(1) + TLV extensions.
@@ -174,16 +174,12 @@ pub const BATCH_PLACE_ENTRY_SIZE: usize = 38;
 /// Maximum orders in a BatchCancelOrder frame.
 pub const MAX_BATCH_CANCEL: u8 = 50;
 
-// ─── TLV extension tags (used in HandshakeAck and future messages) ────────────
-
 /// TLV tag: server capabilities bitmask (u64 LE, 8 bytes).
 pub const TLV_CAPABILITIES: u16 = 0x0001;
 /// TLV tag: session ID assigned to this connection ([u8; 16]).
 pub const TLV_SESSION_ID: u16 = 0x0002;
 /// TLV tag: server heartbeat interval the client should respect (u32 LE, ms).
 pub const TLV_HEARTBEAT_MS: u16 = 0x0003;
-
-// ─── Server capability bits (TLV_CAPABILITIES bitmask) ───────────────────────
 
 pub const CAP_SESSION_RECOVERY: u64 = 1 << 0;
 pub const CAP_HEARTBEAT: u64 = 1 << 1;
@@ -226,16 +222,10 @@ pub enum ErrorCode {
     TlsError = 8,
     /// Client command missing request_id (required for PlaceOrder/Cancel/Amend in v2).
     InvalidRequestId = 9,
-    /// Session ID is unknown or has expired. Currently the server issues a
-    /// fresh HandshakeAck instead of this error (graceful re-session). This
-    /// code is reserved for a future strict-mode where clients want to know
-    /// their prior state was lost rather than being silently re-created.
+    /// Reserved code for an unknown or expired session.
     SessionExpired = 10,
-    /// Replay buffer has been exhausted for this slow consumer — session
-    /// forcibly closed. Reserved for the slow-consumer throttle path
-    /// (Phase 3+): when `slow_consumer=true` persists beyond a threshold,
-    /// the server will emit this and disconnect. Today the server emits
-    /// FlowControlWarning instead and keeps the connection.
+    /// Reserved code for replay-buffer exhaustion. Current delivery uses
+    /// FlowControlWarning and ReplayGap instead.
     BufferExhausted = 11,
     /// An internal server error prevented the request from being
     /// fulfilled. Clients SHOULD retry; the response is NOT cached in

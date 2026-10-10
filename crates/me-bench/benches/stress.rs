@@ -64,10 +64,8 @@ fn engine_two_sided(n_levels: usize, orders_per_level: usize) -> (Engine, u64) {
     (engine, id)
 }
 
-// ---------------------------------------------------------------------------
 // 1. Limit order placement scaling: how does insert cost grow with book size?
 //    Parameterized: 100, 1_000, 10_000, 50_000 levels
-// ---------------------------------------------------------------------------
 
 fn bench_place_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("place_into_large_book");
@@ -106,10 +104,8 @@ fn bench_place_scaling(c: &mut Criterion) {
     group.finish();
 }
 
-// ---------------------------------------------------------------------------
 // 2. Cancel from a large book: how does cancel cost scale?
 //    Cancel from the MIDDLE of the book (not best bid/ask).
-// ---------------------------------------------------------------------------
 
 fn bench_cancel_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("cancel_from_large_book");
@@ -156,10 +152,8 @@ fn bench_cancel_scaling(c: &mut Criterion) {
     group.finish();
 }
 
-// ---------------------------------------------------------------------------
 // 3. Market sweep scaling: sweep N levels in one shot.
 //    Parameterized: 100, 500, 2_000, 5_000 levels
-// ---------------------------------------------------------------------------
 
 fn bench_sweep_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("market_sweep_depth");
@@ -227,10 +221,8 @@ fn bench_sweep_scaling(c: &mut Criterion) {
     group.finish();
 }
 
-// ---------------------------------------------------------------------------
 // 4. Deep FIFO queue: many orders at the SAME price, then sweep all.
 //    Parameterized: 1_000, 5_000, 10_000, 50_000 orders
-// ---------------------------------------------------------------------------
 
 fn bench_fifo_queue_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("fifo_queue_sweep");
@@ -298,10 +290,8 @@ fn bench_fifo_queue_scaling(c: &mut Criterion) {
     group.finish();
 }
 
-// ---------------------------------------------------------------------------
 // 5. Amend in a large book: price change triggers cancel+re-insert.
 //    How does BTreeMap re-insert cost scale with tree size?
-// ---------------------------------------------------------------------------
 
 fn bench_amend_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("amend_in_large_book");
@@ -339,10 +329,8 @@ fn bench_amend_scaling(c: &mut Criterion) {
     group.finish();
 }
 
-// ---------------------------------------------------------------------------
 // 6. HFT cancel-replace on a large book.
 //    Realistic: 50k-level two-sided book, rapid cancel+place at best bid.
-// ---------------------------------------------------------------------------
 
 fn bench_hft_large_book(c: &mut Criterion) {
     let mut group = c.benchmark_group("hft_cancel_replace_large_book");
@@ -402,9 +390,7 @@ fn bench_hft_large_book(c: &mut Criterion) {
     group.finish();
 }
 
-// ---------------------------------------------------------------------------
 // 7. Stop book scaling: place many stops, then trigger cascade.
-// ---------------------------------------------------------------------------
 
 fn bench_stop_trigger_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("stop_trigger_cascade");
@@ -490,10 +476,8 @@ fn bench_stop_trigger_scaling(c: &mut Criterion) {
     group.finish();
 }
 
-// ---------------------------------------------------------------------------
 // 8. Book build throughput: how fast can we build a book from scratch?
 //    Measures sustained insert into a growing BTreeMap.
-// ---------------------------------------------------------------------------
 
 fn bench_book_build(c: &mut Criterion) {
     let mut group = c.benchmark_group("book_build_from_scratch");

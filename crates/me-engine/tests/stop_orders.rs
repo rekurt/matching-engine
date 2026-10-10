@@ -220,8 +220,6 @@ fn test_g57_stop_limit_rests_after_trigger() {
     assert!(e.book().best_bid().is_some());
 }
 
-// ─── Trailing stops ──────────────────────────────────────────────────────────
-
 fn trailing_sell_stop(id: OrderId, init_stop: f64, trail: f64, qty: f64) -> Command {
     Command::PlaceOrder(
         Order::new_stop_market(
@@ -702,8 +700,6 @@ fn test_iceberg_replenishment_trade_triggers_stop() {
     assert_eq!(e.stop_book().len(), 0);
 }
 
-// ─── Self-trade prevention for triggered stops ──────────────────────────────
-
 const SESSION_A: SessionId = SessionId::from_bytes([0xA1u8; 16]);
 const SESSION_B: SessionId = SessionId::from_bytes([0xB2u8; 16]);
 const SESSION_C: SessionId = SessionId::from_bytes([0xC3u8; 16]);
@@ -847,8 +843,6 @@ fn test_triggered_stop_crossing_other_session_still_trades() {
         "B's resting sell #2 must be filled by the triggered stop: {events:?}"
     );
 }
-
-// ─── Intra-command trade path feeds stop triggers ───────────────────────────
 
 #[test]
 fn test_trailing_stop_ratchets_on_intra_command_high() {

@@ -17,8 +17,6 @@ use me_engine::engine::Engine;
 use me_persist::snapshot::{BookSnapshot, SnapshotManager};
 use me_persist::wal::{WalCommand, WalEntry, WalReader, WalWriter};
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
 /// Generate a unique temporary directory for a test.
 fn temp_dir(test_name: &str) -> PathBuf {
     let dir = std::env::temp_dir()
@@ -291,8 +289,6 @@ fn write_wal_and_process(
     engine
 }
 
-// ─── Test 1: WAL replay empty log -> empty book ─────────────────────────────
-
 #[test]
 fn test_wal_replay_empty_log() {
     let dir = temp_dir("wal_replay_empty");
@@ -315,8 +311,6 @@ fn test_wal_replay_empty_log() {
 
     let _ = fs::remove_dir_all(&dir);
 }
-
-// ─── Test 2: WAL replay N place commands -> identical state ─────────────────
 
 #[test]
 fn test_wal_replay_place_commands() {
@@ -344,8 +338,6 @@ fn test_wal_replay_place_commands() {
 
     let _ = fs::remove_dir_all(&dir);
 }
-
-// ─── Test 3: WAL replay with cancel -> state matches ────────────────────────
 
 #[test]
 fn test_wal_replay_with_cancel() {
@@ -376,8 +368,6 @@ fn test_wal_replay_with_cancel() {
 
     let _ = fs::remove_dir_all(&dir);
 }
-
-// ─── Test 4: WAL replay with amend -> state matches ─────────────────────────
 
 #[test]
 fn test_wal_replay_with_amend() {
@@ -413,8 +403,6 @@ fn test_wal_replay_with_amend() {
 
     let _ = fs::remove_dir_all(&dir);
 }
-
-// ─── Test 5: WAL replay determinism ─────────────────────────────────────────
 
 #[test]
 fn test_wal_replay_determinism() {
@@ -453,8 +441,6 @@ fn test_wal_replay_determinism() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-// ─── Test 6: Snapshot save and restore -> identical book state ───────────────
-
 #[test]
 fn test_snapshot_save_and_restore() {
     let dir = temp_dir("snapshot_save_restore");
@@ -479,8 +465,6 @@ fn test_snapshot_save_and_restore() {
 
     let _ = fs::remove_dir_all(&dir);
 }
-
-// ─── Test 7: Snapshot + WAL replay ──────────────────────────────────────────
 
 #[test]
 fn test_snapshot_plus_wal_replay() {
@@ -528,8 +512,6 @@ fn test_snapshot_plus_wal_replay() {
 
     let _ = fs::remove_dir_all(&dir);
 }
-
-// ─── Test 8: Full recovery cycle ────────────────────────────────────────────
 
 #[test]
 fn test_full_recovery_cycle() {
@@ -597,8 +579,6 @@ fn test_full_recovery_cycle() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-// ─── Test 9: Corrupted WAL entry -> error, no crash ─────────────────────────
-
 #[test]
 fn test_corrupted_wal_entry() {
     let dir = temp_dir("corrupted_wal");
@@ -643,8 +623,6 @@ fn test_corrupted_wal_entry() {
 
     let _ = fs::remove_dir_all(&dir);
 }
-
-// ─── Test 10: WAL compaction ────────────────────────────────────────────────
 
 #[test]
 fn test_wal_compaction() {
@@ -696,8 +674,6 @@ fn test_wal_compaction() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-// ─── Test 11: Empty snapshot works correctly ────────────────────────────────
-
 #[test]
 fn test_empty_snapshot() {
     let dir = temp_dir("empty_snapshot");
@@ -719,8 +695,6 @@ fn test_empty_snapshot() {
 
     let _ = fs::remove_dir_all(&dir);
 }
-
-// ─── Test 12: Snapshot with stop orders -> stop orders preserved ────────────
 
 #[test]
 fn test_snapshot_with_stop_orders() {
@@ -766,8 +740,6 @@ fn test_snapshot_with_stop_orders() {
 
     let _ = fs::remove_dir_all(&dir);
 }
-
-// ─── Test 13: Recovery after partial fills -> remaining quantities correct ──
 
 #[test]
 fn test_recovery_after_partial_fills() {
@@ -816,8 +788,6 @@ fn test_recovery_after_partial_fills() {
 
     let _ = fs::remove_dir_all(&dir);
 }
-
-// ─── Test 14: Recovery preserves price-time priority (FIFO) ─────────────────
 
 #[test]
 fn test_recovery_preserves_price_time_priority() {

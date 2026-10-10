@@ -7,8 +7,6 @@ use me_core::types::{FixedPrice, FixedQty, OrderId, SymbolId};
 
 use crate::codec;
 
-// ─── WAL Entry ───────────────────────────────────────────────────────────────
-
 /// A single entry in the write-ahead log.
 #[derive(Clone, Debug)]
 pub struct WalEntry {
@@ -70,8 +68,6 @@ impl WalCommand {
         }
     }
 }
-
-// ─── WAL Writer ──────────────────────────────────────────────────────────────
 
 /// Write-ahead log writer. Appends commands to a file with CRC32 checksums.
 ///
@@ -233,8 +229,6 @@ impl WalWriter {
         &self.path
     }
 }
-
-// ─── WAL Reader ──────────────────────────────────────────────────────────────
 
 /// Hard cap on a single WAL record's payload length. A larger declared
 /// length means a torn write or corruption, NOT a real record — refuse to

@@ -39,9 +39,7 @@
 
 import * as net from "net";
 
-// ---------------------------------------------------------------------------
 // Protocol constants
-// ---------------------------------------------------------------------------
 
 const PROTOCOL_VERSION = 2;
 const HEADER_SIZE = 22; // len(4) + ver(1) + type(1) + seq(8)
@@ -115,9 +113,7 @@ const REJECT_REASONS: Record<number, string> = {
   10: "RiskCheckFailed",
 };
 
-// ---------------------------------------------------------------------------
 // Fixed-point helpers
-// ---------------------------------------------------------------------------
 
 /** Convert a human-readable price (number) to the engine's i64 fixed-point. */
 function priceToRaw(price: number): bigint {
@@ -147,9 +143,7 @@ function tsToStr(nanos: bigint): string {
   return new Date(ms).toISOString();
 }
 
-// ---------------------------------------------------------------------------
 // Event type
-// ---------------------------------------------------------------------------
 
 interface MEEvent {
   type: string;
@@ -157,9 +151,7 @@ interface MEEvent {
   [key: string]: unknown;
 }
 
-// ---------------------------------------------------------------------------
 // MEClient
-// ---------------------------------------------------------------------------
 
 class MEClient {
   private host: string;
@@ -520,9 +512,7 @@ class MEClient {
   }
 }
 
-// ---------------------------------------------------------------------------
 // Pretty-printer
-// ---------------------------------------------------------------------------
 
 function printEvent(event: MEEvent): void {
   const { type: etype, seq } = event;
@@ -590,9 +580,7 @@ function printEvent(event: MEEvent): void {
   }
 }
 
-// ---------------------------------------------------------------------------
 // Main demo
-// ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
   const host = process.argv[2] ?? "127.0.0.1";

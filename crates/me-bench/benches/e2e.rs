@@ -7,9 +7,7 @@ use me_engine::command::Command;
 use me_engine::engine::Engine;
 use me_engine::router::Router;
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 /// Price in raw units: 100.00 in 8-dp fixed point.
 const BASE_PRICE: i64 = 10_000_000_000;
@@ -69,9 +67,7 @@ fn engine_with_bids(n_levels: usize, orders_per_level: usize) -> (Engine, u64) {
     (engine, id)
 }
 
-// ---------------------------------------------------------------------------
 // 1. Limit order placement (no match)
-// ---------------------------------------------------------------------------
 
 fn bench_limit_no_match(c: &mut Criterion) {
     c.bench_function("e2e_limit_no_match", |b| {
@@ -96,9 +92,7 @@ fn bench_limit_no_match(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 2. Limit order full fill
-// ---------------------------------------------------------------------------
 
 fn bench_limit_full_fill(c: &mut Criterion) {
     c.bench_function("e2e_limit_full_fill", |b| {
@@ -136,9 +130,7 @@ fn bench_limit_full_fill(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 3. Limit order partial fill
-// ---------------------------------------------------------------------------
 
 fn bench_limit_partial_fill(c: &mut Criterion) {
     c.bench_function("e2e_limit_partial_fill", |b| {
@@ -177,9 +169,7 @@ fn bench_limit_partial_fill(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 4. Market order sweep single level
-// ---------------------------------------------------------------------------
 
 fn bench_market_sweep_single_level(c: &mut Criterion) {
     c.bench_function("e2e_market_sweep_single_level", |b| {
@@ -216,9 +206,7 @@ fn bench_market_sweep_single_level(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 5. Market order sweep multiple levels (10+)
-// ---------------------------------------------------------------------------
 
 fn bench_market_sweep_multi_level(c: &mut Criterion) {
     c.bench_function("e2e_market_sweep_multi_level", |b| {
@@ -259,9 +247,7 @@ fn bench_market_sweep_multi_level(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 6. IOC order with match
-// ---------------------------------------------------------------------------
 
 fn bench_ioc_with_match(c: &mut Criterion) {
     c.bench_function("e2e_ioc_with_match", |b| {
@@ -299,9 +285,7 @@ fn bench_ioc_with_match(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 7. IOC order no match
-// ---------------------------------------------------------------------------
 
 fn bench_ioc_no_match(c: &mut Criterion) {
     let (mut engine, mut next_id) = engine_with_asks(10, 1);
@@ -323,9 +307,7 @@ fn bench_ioc_no_match(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 8. FOK order success
-// ---------------------------------------------------------------------------
 
 fn bench_fok_success(c: &mut Criterion) {
     c.bench_function("e2e_fok_success", |b| {
@@ -362,9 +344,7 @@ fn bench_fok_success(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 9. FOK order reject
-// ---------------------------------------------------------------------------
 
 fn bench_fok_reject(c: &mut Criterion) {
     c.bench_function("e2e_fok_reject", |b| {
@@ -400,9 +380,7 @@ fn bench_fok_reject(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 10. Cancel order (middle of book)
-// ---------------------------------------------------------------------------
 
 fn bench_cancel_mid_book(c: &mut Criterion) {
     c.bench_function("e2e_cancel_mid_book", |b| {
@@ -438,9 +416,7 @@ fn bench_cancel_mid_book(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 11. Cancel best bid
-// ---------------------------------------------------------------------------
 
 fn bench_cancel_best_bid(c: &mut Criterion) {
     c.bench_function("e2e_cancel_best_bid", |b| {
@@ -474,9 +450,7 @@ fn bench_cancel_best_bid(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 12. Amend order qty down (in-place)
-// ---------------------------------------------------------------------------
 
 fn bench_amend_qty_down(c: &mut Criterion) {
     let mut engine = fresh_engine();
@@ -511,9 +485,7 @@ fn bench_amend_qty_down(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 13. Amend order price change (cancel + replace)
-// ---------------------------------------------------------------------------
 
 fn bench_amend_price_change(c: &mut Criterion) {
     let mut engine = fresh_engine();
@@ -549,9 +521,7 @@ fn bench_amend_price_change(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 14. Stop order placement
-// ---------------------------------------------------------------------------
 
 fn bench_stop_order_placement(c: &mut Criterion) {
     c.bench_function("e2e_stop_order_placement", |b| {
@@ -577,9 +547,7 @@ fn bench_stop_order_placement(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 15. Stop order trigger
-// ---------------------------------------------------------------------------
 
 fn bench_stop_order_trigger(c: &mut Criterion) {
     c.bench_function("e2e_stop_order_trigger", |b| {
@@ -659,9 +627,7 @@ fn bench_stop_order_trigger(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 16. Deep book matching (1000 price levels)
-// ---------------------------------------------------------------------------
 
 fn bench_deep_book_match(c: &mut Criterion) {
     c.bench_function("e2e_deep_book_match_1000_levels", |b| {
@@ -721,9 +687,7 @@ fn bench_deep_book_match(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 17. Multi-pair routing
-// ---------------------------------------------------------------------------
 
 fn bench_multi_pair_routing(c: &mut Criterion) {
     c.bench_function("e2e_multi_pair_routing", |b| {
@@ -773,9 +737,7 @@ fn bench_multi_pair_routing(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 18. Full order lifecycle: place -> partial fill -> amend -> cancel
-// ---------------------------------------------------------------------------
 
 fn bench_full_lifecycle(c: &mut Criterion) {
     c.bench_function("e2e_full_order_lifecycle", |b| {
@@ -835,9 +797,7 @@ fn bench_full_lifecycle(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 19. Stop-market order placement
-// ---------------------------------------------------------------------------
 
 fn bench_stop_market_placement(c: &mut Criterion) {
     c.bench_function("e2e_stop_market_placement", |b| {
@@ -862,9 +822,7 @@ fn bench_stop_market_placement(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 20. Amend qty UP (cancel+replace path, loses time priority)
-// ---------------------------------------------------------------------------
 
 fn bench_amend_qty_up(c: &mut Criterion) {
     c.bench_function("e2e_amend_qty_up", |b| {
@@ -902,9 +860,7 @@ fn bench_amend_qty_up(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 21. Amend triggers match (price change crosses spread)
-// ---------------------------------------------------------------------------
 
 fn bench_amend_triggers_match(c: &mut Criterion) {
     c.bench_function("e2e_amend_triggers_match", |b| {
@@ -956,9 +912,7 @@ fn bench_amend_triggers_match(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 22. Market order on empty book (rejection fast-path)
-// ---------------------------------------------------------------------------
 
 fn bench_market_order_empty_book(c: &mut Criterion) {
     c.bench_function("e2e_market_order_empty_book", |b| {
@@ -982,9 +936,7 @@ fn bench_market_order_empty_book(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 23. Trading halt rejection (circuit breaker)
-// ---------------------------------------------------------------------------
 
 fn bench_trading_halt_rejection(c: &mut Criterion) {
     c.bench_function("e2e_trading_halt_rejection", |b| {
@@ -1010,9 +962,7 @@ fn bench_trading_halt_rejection(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 24. Deep queue at single price level (10k orders FIFO)
-// ---------------------------------------------------------------------------
 
 fn bench_deep_queue_single_level(c: &mut Criterion) {
     c.bench_function("e2e_deep_queue_single_level", |b| {
@@ -1072,9 +1022,7 @@ fn bench_deep_queue_single_level(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 25. Cancel non-existent order (OrderNotFound fast-path)
-// ---------------------------------------------------------------------------
 
 fn bench_cancel_nonexistent(c: &mut Criterion) {
     c.bench_function("e2e_cancel_nonexistent", |b| {
@@ -1107,9 +1055,7 @@ fn bench_cancel_nonexistent(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // 26. HFT cancel-replace pattern (cancel + place on every tick)
-// ---------------------------------------------------------------------------
 
 fn bench_hft_cancel_replace(c: &mut Criterion) {
     c.bench_function("e2e_hft_cancel_replace", |b| {
@@ -1169,9 +1115,7 @@ fn bench_hft_cancel_replace(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
 // Criterion groups
-// ---------------------------------------------------------------------------
 
 criterion_group!(
     benches,

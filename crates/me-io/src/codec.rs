@@ -13,8 +13,6 @@ use crate::protocol::{
 };
 use crate::session_store::SessionId;
 
-// ─── Decode types ───────────────────────────────────────────────────────────
-
 /// Decode error types.
 #[derive(Debug)]
 pub enum DecodeError {
@@ -124,8 +122,6 @@ impl Default for ConnectionCodecState {
     }
 }
 
-// ─── TLV helpers ─────────────────────────────────────────────────────────────
-
 /// Write a TLV record: tag(2 LE) + len(2 LE) + value.
 pub fn write_tlv(buf: &mut BytesMut, tag: u16, value: &[u8]) {
     buf.put_u16_le(tag);
@@ -193,8 +189,6 @@ impl<'a> Iterator for TlvIter<'a> {
         Some(Ok((tag, value)))
     }
 }
-
-// ─── Decoding ───────────────────────────────────────────────────────────────
 
 /// Try to decode a frame from a buffer, enforcing connection-level invariants.
 /// Returns Ok((decoded_frame, bytes_consumed)) on success.
@@ -420,13 +414,8 @@ pub fn decode_frame(
             let mut cmds = Vec::with_capacity(count as usize);
             let mut offset = 1usize;
             for _ in 0..count {
-                // Batch entries are FIXED at 38 bytes (flags mandatory). The
-                // single-order format allows an optional flags byte (37 or 38),
-                // but inside a batch a variable size is unparseable: with no
-                // per-entry length prefix the decoder cannot tell where one
-                // entry ends. Guessing the size from the remaining buffer (the
-                // previous behaviour) silently corrupted every entry after the
-                // first whenever a 37-byte entry was followed by another entry.
+                // Entries have no length prefix, so batches require fixed
+                // 38-byte entries, including flags, to preserve boundaries.
                 if payload.len() < offset + BATCH_PLACE_ENTRY_SIZE {
                     return Err(DecodeError::InvalidPayload(
                         "BatchPlaceOrder truncated".into(),
@@ -734,8 +723,6 @@ fn decode_amend_order(payload: &[u8], clock: &dyn me_clock::Clock) -> Result<Com
     })
 }
 
-// ─── Encoding ────────────────────────────────────────────────────────────────
-
 /// Encode a list of match events into a BytesMut buffer as frames.
 ///
 /// **Sequence semantics**: Each emitted wire frame carries its own distinct
@@ -895,7 +882,7 @@ pub fn encode_pong(seq: u64, last_processed_client_seq: u64, buf: &mut BytesMut)
 /// Payload layout:
 /// - server_version(1)
 /// - TLV: TLV_CAPABILITIES (u64, 8 bytes)  = 12 bytes
-/// - TLV: TLV_SESSION_ID  ([u8;16])         = 20 bytes
+/// - TLV: TLV_SESSION_ID  (`[u8; 16]`)      = 20 bytes
 /// - TLV: TLV_HEARTBEAT_MS (u32, 4 bytes)   = 8 bytes
 ///
 /// Total payload: 41 bytes

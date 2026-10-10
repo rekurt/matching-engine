@@ -9,6 +9,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   fmt:
     name: Rustfmt
@@ -58,6 +61,9 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
       - run: cargo build --release --workspace --all-features --locked
       - run: cargo build -p me-datagen
+      - run: cargo doc --workspace --no-deps --all-features --locked
+        env:
+          RUSTDOCFLAGS: "-D warnings"
 
   test:
     name: Test
@@ -111,7 +117,10 @@ jobs:
             ~/.cargo/registry/cache/
           key: ${{ runner.os }}-cargo-audit
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: |
+          if ! cargo audit --version >/dev/null 2>&1; then
+            cargo install cargo-audit --locked --force
+          fi
       - run: cargo audit
 
   typescript-example:
@@ -126,3 +135,23 @@ jobs:
         working-directory: examples/typescript
       - run: npm test
         working-directory: examples/typescript
+
+  docker:
+    name: Docker build and readiness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t matching-engine:ci .
+      - name: Check container readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name matching-engine-smoke matching-engine:ci
+          trap 'docker logs matching-engine-smoke; docker rm -f matching-engine-smoke' EXIT
+          for attempt in $(seq 1 30); do
+            if docker exec matching-engine-smoke curl --fail --silent http://127.0.0.1:8080/ready; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1

@@ -6,7 +6,6 @@ import (
 	"testing"
 )
 
-// ─── Encode payload tests ───────────────────────────────────────────────────
 
 func TestEncodePlaceOrderPayload(t *testing.T) {
 	req := &PlaceOrderRequest{
@@ -141,7 +140,6 @@ func TestEncodeAmendNoFields(t *testing.T) {
 	}
 }
 
-// ─── EncodeFrame wrapping ───────────────────────────────────────────────────
 
 func TestEncodeFrame(t *testing.T) {
 	payload := EncodePlaceOrder(&PlaceOrderRequest{OrderId: 1, Qty: NewDecimal(1.0)})
@@ -174,7 +172,6 @@ func TestEncodeFrame(t *testing.T) {
 	}
 }
 
-// ─── Decode outbound messages ───────────────────────────────────────────────
 
 func mkFrame(msgType uint8, seq uint64, payload []byte) []byte {
 	// Test outbound (server→client) frames; request_id 0 is fine for decoding.
@@ -301,7 +298,6 @@ func TestDecodeStopTriggered(t *testing.T) {
 	}
 }
 
-// ─── Edge Cases ─────────────────────────────────────────────────────────────
 
 func TestReadFrameIncomplete(t *testing.T) {
 	// Only 5 bytes, but the v2 header needs 22 -- should fail with unexpected EOF.
@@ -343,7 +339,6 @@ func TestDecodeShortPayload(t *testing.T) {
 	}
 }
 
-// ─── Connection management message tests ──────────────────────────────────
 
 func TestEncodeHandshake(t *testing.T) {
 	payload := EncodeHandshake()

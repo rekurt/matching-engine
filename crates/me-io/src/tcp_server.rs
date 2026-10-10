@@ -576,13 +576,8 @@ where
                                             // No response; write_buf stays empty.
                                         }
                                         DecodedFrame::GetOpenOrders { seq: _, request_id } => {
-                                            // Phase 4: return snapshot of session's open orders.
-                                            //
-                                            // Dedup applies to GetOpenOrders for exactly-once
-                                            // semantics: a client retry after a network blip
-                                            // MUST return the cached snapshot, NOT re-fan-out
-                                            // to every shard (expensive) AND MUST NOT emit a
-                                            // second OpenOrdersBegin/End sequence mid-stream.
+                                            // A retained query retry returns the cached snapshot
+                                            // rather than creating a second replay sequence.
                                             if let Some(cached) = session_store.dedup_lookup(&conn.session_id, request_id) {
                                                 drop(execution_guard);
                                                 write_chunks(stream, &cached, timeout, metrics.as_deref()).await?;
@@ -648,18 +643,8 @@ where
                                         }
                                     }
 
-                                    // ── v2 outbound seq assignment & replay push ────────────
-                                    //
-                                    // CASE 1 — dedup cache hit: the cached bytes already carry
-                                    // their original server_seq values from the first execution,
-                                    // AND those frames are still present in the replay buffer.
-                                    // Just send them over the wire; do NOT push duplicates.
-                                    //
-                                    // CASE 2 — freshly-encoded response: rewrite each frame's
-                                    // header.seq with a monotonic server_frame_seq, push each
-                                    // individual frame into the replay buffer, advance the
-                                    // connection counter by the frame count, then cache the
-                                    // (now-finalized) bytes in the dedup table for retries.
+                                    // Cached replies retain their original sequences. Fresh active-session
+                                    // replies, including control frames, receive journaled server sequences.
                                     if !write_buf.is_empty()
                                         && !dedup_cache_hit
                                         && conn.state == ConnectionState::Active

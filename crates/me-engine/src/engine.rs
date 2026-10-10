@@ -954,7 +954,6 @@ impl Engine {
         &self.book.config
     }
 
-    // ─── Snapshot / Restore ──────────────────────────────────────────────
     //
     // These are the single source of truth for snapshotting engine state.
     // Callers (recovery, tests, admin API) MUST use them rather than

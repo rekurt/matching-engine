@@ -9,6 +9,7 @@ import ssl
 import struct
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 import urllib.request
@@ -32,6 +33,7 @@ class Client:
         self.seq = 0
         self.buf = b''
         self.last = last
+        self.events = []
         self.send(5 if sid is None else 6, 0, b'' if sid is None else sid + struct.pack('<Q', last))
         frames = self.drain()
         if sid is None:
@@ -60,8 +62,8 @@ class Client:
         self.send(1, rid, struct.pack('<QHBBBqqQ', oid, 0, side, 0, 0, 100 * 10**8, 0, qty * 10**8))
         return self.drain()
 
-    def drain(self):
-        self.sock.settimeout(.15)
+    def drain(self, complete=None, advance=True):
+        deadline = time.monotonic() + 5 if complete else None
         result = []
         while True:
             while len(self.buf) >= 22:
@@ -70,19 +72,149 @@ class Client:
                     break
                 assert version == 2
                 result.append((tag, seq, rid, self.buf[22:22+n]))
-                self.last = max(self.last, seq)
+                if advance:
+                    self.last = max(self.last, seq)
                 self.buf = self.buf[22+n:]
+                if complete and complete(result):
+                    return result
+            remaining = deadline - time.monotonic() if deadline else .15
+            if remaining <= 0:
+                raise TimeoutError('incomplete protocol response')
+            self.sock.settimeout(remaining)
             try:
                 chunk = self.sock.recv(65536)
                 if not chunk:
+                    if complete:
+                        raise ConnectionError('connection closed before complete response')
                     return result
                 self.buf += chunk
             except socket.timeout:
+                if complete:
+                    raise TimeoutError('incomplete protocol response')
                 return result
 
     def open_orders(self, rid):
         self.send(9, rid)
-        return [struct.unpack_from('<Q', frame[3])[0] for frame in self.drain() if frame[0] == 0x21]
+        # A TLS write can split the snapshot across records; silence is not its end.
+        frames = self.drain(lambda frames: frames[-1][0] == 0x19 or
+                            (frames[-1][2] == rid and frames[-1][0] == 0x22), advance=False)
+        errors = [f for f in frames if f[0] == 0x19]
+        if errors:
+            code, size = struct.unpack_from('<HH', errors[0][3])
+            message = errors[0][3][4:4 + size].decode('utf-8')
+            raise RuntimeError(f'snapshot error {code}: {message}')
+        snapshot = [f for f in frames if f[2] == rid]
+        assert snapshot[0][0] == 0x1f and snapshot[-1][0] == 0x22, snapshot
+        count, begin_seq = struct.unpack('<IQ', snapshot[0][3])
+        assert struct.unpack('<Q', snapshot[-1][3])[0] == begin_seq, snapshot
+        orders = [struct.unpack_from('<Q', f[3])[0] for f in snapshot if f[0] == 0x21]
+        assert len(orders) == count, snapshot
+        self.events.extend(f for f in frames if f[2] != rid)
+        self.last = max([self.last] + [f[1] for f in frames])
+        return orders
+
+
+class SnapshotClientTests(unittest.TestCase):
+    def test_positive_control_sequences_advance_replay_cursor(self):
+        for tag, seq, payload in [(0x1a, 11, b'\x02'), (0x18, 12, struct.pack('<Q', 101)),
+                                  (0x20, 13, struct.pack('<QQ', 1, 2)),
+                                  (0x19, 14, struct.pack('<HH', 12, 0)),
+                                  (0x1b, 0, struct.pack('<I', 0))]:
+            with self.subTest(tag=tag):
+                local, remote = socket.socketpair()
+                self.addCleanup(local.close)
+                self.addCleanup(remote.close)
+                client = Client.__new__(Client)
+                client.sock, client.seq, client.last, client.buf, client.events = local, 0, 0, b'', []
+                remote.sendall(struct.pack('<IBBQQ', len(payload), 2, tag, seq, 0) + payload)
+                remote.shutdown(socket.SHUT_WR)
+                client.drain()
+                self.assertEqual(client.last, seq)
+
+    def test_snapshot_reports_connection_scoped_error(self):
+        local, remote = socket.socketpair()
+        self.addCleanup(local.close)
+        self.addCleanup(remote.close)
+        client = Client.__new__(Client)
+        client.sock, client.seq, client.last, client.buf, client.events = local, 0, 0, b'', []
+        message = b'shard unavailable'
+        payload = struct.pack('<HH', 12, len(message)) + message
+        remote.sendall(struct.pack('<IBBQQ', len(payload), 2, 0x19, 0, 0) + payload)
+        remote.shutdown(socket.SHUT_WR)
+        with self.assertRaisesRegex(RuntimeError, 'snapshot error 12: shard unavailable'):
+            client.open_orders(102)
+
+    def test_snapshot_preserves_passive_events(self):
+        local, remote = socket.socketpair()
+        self.addCleanup(local.close)
+        self.addCleanup(remote.close)
+        client = Client.__new__(Client)
+        client.sock, client.seq, client.last, client.buf, client.events = local, 0, 0, b'', []
+        trade = (0x12, 1, 0, bytes(59))
+        frames = [trade, (0x1f, 2, 102, struct.pack('<IQ', 1, 7)),
+                  (0x21, 3, 102, struct.pack('<Q', 3) + bytes(52)),
+                  (0x22, 4, 102, struct.pack('<Q', 7))]
+        for tag, seq, rid, payload in frames:
+            remote.sendall(struct.pack('<IBBQQ', len(payload), 2, tag, seq, rid) + payload)
+        self.assertEqual(client.open_orders(102), [3])
+        self.assertEqual(client.events, [trade])
+        self.assertEqual(client.last, 4)
+
+    def test_failed_snapshot_does_not_commit_cursor(self):
+        for failure in ['missing_end', 'bad_count', 'bad_marker']:
+            with self.subTest(failure=failure):
+                local, remote = socket.socketpair()
+                self.addCleanup(local.close)
+                self.addCleanup(remote.close)
+                client = Client.__new__(Client)
+                client.sock, client.seq, client.last, client.buf, client.events = local, 0, 0, b'', []
+                frames = [(0x1f, 1, struct.pack('<IQ', 1, 7))]
+                if failure == 'bad_marker':
+                    frames.append((0x21, 2, struct.pack('<Q', 3) + bytes(52)))
+                if failure != 'missing_end':
+                    frames.append((0x22, 3, struct.pack('<Q', 8 if failure == 'bad_marker' else 7)))
+                for tag, seq, payload in frames:
+                    remote.sendall(struct.pack('<IBBQQ', len(payload), 2, tag, seq, 102) + payload)
+                remote.shutdown(socket.SHUT_WR)
+                error = ConnectionError if failure == 'missing_end' else AssertionError
+                with self.assertRaises(error):
+                    client.open_orders(102)
+                self.assertEqual(client.last, 0)
+
+    def test_snapshot_waits_for_delayed_fragmented_end(self):
+        local, remote = socket.socketpair()
+        self.addCleanup(local.close)
+        self.addCleanup(remote.close)
+        client = Client.__new__(Client)
+        client.sock, client.seq, client.last, client.buf, client.events = local, 0, 0, b'', []
+
+        def frame(tag, seq, payload):
+            return struct.pack('<IBBQQ', len(payload), 2, tag, seq, 102) + payload
+
+        response = (frame(0x1f, 1, struct.pack('<IQ', 1, 7))
+                    + frame(0x21, 2, struct.pack('<Q', 3) + bytes(52))
+                    + frame(0x22, 3, struct.pack('<Q', 7)))
+        errors = []
+
+        def deliver():
+            try:
+                remote.settimeout(2)
+                remote.recv(22)
+                remote.sendall(response[:10])
+                time.sleep(.25)
+                remote.sendall(response[10:-5])
+                time.sleep(.25)
+                remote.sendall(response[-5:])
+            except Exception as error:
+                errors.append(error)
+
+        sender = threading.Thread(target=deliver)
+        sender.start()
+        self.addCleanup(sender.join, 2)
+        self.assertEqual(client.open_orders(102), [3])
+        sender.join(2)
+        self.assertFalse(sender.is_alive())
+        self.assertEqual(errors, [])
 
 
 class RuntimeTests(unittest.TestCase):
@@ -147,7 +279,7 @@ quote="USDT"
         events = maker.drain()
         self.assertIn(0x12, [f[0] for f in events])
         self.assertIn(0x13, [f[0] for f in events])
-        maker.place(3, 1, 101)
+        self.assertIn(0x10, [f[0] for f in maker.place(3, 1, 101)])
         self.assertEqual(maker.open_orders(102), [3])
         sid, last = maker.sid, maker.last
         self.stop(crash=True)
@@ -156,6 +288,26 @@ quote="USDT"
         self.assertEqual(resumed.open_orders(103), [3])
         resumed.send(2, 104, struct.pack('<QH', 3, 0))
         self.assertIn(0x15, [f[0] for f in resumed.drain()])
+
+    def test_ping_replay_cursor_survives_crash(self):
+        self.start()
+        client = self.client()
+        handshake_seq = client.last
+        self.assertGreater(handshake_seq, 0)
+        client.seq = 100
+        client.send(4, 0)
+        pong = [f for f in client.drain() if f[0] == 0x18]
+        self.assertEqual(len(pong), 1)
+        self.assertEqual(struct.unpack('<Q', pong[0][3])[0], client.seq)
+        self.assertGreater(pong[0][1], handshake_seq)
+        self.assertNotEqual(pong[0][1], client.seq)
+        self.assertEqual(client.last, pong[0][1])
+        self.stop(crash=True)
+        self.start()
+        resumed = self.client(client.sid, client.last)
+        self.assertEqual([f[0] for f in resumed.replayed], [0x1b])
+        self.assertEqual(struct.unpack('<I', resumed.replayed[0][3])[0], 0)
+        self.assertEqual(resumed.open_orders(102), [])
 
     def test_completed_order_retry_does_not_execute_again_after_crash(self):
         self.start()

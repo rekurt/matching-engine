@@ -14,7 +14,6 @@
 
 set -euo pipefail
 
-# ─── Colors ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -24,7 +23,6 @@ step() { printf "${YELLOW}[pre-commit]${NC} %s\n" "$1"; }
 ok()   { printf "${GREEN}[pre-commit]${NC} %s ✓\n" "$1"; }
 fail() { printf "${RED}[pre-commit]${NC} %s ✗\n" "$1"; }
 
-# ─── 1. Conflict markers ────────────────────────────────────────────────────
 step "Checking for conflict markers..."
 
 # Only check staged files (not the whole tree).
@@ -37,7 +35,6 @@ if [ -n "$STAGED_FILES" ]; then
 fi
 ok "No conflict markers"
 
-# ─── 2. cargo fmt ────────────────────────────────────────────────────────────
 step "Checking formatting (cargo fmt)..."
 
 if ! cargo fmt --all -- --check 2>/dev/null; then
@@ -46,7 +43,6 @@ if ! cargo fmt --all -- --check 2>/dev/null; then
 fi
 ok "Formatting"
 
-# ─── 3. cargo clippy ────────────────────────────────────────────────────────
 step "Running clippy..."
 
 if ! cargo clippy --workspace --all-targets -- -D warnings 2>/dev/null; then

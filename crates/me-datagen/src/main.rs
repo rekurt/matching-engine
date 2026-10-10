@@ -11,8 +11,6 @@ use me_core::types::{FixedPrice, FixedQty, OrderId, Side, SymbolId};
 use me_engine::command::Command;
 use me_engine::router::Router;
 
-// ─── CLI ────────────────────────────────────────────────────────────────────
-
 #[derive(Parser, Debug)]
 #[command(
     name = "me-datagen",
@@ -70,8 +68,6 @@ struct Cli {
     seed: Option<u64>,
 }
 
-// ─── Per-pair state ─────────────────────────────────────────────────────────
-
 /// Tracks the evolving mid-price and live order IDs for one trading pair.
 struct PairState {
     symbol: SymbolId,
@@ -79,8 +75,6 @@ struct PairState {
     /// Order IDs currently resting on this pair's book.
     live_orders: Vec<OrderId>,
 }
-
-// ─── Statistics ─────────────────────────────────────────────────────────────
 
 #[derive(Default)]
 struct Stats {
@@ -95,8 +89,6 @@ struct Stats {
     orders_rejected: u64,
     orders_cancelled: u64,
 }
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
 
 /// Sample a standard-normal value using the Box-Muller transform so we avoid
 /// pulling in an extra crate dependency for distributions.
@@ -177,8 +169,6 @@ fn stop_price(mid: f64, side: Side, rng: &mut StdRng) -> FixedPrice {
     FixedPrice::from_f64(price.max(0.01))
 }
 
-// ─── Command generation ─────────────────────────────────────────────────────
-
 /// Decide which command type to generate and build it.
 fn generate_command(
     pair: &mut PairState,
@@ -247,8 +237,7 @@ fn generate_command(
         ));
     }
 
-    // ── Limit (possibly stop) order ─────────────────────────────────────
-
+    // Limit (possibly stop) order
     let id = *next_id;
     *next_id += 1;
     let side = pick_side(rng, cli);
@@ -283,8 +272,6 @@ fn generate_command(
     Command::PlaceOrder(order)
 }
 
-// ─── Event accounting ───────────────────────────────────────────────────────
-
 fn account_events(events: &[MatchEvent], pair: &mut PairState, stats: &mut Stats) {
     for event in events {
         match event {
@@ -314,8 +301,6 @@ fn account_events(events: &[MatchEvent], pair: &mut PairState, stats: &mut Stats
         }
     }
 }
-
-// ─── Main ───────────────────────────────────────────────────────────────────
 
 fn main() {
     let cli = Cli::parse();
@@ -359,7 +344,6 @@ fn main() {
     let mut next_id: OrderId = 1;
     let mut ts: u64 = 0;
 
-    // ── Seed the book with initial depth ────────────────────────────────
     // Place a burst of limit orders on both sides to build realistic depth
     // before we start the timed run.
     let seed_count = 200_u64 * cli.pairs as u64;
@@ -381,7 +365,7 @@ fn main() {
     // Reset stats after seeding so they reflect the timed run only.
     stats = Stats::default();
 
-    // ── Timed run ───────────────────────────────────────────────────────
+    // Timed run
     let start = Instant::now();
 
     for _ in 0..cli.orders {
@@ -406,7 +390,7 @@ fn main() {
         0.0
     };
 
-    // ── Collect book depth across all pairs ─────────────────────────────
+    // Collect book depth across all pairs
     let mut total_bid_levels: usize = 0;
     let mut total_ask_levels: usize = 0;
     let mut total_resting: usize = 0;
@@ -423,7 +407,6 @@ fn main() {
     let avg_bid_depth = total_bid_levels as f64 / cli.pairs.max(1) as f64;
     let avg_ask_depth = total_ask_levels as f64 / cli.pairs.max(1) as f64;
 
-    // ── Print summary ───────────────────────────────────────────────────
     println!("=== me-datagen results ===");
     println!("seed:                {seed}");
     println!("pairs:               {}", cli.pairs);

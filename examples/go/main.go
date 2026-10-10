@@ -29,9 +29,7 @@ func main() {
 
 	fmt.Printf("=== Matching Engine Go Client Example ===\n\n")
 
-	// ---------------------------------------------------------------
 	// 1. Connect (Dial performs the protocol handshake automatically)
-	// ---------------------------------------------------------------
 	fmt.Printf("Connecting to %s ...\n", addr)
 	client, err := meclient.Dial(addr)
 	if err != nil {
@@ -42,9 +40,7 @@ func main() {
 	fmt.Println("Connected and handshake completed.")
 	fmt.Println()
 
-	// ---------------------------------------------------------------
 	// 2. Ping — verify the connection is alive
-	// ---------------------------------------------------------------
 	fmt.Println("Sending Ping ...")
 	if err := client.Ping(); err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR ping: %v\n", err)
@@ -56,9 +52,7 @@ func main() {
 	defer close(done)
 	events := readStream(client, done)
 
-	// ---------------------------------------------------------------
 	// 3. Place a Buy Limit order: 1.5 BTC @ $50,000.00
-	// ---------------------------------------------------------------
 	buyOrder := &meclient.PlaceOrderRequest{
 		OrderId:     1001,
 		SymbolId:    0, // BTC/USDT
@@ -85,10 +79,8 @@ func main() {
 	readAndPrint(events)
 	fmt.Println()
 
-	// ---------------------------------------------------------------
 	// 4. Place a Sell Limit order: 0.5 BTC @ $49,999.00
 	//    This CROSSES the buy order and will generate a trade.
-	// ---------------------------------------------------------------
 	sellOrder := &meclient.PlaceOrderRequest{
 		OrderId:     1002,
 		SymbolId:    0,
@@ -119,9 +111,7 @@ func main() {
 	readAllEvents(events)
 	fmt.Println()
 
-	// ---------------------------------------------------------------
 	// 5. Cancel the remaining buy order (1.0 BTC left)
-	// ---------------------------------------------------------------
 	cancelReq := &meclient.CancelOrderRequest{
 		OrderId:  1001,
 		SymbolId: 0,
@@ -138,9 +128,7 @@ func main() {
 	readAndPrint(events)
 	fmt.Println()
 
-	// ---------------------------------------------------------------
 	// 6. Place a Market order to demonstrate IOC behavior
-	// ---------------------------------------------------------------
 	marketOrder := &meclient.PlaceOrderRequest{
 		OrderId:     1003,
 		SymbolId:    0,

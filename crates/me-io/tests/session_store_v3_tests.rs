@@ -12,8 +12,6 @@ use std::time::Duration;
 use bytes::Bytes;
 use me_io::session_store::{ReplayResult, SessionId, SessionStore};
 
-// ─── Gap detection ───────────────────────────────────────────────────────────
-
 #[test]
 fn test_resume_ok_when_no_eviction() {
     let store = SessionStore::new(1024, Duration::from_secs(60));
@@ -100,8 +98,6 @@ fn test_resume_session_not_found() {
     assert_eq!(store.resume(&fake, 0), ReplayResult::SessionNotFound);
 }
 
-// ─── Adaptive buffer growth ──────────────────────────────────────────────────
-
 #[test]
 fn test_buffer_grows_from_min_to_max() {
     let store = SessionStore::new_adaptive(2, 16, 100, Duration::from_secs(60));
@@ -142,8 +138,6 @@ fn test_buffer_evicts_at_hard_limit() {
         other => panic!("expected Ok, got {other:?}"),
     }
 }
-
-// ─── Slow consumer + FlowControlWarning ──────────────────────────────────────
 
 #[test]
 fn test_slow_consumer_flag_set_on_eviction() {
@@ -271,8 +265,6 @@ fn test_buffer_pressure_returns_percentage() {
     let (pct, _) = store.buffer_pressure(&sid);
     assert_eq!(pct, 60);
 }
-
-// ─── Integration: gap → resync flow ─────────────────────────────────────────
 
 #[test]
 fn test_full_resync_flow_after_overflow() {

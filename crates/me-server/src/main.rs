@@ -21,11 +21,11 @@ use prometheus::Registry;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-/// High-performance matching engine server.
+/// Spot order matching server.
 ///
-/// Высокопроизводительный сервер матчинг-движка.
+/// Spot order matching server.
 #[derive(Parser, Debug)]
-#[command(name = "me-server", about = "High-performance matching engine server")]
+#[command(name = "me-server", about = "Spot order matching server")]
 struct Cli {
     /// Path to TOML configuration file.
     /// If not provided, uses built-in defaults (BTC/USDT, ETH/USDT, SOL/USDT).
@@ -59,8 +59,6 @@ struct AppState {
     sessions: Arc<SessionStore>,
 }
 
-// ─── Admin authentication middleware ─────────────────────────────────────────
-
 async fn admin_auth(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -93,8 +91,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     }
     diff == 0
 }
-
-// ─── Handlers ────────────────────────────────────────────────────────────────
 
 async fn metrics_handler(State(state): State<AppState>) -> String {
     let mut text = state.metrics.encode();
@@ -211,8 +207,6 @@ async fn status_handler(State(state): State<AppState>) -> impl axum::response::I
     }
 }
 
-// ─── Main ────────────────────────────────────────────────────────────────────
-
 fn resolve_config(cli: &Cli) -> Config {
     let mut cfg = match &cli.config {
         Some(path) => match load_config(std::path::Path::new(path)) {
@@ -289,7 +283,7 @@ async fn main() {
     let registry = Registry::new();
     let metrics = Arc::new(EngineMetrics::new(&registry));
 
-    // Create async audit logger (zero-alloc hot path, serializes on separate thread)
+    // Serialize audit telemetry on a separate thread.
     let audit = Arc::new(AsyncAuditLogger::new(65536, AuditFormat::Json));
 
     // Build router with optional WAL
@@ -654,8 +648,6 @@ async fn main() {
         std::process::exit(1);
     }
 }
-
-// ─── TLS helpers (compiled only with `tls` feature) ──────────────────────────
 
 #[cfg(feature = "tls")]
 fn load_tls_config(

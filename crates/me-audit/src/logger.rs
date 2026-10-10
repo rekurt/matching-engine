@@ -186,8 +186,6 @@ impl Default for AuditLogger {
     }
 }
 
-// ─── Helper: convert MatchEvent slice to AuditEntry slice (for async logger) ─
-
 /// Convert a `MatchEvent` into a fixed-size `AuditEntry` for the async SPSC path.
 /// Zero-alloc, no heap.
 pub fn match_event_to_entry(event: &MatchEvent, symbol: SymbolId) -> Option<AuditEntry> {

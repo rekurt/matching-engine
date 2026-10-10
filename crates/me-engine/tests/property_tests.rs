@@ -14,14 +14,10 @@ use me_core::types::{FixedPrice, FixedQty, OrderId, Side, SymbolId};
 use me_engine::command::Command;
 use me_engine::engine::Engine;
 
-// ─── Constants ──────────────────────────────────────────────────────────────
-
 const SYMBOL: SymbolId = SymbolId(0);
 const BASE_PRICE: i64 = 10_000_000_000; // 100.00
 const TICK: i64 = 1_000_000; // 0.01
 const ONE_UNIT: u64 = 100_000_000; // 1.0
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn config() -> SymbolConfig {
     SymbolConfig::default_btc_usdt()
@@ -30,8 +26,6 @@ fn config() -> SymbolConfig {
 fn engine() -> Engine {
     Engine::new(config())
 }
-
-// ─── Strategies ─────────────────────────────────────────────────────────────
 
 /// Generate a valid price (multiple of tick, within reasonable range).
 fn valid_price() -> impl Strategy<Value = FixedPrice> {
@@ -99,8 +93,6 @@ fn command_sequence(max_len: usize) -> impl Strategy<Value = Vec<Command>> {
         strategies
     })
 }
-
-// ─── Invariant checks ───────────────────────────────────────────────────────
 
 /// INVARIANT 1: The order book is never crossed.
 /// After any operation, best_bid < best_ask (or one side is empty).
@@ -198,8 +190,6 @@ fn assert_all_invariants(engine: &Engine) {
     assert_no_market_on_book(engine);
     assert_price_ordering(engine);
 }
-
-// ─── Property tests ────────────────────────────────────────────────────────
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(500))]

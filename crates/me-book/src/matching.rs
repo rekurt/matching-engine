@@ -36,8 +36,6 @@ fn emit_internal_error(events: &mut EventBuffer, order_id: OrderId, timestamp: u
     });
 }
 
-// ─── Validation ──────────────────────────────────────────────────────────────
-
 /// Validate an incoming order against symbol config.
 /// Returns a RejectReason if invalid.
 pub fn validate_order(order: &Order, config: &SymbolConfig) -> Option<RejectReason> {
@@ -144,8 +142,6 @@ pub fn validate_order(order: &Order, config: &SymbolConfig) -> Option<RejectReas
     None
 }
 
-// ─── Core matching entry point ───────────────────────────────────────────────
-
 /// Process an incoming order against the book.
 /// This is the main entry point for all order types.
 pub fn process_order(book: &mut OrderBook, mut order: Order, events: &mut EventBuffer) {
@@ -234,8 +230,6 @@ pub fn process_order(book: &mut OrderBook, mut order: Order, events: &mut EventB
         }
     }
 }
-
-// ─── Limit order matching ────────────────────────────────────────────────────
 
 /// Match a replenished iceberg slice against the book and rest the remainder,
 /// WITHOUT emitting `OrderAccepted` or re-validating (the parent order was
@@ -363,8 +357,6 @@ fn match_sell_limit(book: &mut OrderBook, taker: &mut Order, events: &mut EventB
     book.refresh_best(Side::Buy);
 }
 
-// ─── Market order matching ───────────────────────────────────────────────────
-
 fn match_market(book: &mut OrderBook, order: &mut Order, events: &mut EventBuffer) {
     // FOK: check entire opposite side
     if order.tif == TimeInForce::FOK {
@@ -385,7 +377,7 @@ fn match_market(book: &mut OrderBook, order: &mut Order, events: &mut EventBuffe
         Side::Sell => match_market_sell(book, order, events),
     }
 
-    // Market orders NEVER rest on book. Cancel any remainder.
+    // Market orders cannot rest on the book. Cancel any remainder.
     if !order.remaining_qty.is_zero() {
         order.status = OrderStatus::Cancelled;
         events.push(MatchEvent::OrderCancelled {
@@ -419,8 +411,6 @@ fn match_market_sell(book: &mut OrderBook, taker: &mut Order, events: &mut Event
 
     book.refresh_best(Side::Buy);
 }
-
-// ─── Level-by-level matching helpers ─────────────────────────────────────────
 
 fn match_taker_against_ask_level(
     book: &mut OrderBook,
@@ -777,8 +767,6 @@ fn match_taker_against_bid_level(
     }
 }
 
-// ─── Cancel ──────────────────────────────────────────────────────────────────
-
 /// Cancel a resting order by ID.
 pub fn cancel_order(
     book: &mut OrderBook,
@@ -805,8 +793,6 @@ pub fn cancel_order(
         }
     }
 }
-
-// ─── Amend ───────────────────────────────────────────────────────────────────
 
 /// Amend a resting order.
 /// - If only qty decreases (no price change): modify in-place, retain time priority.
