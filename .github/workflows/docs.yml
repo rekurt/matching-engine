@@ -1,18 +1,24 @@
-name: Deploy mdBook Documentation
+name: Deploy project site and handbook
 
 on:
   push:
     branches: [master, main]
     paths:
+      - 'README.md'
+      - 'scripts/*assemble_site.py'
       - 'docs/**'
       - 'book.toml'
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
+      - 'README.md'
+      - 'scripts/*assemble_site.py'
       - 'docs/**'
       - 'book.toml'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
+  schedule:
+    - cron: "23 */6 * * *"
 
 permissions:
   contents: read
@@ -33,6 +39,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Checkout project site kit
+        uses: actions/checkout@v4
+        with:
+          repository: rekurt/rekurt.github.io
+          ref: 113341cda801398021e6a155681a9e7fe3ccf715
+          path: .family
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: .family/go.mod
+          cache-dependency-path: .family/go.sum
+
       - name: Install mdBook
         shell: bash
         run: |
@@ -42,16 +60,30 @@ jobs:
       - name: Build documentation
         run: mdbook build
 
-      - name: Verify and generate search metadata
+      - name: Verify and generate handbook search metadata
         run: |
           python3 -m unittest discover -s docs -p test_seo.py
           python3 docs/seo.py docs/book
 
+      - name: Build project site
+        working-directory: .family
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          go run ./cmd/catalog-sync sync --manifest catalog/projects.yaml --snapshot site/src/data/generated/catalog.json --audit docs/repository-audit.md
+          go run ./cmd/project-site build --slug matching-engine --snapshot site/src/data/generated/catalog.json --repo .. --out ../target/site --base-url https://rekurt.github.io/matching-engine/
+          go run ./cmd/project-site validate --slug matching-engine --snapshot site/src/data/generated/catalog.json --repo .. --out ../target/site --base-url https://rekurt.github.io/matching-engine/
+
+      - name: Include handbook and legacy redirects
+        run: |
+          python3 -m unittest discover -s scripts -p test_assemble_site.py
+          python3 scripts/assemble_site.py --site target/site
+
       - name: Upload documentation
         uses: actions/upload-artifact@v4
         with:
-          name: documentation
-          path: docs/book
+          name: project-site
+          path: target/site
           if-no-files-found: error
 
       - name: Check existing Pages configuration
@@ -90,7 +122,7 @@ jobs:
         if: steps.pages.outputs.enabled == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/book
+          path: target/site
 
   deploy:
     if: needs.build.outputs.pages_enabled == 'true'

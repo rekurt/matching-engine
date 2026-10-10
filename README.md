@@ -1,7 +1,7 @@
 # matching-engine
 
 [![CI](https://github.com/rekurt/matching-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/rekurt/matching-engine/actions/workflows/ci.yml)
-[![Docs](https://github.com/rekurt/matching-engine/actions/workflows/docs.yml/badge.svg)](https://rekurt.github.io/matching-engine/)
+[![Site](https://github.com/rekurt/matching-engine/actions/workflows/docs.yml/badge.svg)](https://rekurt.github.io/matching-engine/)
 
 A Rust service for matching spot orders with price-time priority. Each symbol is processed by one shard worker; clients connect through a binary protocol over TCP or Unix domain sockets.
 
@@ -43,7 +43,9 @@ No latency SLA is implied. Measure the complete durable path on your own storage
 
 ## Documentation
 
-The [online handbook](https://rekurt.github.io/matching-engine/) is built from [`docs/src`](docs/src/SUMMARY.md):
+[Project website](https://rekurt.github.io/matching-engine/) · [All projects by rekurt](https://rekurt.github.io/projects/)
+
+The [online handbook](https://rekurt.github.io/matching-engine/docs/) is built from [`docs/src`](docs/src/SUMMARY.md):
 
 - [Quick start](docs/src/quickstart.md) and [configuration](docs/src/configuration.md)
 - [Wire protocol v2](docs/src/protocol.md) and [client integration](docs/src/integration.md)

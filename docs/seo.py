@@ -6,7 +6,8 @@ import re
 import sys
 from xml.etree import ElementTree as ET
 
-BASE = 'https://rekurt.github.io/matching-engine/'
+PROJECT = 'https://rekurt.github.io/matching-engine/'
+BASE = PROJECT + 'docs/'
 SUMMARY = 'Rust spot matching service with price-time priority, protocol v2, durable recovery, TLS and Go clients. Integration, configuration and deployment documentation.'
 DESCRIPTIONS = {
     'quickstart.html': 'Build and run the Rust matching service, configure trading pairs, connect clients and submit your first orders with the matching-engine quick start.',
@@ -29,7 +30,7 @@ def decorate(source, relative):
     canonical = BASE if homepage else BASE + relative
     title_match = re.search(r'<title>(.*?)</title>', source, re.S)
     old_title = title_match.group(1) if title_match else 'Contents - matching-engine'
-    title = 'matching-engine — Rust spot matching service' if homepage else html.unescape(old_title)
+    title = 'matching-engine — integration and operations handbook' if homepage else html.unescape(old_title)
     description = SUMMARY if homepage else DESCRIPTIONS.get(relative, 'Documentation for matching-engine, the Rust spot matching service: ' + title)
     source = re.sub(r'<title>.*?</title>', '<title>' + html.escape(title) + '</title>', source, count=1, flags=re.S)
     # Only replace head metadata; mdBook content and navigation remain untouched.
@@ -40,7 +41,7 @@ def decorate(source, relative):
     head = re.sub(r'\s*<script[^>]*data-seo=["\']matching-engine["\'][^>]*>.*?</script>', '', head, flags=re.S)
     tags = [('name', 'description', description), ('name', 'robots', 'noindex, follow' if excluded else 'index, follow, max-image-preview:large'), ('property', 'og:type', 'website'), ('property', 'og:locale', 'en_US'), ('property', 'og:site_name', 'matching-engine'), ('property', 'og:title', title), ('property', 'og:description', description), ('property', 'og:url', canonical), ('property', 'og:image', BASE + 'assets/social.png'), ('property', 'og:image:width', '1200'), ('property', 'og:image:height', '630'), ('property', 'og:image:alt', 'matching-engine — Rust spot matching service'), ('name', 'twitter:card', 'summary_large_image'), ('name', 'twitter:title', title), ('name', 'twitter:description', description), ('name', 'twitter:image', BASE + 'assets/social.png')]
     metadata = '\n'.join(f'<meta {attr}="{key}" content="{html.escape(value, quote=True)}">' for attr, key, value in tags)
-    schema = {'@context': 'https://schema.org', '@type': 'WebPage', '@id': canonical + '#webpage', 'url': canonical, 'name': title, 'description': description, 'inLanguage': 'en', 'about': {'@type': 'SoftwareSourceCode', '@id': BASE + '#software', 'name': 'matching-engine', 'codeRepository': 'https://github.com/rekurt/matching-engine', 'programmingLanguage': 'Rust', 'author': {'@type': 'Person', '@id': 'https://rekurt.github.io/#person', 'name': 'rekurt'}}}
+    schema = {'@context': 'https://schema.org', '@type': 'WebPage', '@id': canonical + '#webpage', 'url': canonical, 'name': title, 'description': description, 'inLanguage': 'en', 'about': {'@type': 'SoftwareSourceCode', '@id': PROJECT + '#software', 'name': 'matching-engine', 'codeRepository': 'https://github.com/rekurt/matching-engine', 'programmingLanguage': 'Rust', 'author': {'@type': 'Person', '@id': 'https://rekurt.github.io/#person', 'name': 'rekurt'}}}
     payload = json.dumps(schema, ensure_ascii=False).replace('<', '\\u003c')
     metadata += f'\n<link rel="canonical" href="{canonical}">\n<script type="application/ld+json" data-seo="matching-engine">{payload}</script>\n'
     return head.rstrip() + '\n' + metadata + body, None if excluded or relative == 'introduction.html' else canonical
