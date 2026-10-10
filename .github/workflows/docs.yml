@@ -43,7 +43,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: rekurt/rekurt.github.io
-          ref: 113341cda801398021e6a155681a9e7fe3ccf715
+          ref: main
           path: .family
 
       - uses: actions/setup-go@v5
