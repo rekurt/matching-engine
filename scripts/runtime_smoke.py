@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 import urllib.request
 import urllib.error
 
@@ -35,7 +36,13 @@ class Client:
         self.last = last
         self.events = []
         self.send(5 if sid is None else 6, 0, b'' if sid is None else sid + struct.pack('<Q', last))
-        frames = self.drain()
+        def handshake_complete(frames):
+            first = frames[0]
+            if sid is None or first[0] != 0x1b:
+                return True
+            return len(frames) >= 1 + struct.unpack('<I', first[3])[0]
+
+        frames = self.drain(handshake_complete)
         if sid is None:
             assert frames and frames[0][0] == 0x1a, frames
             payload = frames[0][3]
@@ -60,7 +67,13 @@ class Client:
 
     def place(self, oid, side, rid, qty=1):
         self.send(1, rid, struct.pack('<QHBBBqqQ', oid, 0, side, 0, 0, 100 * 10**8, 0, qty * 10**8))
-        return self.drain()
+        return self.barrier()
+
+    def barrier(self):
+        self.send(4, 0)
+        marker = struct.pack('<Q', self.seq)
+        frames = self.drain(lambda frames: frames[-1][0] == 0x18 and frames[-1][3] == marker)
+        return frames[:-1]
 
     def drain(self, complete=None, advance=True):
         deadline = time.monotonic() + 5 if complete else None
@@ -115,6 +128,88 @@ class Client:
 
 
 class SnapshotClientTests(unittest.TestCase):
+    def test_resume_waits_for_delayed_replay_and_rejects_early_eof(self):
+        for truncated in (False, True):
+            with self.subTest(truncated=truncated):
+                local, remote = socket.socketpair()
+                self.addCleanup(local.close)
+                self.addCleanup(remote.close)
+                sid = bytes(range(16))
+                expected = [(0x1b, 0, 0, struct.pack('<I', 2)),
+                            (0x12, 8, 0, b'trade'),
+                            (0x18, 9, 0, struct.pack('<Q', 3))]
+                errors = []
+
+                def deliver():
+                    try:
+                        remote.settimeout(2)
+                        request = b''
+                        while len(request) < 46:
+                            chunk = remote.recv(46 - len(request))
+                            if not chunk:
+                                raise ConnectionError('missing ResumeSession')
+                            request += chunk
+                        self.assertEqual(request[5], 6)
+                        self.assertEqual(request[22:], sid + struct.pack('<Q', 7))
+                        for tag, seq, rid, payload in expected[:2] if truncated else expected:
+                            frame = struct.pack('<IBBQQ', len(payload), 2, tag, seq, rid) + payload
+                            remote.sendall(frame[:10])
+                            time.sleep(.2)
+                            remote.sendall(frame[10:])
+                        if truncated:
+                            remote.shutdown(socket.SHUT_WR)
+                    except Exception as error:
+                        errors.append(error)
+
+                sender = threading.Thread(target=deliver)
+                sender.start()
+                with mock.patch.object(socket, 'create_connection', return_value=local):
+                    if truncated:
+                        with self.assertRaises(ConnectionError):
+                            Client(0, sid, 7)
+                    else:
+                        client = Client(0, sid, 7)
+                        self.assertEqual(client.replayed, expected)
+                        self.assertEqual(client.last, 9)
+                sender.join(2)
+                self.assertFalse(sender.is_alive())
+                self.assertEqual(errors, [])
+
+    def test_placement_waits_for_delayed_fragments_and_pong_barrier(self):
+        local, remote = socket.socketpair()
+        self.addCleanup(local.close)
+        self.addCleanup(remote.close)
+        client = Client.__new__(Client)
+        client.sock, client.seq, client.last, client.buf, client.events = local, 0, 0, b'', []
+        expected = [(0x10, 1, 101, b'accepted'), (0x13, 2, 101, b'filled')]
+        errors = []
+
+        def deliver():
+            try:
+                remote.settimeout(2)
+                request = b''
+                while len(request) < 81:  # Place header + payload, then Ping header.
+                    chunk = remote.recv(81 - len(request))
+                    if not chunk:
+                        raise ConnectionError('connection closed before Place and Ping')
+                    request += chunk
+                self.assertEqual(struct.unpack_from('<IBBQQ', request, 59)[2], 4)
+                for tag, seq, rid, payload in expected + [(0x18, 3, 0, struct.pack('<Q', 2))]:
+                    frame = struct.pack('<IBBQQ', len(payload), 2, tag, seq, rid) + payload
+                    remote.sendall(frame[:10])
+                    time.sleep(.2)
+                    remote.sendall(frame[10:])
+            except Exception as error:
+                errors.append(error)
+
+        sender = threading.Thread(target=deliver)
+        sender.start()
+        self.addCleanup(sender.join, 2)
+        self.assertEqual(client.place(1, 1, 101), expected)
+        self.assertEqual(client.last, 3)
+        sender.join(2)
+        self.assertEqual(errors, [])
+
     def test_positive_control_sequences_advance_replay_cursor(self):
         for tag, seq, payload in [(0x1a, 11, b'\x02'), (0x18, 12, struct.pack('<Q', 101)),
                                   (0x20, 13, struct.pack('<QQ', 1, 2)),
@@ -276,7 +371,7 @@ quote="USDT"
         maker, taker = self.client(), self.client()
         self.assertIn(0x10, [f[0] for f in maker.place(1, 1, 100)])
         self.assertIn(0x12, [f[0] for f in taker.place(2, 0, 200)])
-        events = maker.drain()
+        events = maker.barrier()
         self.assertIn(0x12, [f[0] for f in events])
         self.assertIn(0x13, [f[0] for f in events])
         self.assertIn(0x10, [f[0] for f in maker.place(3, 1, 101)])
@@ -287,7 +382,7 @@ quote="USDT"
         resumed = self.client(sid, last)
         self.assertEqual(resumed.open_orders(103), [3])
         resumed.send(2, 104, struct.pack('<QH', 3, 0))
-        self.assertIn(0x15, [f[0] for f in resumed.drain()])
+        self.assertIn(0x15, [f[0] for f in resumed.barrier()])
 
     def test_ping_replay_cursor_survives_crash(self):
         self.start()
@@ -296,7 +391,7 @@ quote="USDT"
         self.assertGreater(handshake_seq, 0)
         client.seq = 100
         client.send(4, 0)
-        pong = [f for f in client.drain() if f[0] == 0x18]
+        pong = [f for f in client.drain(lambda frames: frames[-1][0] == 0x18) if f[0] == 0x18]
         self.assertEqual(len(pong), 1)
         self.assertEqual(struct.unpack('<Q', pong[0][3])[0], client.seq)
         self.assertGreater(pong[0][1], handshake_seq)

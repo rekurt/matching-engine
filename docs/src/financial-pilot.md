@@ -120,6 +120,36 @@ Never regenerate identities over an existing ledger. The example trader has acce
 to all pilot accounts; replace this with explicit account UUIDs before a shared pilot.
 The read-only monitoring identity cannot trade, fund or administer accounts.
 
+Create a pilot account with the administrator identity:
+
+```sh
+curl --fail --cacert .pilot/ca.pem --cert .pilot/admin.pem --key .pilot/admin.key \
+  -H 'Content-Type: application/json' -d '{"key":"pilot-account-001","name":"Pilot account"}' \
+  https://localhost:9443/v1/admin/accounts
+```
+
+Save the returned UUID as `ACCOUNT_ID`. Provisioning keys are scoped by the
+administrator certificate's SHA-256 fingerprint. Retain the UUID mapping across
+certificate rotation; repeating provisioning under a new certificate creates a
+different namespace.
+
+The generated local administrator also has an explicit funding permission. Use
+that permission to record initial test funds with a unique external reference:
+
+```sh
+curl --fail --cacert .pilot/ca.pem --cert .pilot/admin.pem --key .pilot/admin.key \
+  -H 'Content-Type: application/json' \
+  -d '{"asset":"USDT","amount":"1000","external_reference":"pilot-funding-001"}' \
+  "https://localhost:9443/v1/accounts/$ACCOUNT_ID/funding"
+curl --fail --cacert .pilot/ca.pem --cert .pilot/admin.pem --key .pilot/admin.key \
+  "https://localhost:9443/v1/accounts/$ACCOUNT_ID/balances"
+```
+
+Retry an uncertain funding request with the same external reference and payload.
+Using a new reference records another accounting input. Withdrawals use the same
+privilege and precision checks through `/withdrawals`; neither operation transfers
+assets outside the ledger. Grant funding separately from trading in a shared pilot.
+
 Readiness requires the PostgreSQL lease, valid engine identity and capabilities,
 completed recovery, no reconciliation latch, no maintenance barrier, settlement
 catch-up and sufficient journal disk reserve. A missing database pauses admission;
@@ -189,9 +219,6 @@ order versions and book state. They are verified against full journal replay; th
 RC implementation does not truncate the journal or accelerate replay from snapshots.
 
 
-Account provisioning keys are scoped by the administrator certificate's SHA-256
-fingerprint. Rotating that certificate changes the namespace: retain the existing
-account UUID mapping and do not repeat provisioning as a discovery operation.
 Fees may be changed only while the ledger is in maintenance, using a new schedule
 UUID in the gateway configuration. Existing orders retain their original schedule.
 A schedule UUID can never be reused with different rates.
