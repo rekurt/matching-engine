@@ -1,5 +1,7 @@
 # HTTP API
 
+This page covers the legacy server's operational listener. Funded order submission, balances, settlement events and financial administration use the separate [gateway API](financial-pilot.md#internal-http-api), which requires mTLS and explicit permissions.
+
 The HTTP listener uses `server.metrics_addr`, default `127.0.0.1:9091`. It provides no native TLS. Protect it with a private network or authenticated proxy.
 
 | Method | Path | Authentication | Result |

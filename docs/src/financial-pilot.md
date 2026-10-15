@@ -201,7 +201,7 @@ Before a new command matches, all due expiries are committed in bounded decision
 This prevents a simultaneous GTD sweep across many instruments from exceeding a
 journal record. A restart between expiry batches continues from the recorded cursor.
 
-The backup utility also compares the complete engine snapshot with ledger orders:
+The backup utility verifies the snapshot's internal checksum and compares the complete engine snapshot with ledger orders:
 account ownership, order/fee/reservation versions, hidden remaining quantities and
 exact reserve requirements. This check supplements the balanced-postings audit.
 A discrepancy stops backup and leaves admission paused.

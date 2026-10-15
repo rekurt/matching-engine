@@ -1,6 +1,8 @@
 import copy
 import importlib.util
+import json
 from pathlib import Path
+import tempfile
 import unittest
 
 spec = importlib.util.spec_from_file_location(
@@ -11,6 +13,20 @@ spec.loader.exec_module(backup)
 
 
 class SnapshotAccountingTests(unittest.TestCase):
+    def test_snapshot_checksum_rejects_changed_book_sequence(self):
+        envelope = {
+            "payload": {"watermark": {"sequence": 7}, "books": [{"sequence": 7}]},
+            "digest": "d09a89000f9d93f3cf592428ca8a332ba1b439036d0f78d707fa64274286eceb",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "snapshot.json"
+            path.write_text(json.dumps(envelope, indent=2))
+            self.assertEqual(backup.read_snapshot(path), envelope["payload"])
+            envelope["payload"]["books"][0]["sequence"] = 8
+            path.write_text(json.dumps(envelope))
+            with self.assertRaisesRegex(RuntimeError, "checksum mismatch"):
+                backup.read_snapshot(path)
+
     def fixture(self):
         account = "00112233-4455-6677-8899-aabbccddeeff"
         order_spec = dict(

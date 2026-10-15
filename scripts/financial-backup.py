@@ -101,6 +101,23 @@ def verify_orders(snapshot, rows):
         raise RuntimeError("engine snapshot has unknown open orders")
 
 
+def read_snapshot(path):
+    envelope = json.loads(path.read_text())
+    payload = envelope.get("payload")
+    if not isinstance(payload, dict):
+        raise RuntimeError("missing financial snapshot payload")
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode()
+    if hashlib.sha256(encoded).hexdigest() != envelope.get("digest"):
+        raise RuntimeError("financial snapshot checksum mismatch")
+    return payload
+
+
 def backup(root, output):
     if root == output or root in output.parents or output in root.parents:
         raise SystemExit("backup must be outside the live configuration directory")
@@ -119,9 +136,7 @@ def backup(root, output):
         "-f",
         str(compose),
     ]
-    snapshot = json.loads((root / "engine/active/financial.snapshot.json").read_text())[
-        "payload"
-    ]
+    snapshot = read_snapshot(root / "engine/active/financial.snapshot.json")
     if (
         snapshot["watermark"] != before["watermark"]
         or snapshot["engine_id"] != before["identity"]["engine_id"]

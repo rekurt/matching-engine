@@ -1,6 +1,6 @@
 # Deployment and recovery
 
-This guide describes single-node deployment, storage compatibility and client recovery. Engine benchmarks exclude durable network service costs.
+This guide describes the legacy session server's single-node deployment, storage compatibility and client recovery. For PostgreSQL accounting, the internal mTLS gateway and coordinated financial backup/restore, use the [financial pilot guide](financial-pilot.md). Engine benchmarks exclude durable network service costs.
 
 ## Build and exposure
 
@@ -77,7 +77,7 @@ These bounds prevent a tiny display quantity or a large stop/expiry wave from ex
 
 The default log filter is `info`, including audit events and storage/network warnings. `RUST_LOG` overrides it; excluding the `audit` target deliberately suppresses audit telemetry. Asynchronous audit telemetry can drop records under pressure; monitor `me_audit_dropped_total` and `me_audit_disconnected_total`. It is not the authoritative durable execution journal. The binary audit representation uses explicit serialization and does not expose struct padding.
 
-This repository supplies a single-node matching service. It does not implement account balances, reserved funds, settlement, replication, consensus, automatic failover, or disaster-recovery orchestration. Those must be provided and tested by the surrounding trading platform. Passing local tests is not evidence of those external guarantees.
+The legacy session service requires an external account ledger and settlement layer. The separate financial pilot supplies PostgreSQL balances, reservations and settlement with manual maintenance and backup/restore procedures. Neither mode provides replication, consensus, automatic failover or automated disaster-recovery orchestration. Passing local tests does not establish those guarantees.
 
 ## Verification
 
