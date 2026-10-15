@@ -13,7 +13,7 @@
 
 Legacy v2 payloads and legacy storage codecs remain unchanged. Financial messages are additive capabilities; a financial gateway refuses a server without them. Financial storage/schema version 1 requires a new ledger and empty financial book. No migration from legacy session ownership or existing balances is provided. Market, stop-market and trailing-stop-market requests require an execution protection price in financial mode.
 
-One active matcher and gateway are supported. Financial snapshots are verified against complete journal replay; journals are retained without online compaction. Manual funding and withdrawal record accounting only. Real funds, external transfers, public APIs, automatic failover and registry/binary publication are outside the pilot. Release remains gated by the recorded validation report.
+One active matcher and gateway are supported. Financial snapshots are verified against complete journal replay; journals are retained without online compaction. Manual funding and withdrawal record accounting only. Real funds, external transfers, public APIs, automatic failover and registry/binary publication are outside the pilot. See the [validation and measurement report](docs/src/financial-validation.md) for tested scope and limitations.
 
 ## 0.1.0 — 2026-10-10
 

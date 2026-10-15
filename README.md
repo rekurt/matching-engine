@@ -51,6 +51,7 @@ The [online handbook](https://rekurt.github.io/matching-engine/docs/) is built f
 - [Quick start](docs/src/quickstart.md) and [configuration](docs/src/configuration.md)
 - [Wire protocol v2](docs/src/protocol.md) and [client integration](docs/src/integration.md)
 - [Financial pilot and operations](docs/src/financial-pilot.md)
+- [Financial pilot validation](docs/src/financial-validation.md): workload, recovery checks and measured results.
 - [Architecture](docs/src/architecture.md), [HTTP API](docs/src/api.md) and [deployment/recovery](docs/src/deployment.md)
 - [Benchmarks](docs/src/benchmarks.md), [contributing](CONTRIBUTING.md) and [changelog](CHANGELOG.md)
 

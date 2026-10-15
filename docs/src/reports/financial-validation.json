@@ -1,0 +1,80 @@
+{
+  "release": "v0.2.0-rc.1",
+  "recorded_at": "2026-10-15T01:20:47.473821+00:00",
+  "service_source_commit": "fdc47efe35374cc7b25fc1807c94e1a780b534a4",
+  "operations_source_commit": "c0cf702e8aa74ab825db834dbe271f38a3e06cea",
+  "environment": {
+    "hw.model": "Mac17,8",
+    "hw.memsize": "25769803776",
+    "hw.physicalcpu": "18",
+    "hw.logicalcpu": "18",
+    "machdep.cpu.brand_string": "Apple M5 Pro",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+    "source_tree": "a88568188044f59b8a4b023f49d8d070a9a9d655",
+    "source_commit": "fdc47efe35374cc7b25fc1807c94e1a780b534a4",
+    "postgres_runtime": {
+      "postgres": "17-alpine",
+      "docker_server": "29.7.2",
+      "docker_architecture": "aarch64",
+      "docker_vcpus": 8,
+      "docker_memory_bytes": 14636363776,
+      "placement": "Docker Desktop private named volume; native matcher and gateway",
+      "server_version": "17.11",
+      "image_digest": "postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24"
+    },
+    "build_command": "cargo build --release --workspace --all-features --locked"
+  },
+  "soak": {
+    "status": "passed",
+    "duration_seconds": 3600.092011917004,
+    "requested_seconds": 3600,
+    "confirmed_trades": 13354,
+    "confirmed_commands": 26708,
+    "commands_per_second": 7.418699275349444,
+    "latency_ms": {
+      "p50": 251.107874995796,
+      "p95": 364.45175000699237,
+      "p99": 375.41966600110754
+    },
+    "recovery_seconds": 0.44385495901224203,
+    "errors": [],
+    "journal_growth_bytes": 42576445,
+    "database_growth_bytes": 195624960,
+    "binaries": {
+      "me-server": "c132991616c5201661bd356d02923baaeaa7d854acb7877b9922efd039fceaf8",
+      "me-gateway": "9017a9bec525eae170fd3b591d4625753bf1fcbe174308d2feb37e13a3dbce79"
+    },
+    "workload": {
+      "drivers": 1,
+      "symbol": "BTC/USDT",
+      "quantity": "0.00001",
+      "price": "100",
+      "maker_bps": 10,
+      "taker_bps": 20,
+      "description": "Sequential HTTP placement pair, settlement polling with fresh TLS per HTTP request and balance verification; latency covers a complete placement pair, not engine-only matching"
+    },
+    "machine": {
+      "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+      "architecture": "arm64",
+      "logical_cpus": 18,
+      "free_disk_bytes": 344945090560
+    }
+  },
+  "final_snapshot_bytes": 14413961,
+  "final_engine_directory_bytes": 56990754,
+  "measurement_scope": "One sequential driver, at most one resting order, native services and Docker PostgreSQL on a shared workstation. Latency is a complete placement pair; this is not saturation capacity or an SLA. PostgreSQL growth excludes its WAL and volume overhead.",
+  "validation": {
+    "rust_workspace_passed": 674,
+    "postgres_tests_passed": 11,
+    "runtime_tests": 30,
+    "runtime_intentional_skips": 2,
+    "financial_model_cases": 130,
+    "financial_model_trades": 185,
+    "fuzz_pending_executions": 6208681,
+    "fuzz_handshaked_executions": 6489763,
+    "revmux_rounds": 7,
+    "revmux_lenses_each": 4,
+    "degraded_review_participants": 0,
+    "ci_source_run": "https://github.com/rekurt/matching-engine/actions/runs/38662813463"
+  }
+}

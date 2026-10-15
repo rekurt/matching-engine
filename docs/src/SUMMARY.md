@@ -22,3 +22,4 @@
 - [HTTP API](api.md)
 - [Deployment and recovery](deployment.md)
 - [Benchmarks](benchmarks.md)
+- [Financial pilot validation](financial-validation.md)

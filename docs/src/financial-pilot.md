@@ -1,6 +1,6 @@
 # Financial pilot
 
-The `codex/financial-pilot` branch adds a funded mode alongside the legacy session API. Release validation is still in progress. Start with a new PostgreSQL ledger and an empty financial data directory. This mode does not connect to banks, blockchains or real assets, and does not provide automatic failover.
+The `v0.2.0-rc.1` candidate adds a funded mode alongside the legacy session API. See the [validation report](financial-validation.md) for checks, measured workload and limits. Start with a new PostgreSQL ledger and an empty financial data directory. This mode does not connect to banks, blockchains or real assets, and does not provide automatic failover.
 
 ## Authority and limits
 
