@@ -13,11 +13,14 @@ members = [
     "crates/me-risk",
     "crates/me-audit",
     "crates/me-clock",
+    "crates/me-ledger",
+    "crates/me-financial",
+    "crates/me-gateway",
 ]
 exclude = ["examples/rust", "crates/me-io/fuzz"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0-rc.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/rekurt/matching-engine"

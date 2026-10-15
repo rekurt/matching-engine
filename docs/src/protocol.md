@@ -139,3 +139,7 @@ OrderRejected reasons (`u8`):
 Protocol Error codes (`u16`): 1 UnsupportedVersion, 2 SequenceOutOfOrder, 3 HandshakeRequired, 4 InvalidPayload, 5 ServerShuttingDown, 6 Backpressure, 7 HeartbeatTimeout, 8 TlsError, 9 InvalidRequestId, 10 SessionExpired, 11 BufferExhausted, 12 InternalError. Some codes are reserved; their assignment remains part of the wire contract. Handle unknown codes without corrupting framing.
 
 An InternalError is not a successful execution acknowledgment. Reconnect/retry according to the retained mutation identity and recovery contract; do not generate a replacement order merely because delivery failed.
+
+## Funded extension
+
+Financial mode reserves message IDs `0x30`–`0x33` and `0x38`, with capability bits 8–11. Their contracts and storage compatibility are described in [Financial pilot](financial-pilot.md#financial-wire-and-storage). Legacy listeners reject these messages; financial listeners reject legacy order admission.

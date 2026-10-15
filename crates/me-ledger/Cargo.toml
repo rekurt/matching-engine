@@ -1,0 +1,25 @@
+[package]
+name = "me-ledger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Exact double-entry accounting and reservations for the matching gateway"
+
+[dependencies]
+num-bigint = "0.4"
+num-traits = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+me-financial = { path = "../me-financial" }
+thiserror = "2"
+tokio.workspace = true
+uuid = { version = "1", features = ["v4", "serde"] }
+# The pilot uses only PostgreSQL; exact pins keep the core and driver APIs in lockstep.
+sqlx = { package = "sqlx-core", version = "=0.8.6", default-features = false, features = ["_rt-tokio", "_tls-rustls-aws-lc-rs", "json", "uuid", "migrate"] }
+sqlx-postgres = { version = "=0.8.6", default-features = false, features = ["json", "uuid", "migrate"] }
+
+[dev-dependencies]
+proptest.workspace = true

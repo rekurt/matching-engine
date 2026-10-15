@@ -26,3 +26,17 @@ libc = "0.2"
 [dev-dependencies]
 me-persist = { workspace = true }
 proptest = { workspace = true }
+
+[features]
+financial = ["dep:me-financial", "dep:uuid", "dep:serde_json"]
+
+[dependencies.me-financial]
+path = "../me-financial"
+optional = true
+[dependencies.uuid]
+version = "1"
+features = ["serde", "v4"]
+optional = true
+[dependencies.serde_json]
+workspace = true
+optional = true

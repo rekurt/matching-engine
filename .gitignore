@@ -19,3 +19,6 @@ __pycache__/
 examples/typescript/node_modules/
 examples/typescript/dist/
 examples/rust/target/
+
+# Disposable financial pilot identities and runtime state
+.pilot/

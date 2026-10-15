@@ -1,4 +1,6 @@
 mod config;
+#[cfg(feature = "financial")]
+mod financial;
 
 use std::sync::Arc;
 
@@ -27,6 +29,10 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser, Debug)]
 #[command(name = "me-server", about = "Spot order matching server")]
 struct Cli {
+    /// Start the isolated funded engine with a JSON configuration and mandatory mTLS.
+    #[cfg(feature = "financial")]
+    #[arg(long, conflicts_with_all=["config","tcp_addr","uds_path","shards","metrics_addr"])]
+    financial_config: Option<String>,
     /// Path to TOML configuration file.
     /// If not provided, uses built-in defaults (BTC/USDT, ETH/USDT, SOL/USDT).
     #[arg(long, short)]
@@ -256,6 +262,14 @@ async fn main() {
         .init();
 
     let cli = Cli::parse();
+    #[cfg(feature = "financial")]
+    if let Some(path) = cli.financial_config {
+        if let Err(e) = financial::run(&path).await {
+            error!(error=%e,"Financial engine stopped");
+            std::process::exit(1);
+        }
+        return;
+    }
     let cfg = resolve_config(&cli);
     #[cfg(feature = "tls")]
     let tls_acceptor = match (&cfg.server.tls.cert_path, &cfg.server.tls.key_path) {
@@ -666,6 +680,10 @@ fn load_tls_config(
         .map_err(|e| format!("cert parse: {e}"))?;
     let key = PrivateKeyDer::from_pem_file(key_path).map_err(|e| format!("key parse: {e}"))?;
 
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("TLS protocols: {e}"))?;
     let builder = if let Some(ca_path) = client_ca_path {
         // mTLS: require client certificate
         let ca_certs = CertificateDer::pem_file_iter(ca_path)
@@ -676,12 +694,12 @@ fn load_tls_config(
         for cert in ca_certs {
             root_store.add(cert).map_err(|e| format!("CA add: {e}"))?;
         }
-        let verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
+        let verifier = WebPkiClientVerifier::builder_with_provider(Arc::new(root_store), provider)
             .build()
             .map_err(|e| format!("verifier: {e}"))?;
-        rustls::ServerConfig::builder().with_client_cert_verifier(verifier)
+        builder.with_client_cert_verifier(verifier)
     } else {
-        rustls::ServerConfig::builder().with_no_client_auth()
+        builder.with_no_client_auth()
     };
 
     builder

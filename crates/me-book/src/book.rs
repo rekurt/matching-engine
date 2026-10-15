@@ -29,6 +29,8 @@ pub struct OrderBook {
     asks: BTreeMap<FixedPrice, PriceLevel>,
     /// O(1) lookup: OrderId → location in the book.
     order_index: FxHashMap<OrderId, OrderLocation>,
+    // Financial recovery restores these bounds before replaying any command.
+    market_protections: FxHashMap<OrderId, FixedPrice>,
     /// Shared slab allocator for all order nodes in this book.
     pub order_slab: Slab<OrderNode>,
     /// Cached best bid/ask for O(1) access.
@@ -57,6 +59,7 @@ impl OrderBook {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             order_index: FxHashMap::default(),
+            market_protections: FxHashMap::default(),
             order_slab: Slab::with_capacity(4096),
             best_bid: None,
             best_ask: None,
@@ -65,6 +68,25 @@ impl OrderBook {
             invariant_violations_total: AtomicU64::new(0),
             invariant_halted: AtomicBool::new(false),
         }
+    }
+
+    /// Bind a market or deferred market order to its funded execution price.
+    pub fn set_market_protection(
+        &mut self,
+        id: OrderId,
+        price: FixedPrice,
+    ) -> Result<(), me_core::events::RejectReason> {
+        if !price.is_positive() {
+            return Err(me_core::events::RejectReason::InvalidPrice);
+        }
+        self.market_protections.insert(id, price);
+        Ok(())
+    }
+    pub fn market_protection(&self, id: OrderId) -> Option<FixedPrice> {
+        self.market_protections.get(&id).copied()
+    }
+    pub fn remove_market_protection(&mut self, id: OrderId) {
+        self.market_protections.remove(&id);
     }
 
     /// Current cumulative count of invariant violations observed on this
@@ -402,7 +424,11 @@ impl OrderBook {
 
     pub fn matching_work_exceeds(&self, order: &Order, budget: usize) -> bool {
         use me_core::order::OrderType;
-        let limit = (order.order_type == OrderType::Limit).then_some(order.price);
+        let limit = if order.order_type == OrderType::Limit {
+            Some(order.price)
+        } else {
+            self.market_protection(order.id)
+        };
         let mut remaining = order.remaining_qty.raw();
         let mut work = 0u128;
         let mut visit = |level: &PriceLevel, remaining: &mut u64| {

@@ -358,9 +358,8 @@ fn match_sell_limit(book: &mut OrderBook, taker: &mut Order, events: &mut EventB
 }
 
 fn match_market(book: &mut OrderBook, order: &mut Order, events: &mut EventBuffer) {
-    // FOK: check entire opposite side
     if order.tif == TimeInForce::FOK {
-        let available = book.executable_qty(order.side, None);
+        let available = book.executable_qty(order.side, book.market_protection(order.id));
         if available < order.remaining_qty {
             order.status = OrderStatus::Rejected;
             events.push(MatchEvent::OrderRejected {
@@ -390,6 +389,12 @@ fn match_market(book: &mut OrderBook, order: &mut Order, events: &mut EventBuffe
 
 fn match_market_buy(book: &mut OrderBook, taker: &mut Order, events: &mut EventBuffer) {
     while let Some(best_ask_price) = book.best_ask() {
+        if book
+            .market_protection(taker.id)
+            .is_some_and(|cap| best_ask_price > cap)
+        {
+            break;
+        }
         match_taker_against_ask_level(book, taker, best_ask_price, events);
 
         if taker.remaining_qty.is_zero() {
@@ -402,6 +407,12 @@ fn match_market_buy(book: &mut OrderBook, taker: &mut Order, events: &mut EventB
 
 fn match_market_sell(book: &mut OrderBook, taker: &mut Order, events: &mut EventBuffer) {
     while let Some(best_bid_price) = book.best_bid() {
+        if book
+            .market_protection(taker.id)
+            .is_some_and(|floor| best_bid_price < floor)
+        {
+            break;
+        }
         match_taker_against_bid_level(book, taker, best_bid_price, events);
 
         if taker.remaining_qty.is_zero() {

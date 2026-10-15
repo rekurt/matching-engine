@@ -1,0 +1,25 @@
+[package]
+name = "me-financial"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+edition.workspace = true
+description = "Versioned contracts for funded matching and durable settlement"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+thiserror = "2"
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[features]
+transport = ["dep:tokio", "dep:tokio-rustls"]
+[dependencies.tokio]
+workspace = true
+optional = true
+[dependencies.tokio-rustls]
+workspace = true
+optional = true

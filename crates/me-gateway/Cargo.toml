@@ -1,0 +1,24 @@
+[package]
+name = "me-gateway"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+edition.workspace = true
+description = "Internal mTLS gateway with PostgreSQL reservations and durable settlement"
+[dependencies]
+me-ledger = { path = "../me-ledger" }
+me-financial = { path = "../me-financial", features = ["transport"] }
+me-core = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { version = "1", features = ["serde", "v4"] }
+axum = { workspace = true }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

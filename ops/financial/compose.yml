@@ -1,0 +1,81 @@
+name: ${PILOT_PROJECT:-matching-pilot}
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: matching_pilot
+      POSTGRES_USER: matching
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?generate compose.env first}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U matching -d matching_pilot']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks: [pilot]
+  matcher:
+    image: matching-engine:financial-pilot
+    build: ../..
+    user: '${PILOT_UID:?}:${PILOT_GID:?}'
+    command: [--financial-config, /pilot/matcher.json]
+    stop_signal: SIGINT
+    stop_grace_period: 45s
+    volumes:
+      - ${PILOT_DIRECTORY:?}:/pilot:ro
+      - ${PILOT_DIRECTORY:?}/engine:/data
+    healthcheck:
+      disable: true
+    networks: [pilot]
+  gateway:
+    image: matching-engine:financial-pilot
+    user: '${PILOT_UID:?}:${PILOT_GID:?}'
+    entrypoint: [/usr/local/bin/me-gateway]
+    command: [--config, /pilot/gateway.json]
+    environment:
+      ME_LEDGER_DATABASE_URL: postgres://matching:${POSTGRES_PASSWORD:?}@postgres:5432/matching_pilot
+      RUST_LOG: info
+    stop_signal: SIGINT
+    stop_grace_period: 45s
+    depends_on:
+      postgres: {condition: service_healthy}
+      matcher: {condition: service_started}
+    restart: on-failure:5
+    volumes:
+      - ${PILOT_DIRECTORY:?}:/pilot:ro
+    ports: ['127.0.0.1:9443:9443']
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, --cacert, /pilot/ca.pem, --cert, /pilot/unauthorized.pem, --key, /pilot/unauthorized.key, https://localhost:9443/health/ready]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    networks: [pilot, operator]
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    user: '${PILOT_UID:?}:${PILOT_GID:?}'
+    command: [--config.file=/etc/prometheus/prometheus.yml, --storage.tsdb.path=/tmp/prometheus]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ${PILOT_DIRECTORY:?}:/pilot:ro
+    ports: ['127.0.0.1:9091:9090']
+    networks: [pilot, operator]
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    command: [--config.file=/etc/alertmanager/alertmanager.yml, --storage.path=/tmp/alertmanager]
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports: ['127.0.0.1:9093:9093']
+    networks: [pilot, operator]
+  alert-receiver:
+    image: python:3.13-alpine
+    command: [python, /receiver.py]
+    volumes:
+      - ./alert-receiver.py:/receiver.py:ro
+    networks: [pilot]
+networks:
+  pilot: {internal: true}
+  operator: {}
+volumes:
+  postgres:

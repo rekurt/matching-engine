@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [features]
 tls = ["me-io/tls", "dep:tokio-rustls"]
+financial = ["tls", "me-engine/financial", "dep:me-financial", "dep:fs2"]
 
 [dependencies]
 me-core = { workspace = true }
@@ -36,3 +37,11 @@ toml = { workspace = true }
 
 # Optional TLS support (enabled by --features tls)
 tokio-rustls = { workspace = true, optional = true }
+
+[dependencies.me-financial]
+path = "../me-financial"
+features = ["transport"]
+optional = true
+[dependencies.fs2]
+version = "0.4"
+optional = true

@@ -1,0 +1,10 @@
+route:
+  receiver: local-test
+  group_wait: 1s
+  group_interval: 5s
+  repeat_interval: 1h
+receivers:
+  - name: local-test
+    webhook_configs:
+      - url: http://alert-receiver:8080/alerts
+        send_resolved: true

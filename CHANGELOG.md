@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0-rc.1 — release candidate
+
+- Add exact PostgreSQL double-entry accounting, transactional reservations/outbox, immutable fee versions and atomic two-sided settlement.
+- Add an internal mTLS gateway with account permissions, idempotent requests, durable event cursors and reconciliation barriers.
+- Add opt-in funded matching with account ownership/STP, protected market execution and a durable decision feed independent of session replay.
+- Add a recovering Go client with private atomic checkpoints, original mutation retries, application-before-ACK ordering and mandatory ReplayGap reconciliation.
+- Add funded order/model/fault tests, PostgreSQL CI, Compose monitoring, maintenance checkpoints and verified backup/restore tools.
+- Update rustls to 0.23.46; restrict ledger dependencies to the PostgreSQL driver.
+
+### Migration and limits
+
+Legacy v2 payloads and legacy storage codecs remain unchanged. Financial messages are additive capabilities; a financial gateway refuses a server without them. Financial storage/schema version 1 requires a new ledger and empty financial book. No migration from legacy session ownership or existing balances is provided. Market, stop-market and trailing-stop-market requests require an execution protection price in financial mode.
+
+One active matcher and gateway are supported. Financial snapshots are verified against complete journal replay; journals are retained without online compaction. Manual funding and withdrawal record accounting only. Real funds, external transfers, public APIs, automatic failover and registry/binary publication are outside the pilot. Release remains gated by the recorded validation report.
+
 ## 0.1.0 — 2026-10-10
 
 First public release.

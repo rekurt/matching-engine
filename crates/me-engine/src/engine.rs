@@ -142,14 +142,14 @@ impl Engine {
 
     /// True when self-trade prevention is enabled and `order` would cross into a
     /// resting order from the same session. Shared by the normal place path and
-    /// the stop-trigger path so both honor STP identically — a market order has
-    /// no limit, so it is checked against any crossable price.
+    /// the stop-trigger path. Protected market orders check only executable levels;
+    /// legacy market orders without protection scan the opposite side.
     fn self_trade_blocked(&self, order: &Order) -> bool {
         if !self.self_trade_prevention {
             return false;
         }
         let limit_price = match order.order_type {
-            me_core::order::OrderType::Market => None,
+            me_core::order::OrderType::Market => self.book.market_protection(order.id),
             _ => Some(order.price),
         };
         self.book
@@ -872,13 +872,28 @@ impl Engine {
     /// meters them and updates risk counters, but does not return them to the
     /// client that happened to trigger the sweep.
     pub fn expire_gtd_now(&mut self) -> Vec<MatchEvent> {
-        let now = self.clock.now_ns();
+        self.expire_gtd_at(self.clock.now_ns())
+    }
+
+    /// Expire orders at a recorded timestamp so financial replay is deterministic.
+    pub fn expire_gtd_at(&mut self, now: u64) -> Vec<MatchEvent> {
+        self.expire_gtd_at_limit(now, usize::MAX)
+    }
+    #[cfg(feature = "financial")]
+    pub(crate) fn has_due_gtd(&self, now: u64) -> bool {
+        self.gtd_expiry
+            .peek()
+            .is_some_and(|Reverse((expiry, _))| *expiry <= now)
+    }
+    pub(crate) fn expire_gtd_at_limit(&mut self, now: u64, limit: usize) -> Vec<MatchEvent> {
         let mut buf = EventBuffer::default();
+        let mut processed = 0;
         while let Some(&Reverse((exp, id))) = self.gtd_expiry.peek() {
-            if exp > now {
+            if exp > now || processed >= limit {
                 break;
             }
             self.gtd_expiry.pop();
+            processed += 1;
             // Live book: cancel only if still resting with the same expiry,
             // guarding against an id that was reused by a newer order.
             if let Some(order) = self.book.get_order(id).copied() {

@@ -10,6 +10,7 @@
 
 # Integration
 
+- [Financial pilot](financial-pilot.md)
 - [Client integration](integration.md)
 - [Go client](clients/go.md)
 - [Python example](clients/python.md)

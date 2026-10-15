@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 me-io = { path = ".." }
 me-clock = { path = "../../me-clock" }
+me-core = { path = "../../me-core" }
 
 [[bin]]
 name = "decode_frame"
@@ -28,3 +29,5 @@ bench = false
 
 [profile.release]
 debug = 1
+
+[workspace]

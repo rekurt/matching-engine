@@ -425,6 +425,14 @@ class TLSTests(RuntimeTests):
         self.addCleanup(client.close)
         return client
 
+    def test_recovering_go_sdk_replays_committed_command(self):
+        self.start()
+        env=dict(os.environ,ME_RECOVERY_ENDPOINT=f'127.0.0.1:{self.port}',
+                 ME_RECOVERY_CA=str(self.directory/'ca.pem'),ME_RECOVERY_CERT=str(self.directory/'client.pem'),ME_RECOVERY_KEY=str(self.directory/'client.key'))
+        result=subprocess.run(['go','test','-race','-run','^TestRecoveringRuntimeTLS$','-count=1','-timeout','45s'],
+                              cwd=ROOT/'clients/go/meclient',env=env,capture_output=True,text=True,timeout=60)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
     def test_invalid_tls_files_fail_before_storage_or_listeners(self):
         self.config.write_text(self.config.read_text().replace('server.pem','missing.pem'))
         process=subprocess.Popen([str(BINARY),'--config',str(self.config)],stdout=self.log,stderr=self.log)

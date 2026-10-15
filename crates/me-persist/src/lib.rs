@@ -15,6 +15,7 @@
 //! not replace decision history or the session journal.
 
 pub mod codec;
+pub mod financial;
 pub mod snapshot;
 pub mod wal;
 

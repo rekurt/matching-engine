@@ -16,7 +16,7 @@ fuzz_target!(|data: &[u8]| {
     let clock = SystemClock;
     let mut state = ConnectionCodecState::new();
     state.state = ConnectionState::Active;
-    state.session_id = [0xAB; 16];
+    state.session_id = me_core::SessionId::from_bytes([0xAB; 16]);
 
     let mut cursor = data;
     while !cursor.is_empty() {

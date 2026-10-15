@@ -14,7 +14,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS cacher
 COPY --from=planner /build/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json -p me-server --features tls
+RUN cargo chef cook --release --recipe-path recipe.json -p me-server -p me-gateway --features me-server/financial
 
 # Stage 3 — full build
 FROM chef AS builder
@@ -22,7 +22,7 @@ COPY . .
 
 # Reuse pre-built deps from cacher stage
 COPY --from=cacher /build/target target
-RUN cargo build --release --locked -p me-server --features tls
+RUN cargo build --release --locked -p me-server -p me-gateway --features me-server/financial
 
 # Stage 4 — minimal runtime image
 FROM debian:bookworm-slim AS runtime
@@ -38,6 +38,7 @@ RUN apt-get update \
     && useradd  --uid 10001 --gid meuser --no-create-home --shell /sbin/nologin meuser
 
 COPY --from=builder /build/target/release/me-server /usr/local/bin/me-server
+COPY --from=builder /build/target/release/me-gateway /usr/local/bin/me-gateway
 
 # OCI image metadata
 ARG BUILD_DATE

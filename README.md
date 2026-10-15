@@ -12,7 +12,8 @@ A Rust service for matching spot orders with price-time priority. Each symbol is
 - Per-symbol risk checks, order ownership, maker-only flags and optional self-trade prevention.
 - Durable decisions, snapshots, session replay and idempotent mutation retries when WAL is enabled.
 - TLS/mTLS, Prometheus metrics, health checks and authenticated trading halt/resume.
-- Go client and Go, Python, TypeScript and Rust integration examples.
+- Go client, a separate recovering Go client with durable checkpoints, and four language examples.
+- Opt-in financial pilot: PostgreSQL double-entry ledger, funded reservations, quote fees, an internal mTLS gateway and durable settlement.
 
 ## Build and run
 
@@ -37,7 +38,7 @@ Use a fresh data directory for the example: order IDs and mutation request IDs a
 
 ## Service boundaries
 
-This is a single-node matching service. Account balances, reserved funds, settlement, replication and failover belong to the surrounding platform. Session IDs are bearer credentials, not account identities. Journals and retained mutation history grow with activity; online compaction and legacy journal migration are not implemented. The example clients do not implement full settlement or reconnect recovery.
+This is a single-node service. The optional [financial pilot](docs/src/financial-pilot.md) adds a PostgreSQL ledger and one internal gateway; it starts with a new ledger and empty book and requires protected market prices. Funding records are privileged accounting entries, with no bank or blockchain transfer. Legacy session IDs remain bearer credentials rather than account identities. Replication, automatic failover, public account APIs, online compaction and legacy journal migration are outside this release. Journals and retained request history grow with activity.
 
 No latency SLA is implied. Measure the complete durable path on your own storage and workload; engine microbenchmarks exclude network and synchronous journal costs.
 
@@ -49,6 +50,7 @@ The [online handbook](https://rekurt.github.io/matching-engine/docs/) is built f
 
 - [Quick start](docs/src/quickstart.md) and [configuration](docs/src/configuration.md)
 - [Wire protocol v2](docs/src/protocol.md) and [client integration](docs/src/integration.md)
+- [Financial pilot and operations](docs/src/financial-pilot.md)
 - [Architecture](docs/src/architecture.md), [HTTP API](docs/src/api.md) and [deployment/recovery](docs/src/deployment.md)
 - [Benchmarks](docs/src/benchmarks.md), [contributing](CONTRIBUTING.md) and [changelog](CHANGELOG.md)
 

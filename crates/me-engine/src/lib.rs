@@ -25,3 +25,6 @@ pub mod affinity;
 pub mod command;
 pub mod engine;
 pub mod router;
+
+#[cfg(feature = "financial")]
+pub mod financial;

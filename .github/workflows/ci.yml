@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, codex/financial-pilot]
   pull_request:
     branches: [main, master]
 
@@ -155,3 +155,64 @@ jobs:
             sleep 1
           done
           exit 1
+
+  financial:
+    name: PostgreSQL financial recovery
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: financial_test
+          POSTGRES_USER: financial_test
+          POSTGRES_PASSWORD: ephemeral-ci-only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U financial_test -d financial_test"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    env:
+      LEDGER_TEST_DATABASE_URL: postgres://financial_test:ephemeral-ci-only@127.0.0.1:5432/financial_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            target/
+          key: ${{ runner.os }}-financial-${{ hashFiles('**/Cargo.lock') }}
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client openssl
+      - run: cargo test -p me-ledger --test postgres --locked -- --ignored
+      - run: cargo build -p me-server -p me-gateway --features me-server/financial --locked
+      - run: python3 -m unittest discover -s scripts
+      - run: python3 scripts/financial-smoke.py --output "$RUNNER_TEMP/financial-smoke"
+      - run: python3 scripts/financial-faults.py --output "$RUNNER_TEMP/financial-faults"
+      - run: python3 scripts/financial-matrix.py --output "$RUNNER_TEMP/financial-matrix"
+      - run: python3 scripts/financial-soak.py --bin-dir target/debug --seconds 30 --output "$RUNNER_TEMP/financial-soak"
+      - run: docker build -t matching-engine:financial-pilot .
+      - run: python3 scripts/financial-disk-smoke.py --output "$RUNNER_TEMP/financial-disk"
+      - run: python3 scripts/financial-compose-smoke.py --output "$RUNNER_TEMP/financial-ops"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: financial-test-report
+          path: |
+            ${{ runner.temp }}/financial-smoke/report.json
+            ${{ runner.temp }}/financial-soak/report.json
+            ${{ runner.temp }}/financial-faults/report.json
+            ${{ runner.temp }}/financial-matrix/report.json
+            ${{ runner.temp }}/financial-disk/report.json
+            ${{ runner.temp }}/financial-ops/report.json
+
+  fuzz-smoke:
+    name: Decoder fuzz smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - run: mkdir -p "$RUNNER_TEMP/fuzz-pending" "$RUNNER_TEMP/fuzz-active"
+      - run: cargo fuzz run decode_frame "$RUNNER_TEMP/fuzz-pending" -- -max_total_time=10
+        working-directory: crates/me-io/fuzz
+      - run: cargo fuzz run decode_frame_handshaked "$RUNNER_TEMP/fuzz-active" -- -max_total_time=10
+        working-directory: crates/me-io/fuzz

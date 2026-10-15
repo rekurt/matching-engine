@@ -1,0 +1,30 @@
+groups:
+  - name: financial-pilot
+    rules:
+      - alert: FinancialAdmissionPaused
+        expr: me_gateway_ready == 0
+        for: 30s
+        labels: {severity: warning}
+        annotations: {summary: 'Financial admission is paused; check maintenance and reconciliation'}
+      - alert: FinancialGatewayUnavailable
+        expr: up{job="gateway"} == 0
+        for: 30s
+        labels: {severity: critical}
+        annotations: {summary: 'Gateway metrics cannot be read'}
+      - alert: FinancialReconciliationRequired
+        expr: me_gateway_reconciliation_required == 1
+        labels: {severity: critical}
+        annotations: {summary: 'New financial operations blocked pending reconciliation'}
+      - alert: FinancialSettlementBehind
+        expr: me_gateway_settlement_lag > 0 or me_gateway_outbox_pending > 0
+        for: 60s
+        labels: {severity: warning}
+        annotations: {summary: 'Financial results or reserved intentions are not draining'}
+      - alert: FinancialDiskReserve
+        expr: me_matcher_available_disk_bytes < me_matcher_minimum_free_bytes * 2
+        labels: {severity: critical}
+        annotations: {summary: 'Financial journal disk reserve is low; admission stops at the configured minimum'}
+      - alert: FinancialStuckIntent
+        expr: me_gateway_oldest_pending_seconds > 60
+        labels: {severity: warning}
+        annotations: {summary: 'A reserved financial intention has remained unresolved for over a minute'}
